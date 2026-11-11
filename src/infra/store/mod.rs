@@ -5,8 +5,13 @@ mod reads;
 
 use super::private_fs;
 use crate::contract::{Iso, Source};
-use rusqlite::{Connection, OptionalExtension, TransactionBehavior, params};
-use std::{fmt, io, path::Path, time::Duration};
+use rusqlite::{Connection, ErrorCode, OptionalExtension, TransactionBehavior, params};
+use std::{
+    fmt, io,
+    path::Path,
+    thread,
+    time::{Duration, Instant},
+};
 
 pub use reads::{Commit, SpoolLimits};
 
@@ -100,11 +105,14 @@ impl Store {
         // The file lives in the user's folder but could still be tampered with: do not let
         // a crafted schema run functions, and double-check cell sizes while reading.
         conn.execute_batch("PRAGMA trusted_schema = OFF; PRAGMA cell_size_check = ON;")?;
-        conn.query_row("PRAGMA journal_mode = WAL", [], |_| Ok(()))?;
+        // Switching to WAL and migrating can fail with "busy" without ever consulting the busy
+        // timeout when several processes start together (Windows shows it first), so both
+        // are retried for a few seconds.
+        retry_busy(|| Ok(conn.query_row("PRAGMA journal_mode = WAL", [], |_| Ok(()))?))?;
         // With WAL, NORMAL cannot corrupt the file; at worst the last commit is repeated,
         // and every write here is idempotent.
         conn.execute_batch("PRAGMA synchronous = NORMAL; PRAGMA cache_size = -8192;")?;
-        migrate(&mut conn)?;
+        retry_busy(|| migrate(&mut conn))?;
         Ok(Self { conn })
     }
 
@@ -163,6 +171,22 @@ impl Store {
     /// A device is connected once pairing stored its `device_id`.
     pub fn is_connected(&self) -> Result<bool> {
         Ok(self.meta_get("device_id")?.is_some())
+    }
+}
+
+/// Runs `op` again while SQLite says the database is busy, for up to 5 seconds.
+fn retry_busy<T>(mut op: impl FnMut() -> Result<T>) -> Result<T> {
+    let deadline = Instant::now() + Duration::from_secs(5);
+    loop {
+        match op() {
+            Err(Error::Sqlite(rusqlite::Error::SqliteFailure(e, _)))
+                if matches!(e.code, ErrorCode::DatabaseBusy | ErrorCode::DatabaseLocked)
+                    && Instant::now() < deadline =>
+            {
+                thread::sleep(Duration::from_millis(15));
+            }
+            other => return other,
+        }
     }
 }
 

@@ -218,18 +218,22 @@ fn hook_log_appends_lines_and_rotates_above_1_mib() {
 fn many_processes_opening_a_new_database_at_once_all_succeed() {
     // A hook and the scheduler can start together on a fresh machine. Each opens its own
     // connection, like separate processes would.
-    let dir = tempfile::tempdir().unwrap();
-    let path = dir.path().join("data");
-    let handles: Vec<_> = (0..12)
-        .map(|_| {
-            let path = path.clone();
-            thread::spawn(move || Store::open(&path).map(|_| ()).map_err(|e| e.to_string()))
-        })
-        .collect();
-    for h in handles {
-        h.join().unwrap().expect("every opener must succeed");
+    for round in 0..8 {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("data");
+        let handles: Vec<_> = (0..12)
+            .map(|_| {
+                let path = path.clone();
+                thread::spawn(move || Store::open(&path).map(|_| ()).map_err(|e| e.to_string()))
+            })
+            .collect();
+        for h in handles {
+            h.join()
+                .unwrap()
+                .unwrap_or_else(|e| panic!("round {round}: every opener must succeed: {e}"));
+        }
+        assert_eq!(user_version(&path), 1);
     }
-    assert_eq!(user_version(&path), 1);
 }
 
 #[test]
@@ -311,4 +315,66 @@ mod folders {
         fs::write(&file, "x").unwrap();
         assert!(private_fs::create_dir(&file).is_err());
     }
+}
+
+fn observation(id: &str) -> spendbranch::contract::UsageObservation {
+    serde_json::from_value(serde_json::json!({
+        "source": "codex", "externalSessionId": "s", "externalEventId": id,
+        "occurredAt": "2026-06-01T10:00:00.000Z", "model": "m", "agentRole": "main",
+        "counters": {"inputTokens": 1, "outputTokens": 1, "cacheReadTokens": 0,
+                     "cacheWriteTokens": 0, "reasoningTokens": 0},
+        "counterOrigin": "reported_delta", "parserVersion": "codex/v1"
+    }))
+    .unwrap()
+}
+
+#[test]
+fn several_writers_at_once_neither_fail_nor_lose_anything() {
+    use spendbranch::contract::{Iso, Source};
+    use spendbranch::infra::store::{Commit, SpoolLimits};
+    use spendbranch::sources::outcome::ReadOutcome;
+
+    const WRITERS: u64 = 6;
+    const ROUNDS: u64 = 15;
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("data");
+    Store::open(&path).unwrap();
+    let handles: Vec<_> = (0..WRITERS)
+        .map(|w| {
+            let path = path.clone();
+            thread::spawn(move || {
+                let mut store = Store::open(&path).map_err(|e| e.to_string())?;
+                let at = Iso::parse("2026-06-01T10:00:00Z").unwrap();
+                for round in 0..ROUNDS {
+                    let mut out = ReadOutcome::empty(Source::Codex, at);
+                    out.observations = (0..3)
+                        .map(|k| observation(&format!("e{w}_{round}_{k}")))
+                        .collect();
+                    out.seen = (0..5).map(|k| ((w << 32) | (round << 8) | k, at)).collect();
+                    // the commit counts the buffer first (a read) and then writes: it must take
+                    // the write lock up front, or a writer that got in between makes it fail
+                    match store.commit_read(&out, SpoolLimits::default()) {
+                        Ok(Commit::Stored) => {}
+                        other => return Err(format!("writer {w} round {round}: {other:?}")),
+                    }
+                }
+                Ok(())
+            })
+        })
+        .collect();
+    for h in handles {
+        h.join().unwrap().expect("no writer may fail");
+    }
+    let store = Store::open(&path).unwrap();
+    assert_eq!(
+        store.pending_counts().unwrap().0,
+        WRITERS * ROUNDS * 3,
+        "every observation was buffered once"
+    );
+    assert_eq!(
+        store
+            .seen_count(spendbranch::contract::Source::Codex)
+            .unwrap(),
+        WRITERS * ROUNDS * 5
+    );
 }

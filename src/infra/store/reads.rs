@@ -3,7 +3,7 @@
 use super::{Result, Store};
 use crate::contract::{CoverageReport, Source};
 use crate::sources::outcome::{ReadOutcome, ReaderState};
-use rusqlite::{OptionalExtension, params};
+use rusqlite::{OptionalExtension, TransactionBehavior, params};
 
 /// How long an event key is remembered.
 const SEEN_KEEP_MS: i64 = 45 * 24 * 60 * 60 * 1000;
@@ -93,7 +93,11 @@ impl Store {
             .iter()
             .map(serde_json::to_string)
             .collect::<std::result::Result<Vec<_>, _>>()?;
-        let tx = self.conn.transaction()?;
+        // Immediate: take the write lock now, waiting for it. A transaction that starts as a
+        // read and later wants to write fails at once if another process wrote in between.
+        let tx = self
+            .conn
+            .transaction_with_behavior(TransactionBehavior::Immediate)?;
         if !payloads.is_empty() {
             let (items, bytes): (i64, i64) = tx.query_row(
                 "SELECT COUNT(*), COALESCE(SUM(LENGTH(payload) + 1), 0) FROM spool",
@@ -168,7 +172,9 @@ impl Store {
 
     /// Records gaps without touching cursors, e.g. `buffer_full` after a refused commit.
     pub fn add_pending_coverage(&mut self, reports: &[CoverageReport]) -> Result<()> {
-        let tx = self.conn.transaction()?;
+        let tx = self
+            .conn
+            .transaction_with_behavior(TransactionBehavior::Immediate)?;
         {
             let mut insert =
                 tx.prepare_cached("INSERT INTO pending_coverage(payload) VALUES(?1)")?;
