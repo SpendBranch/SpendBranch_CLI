@@ -1,0 +1,32 @@
+type
+sessionId
+timestamp
+version
+isSidechain
+gitBranch
+requestId
+message.id
+message.model
+message.usage.input_tokens
+message.usage.output_tokens
+message.usage.cache_read_input_tokens
+message.usage.cache_creation_input_tokens
+message.usage.cache_creation.ephemeral_1h_input_tokens
+message.usage.output_tokens_details.thinking_tokens
+message.usage.server_tool_use.web_search_requests
+bridge-session.ownerOrganizationUuid
+local:cwd (only on the device, becomes the repository key)
+local:.claude.json oauthAccount.organizationUuid
+local:.claude.json oauthAccount.billingType
+otlp:event.name
+otlp:event.timestamp
+otlp:session.id
+otlp:request_id
+otlp:model
+otlp:input_tokens
+otlp:output_tokens
+otlp:cache_read_tokens
+otlp:cache_creation_tokens
+otlp:cache_creation_1h_tokens
+otlp:query_source
+otlp:organization.id

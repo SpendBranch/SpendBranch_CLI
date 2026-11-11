@@ -1,0 +1,25 @@
+timestamp
+type
+ordinal
+session_meta.id
+session_meta.session_id
+session_meta.parent_thread_id
+session_meta.cli_version
+session_meta.model_provider
+session_meta.creator_account_id
+session_meta.git.repository_url (becomes host/owner/name, without credentials)
+session_meta.git.branch
+turn_context.turn_id
+turn_context.model
+thread_settings_applied.thread_settings.model
+token_count.rate_limits.plan_type
+token_usage_record.thread_id
+token_usage_record.turn_id
+token_usage_record.response_id
+token_usage_record.usage.input_tokens
+token_usage_record.usage.cached_input_tokens
+token_usage_record.usage.cache_write_input_tokens
+token_usage_record.usage.output_tokens
+token_usage_record.usage.reasoning_output_tokens
+token_usage_record.usage.total_tokens
+local:token_usage_record.thread_token_usage (device-side verification only)
