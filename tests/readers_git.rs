@@ -4,7 +4,7 @@ use std::{
     fs,
     path::{Path, PathBuf},
     process::Command,
-    time::{Duration, Instant},
+    time::Duration,
 };
 
 fn git_exists() -> bool {
@@ -97,7 +97,7 @@ fn a_missing_git_is_just_no_repository() {
 #[cfg(unix)]
 #[test]
 fn a_git_that_hangs_is_stopped_after_the_timeout() {
-    use std::os::unix::fs::PermissionsExt;
+    use std::{os::unix::fs::PermissionsExt, time::Instant};
     let tmp = tempfile::tempdir().unwrap();
     let fake = tmp.path().join("slow-git");
     fs::write(&fake, "#!/bin/sh\nsleep 10\n").unwrap();
