@@ -1,0 +1,102 @@
+SpendBranch Source-Available Audit License, version 1.0
+
+Copyright (c) 2026 SpendBranch. All rights reserved.
+
+This repository is public so that anyone can inspect, in full, the software
+that SpendBranch asks them to install on their machine. It is source-available
+for auditing. It is NOT open source software.
+
+1. DEFINITIONS
+
+"Software" means everything in this repository: source code, schemas, test
+fixtures, build and CI configuration, and documentation.
+
+"SpendBranch" means the owner of this repository and its authorized
+representatives.
+
+"Official Binary" means an executable built and distributed by SpendBranch
+through the channels SpendBranch designates for that purpose.
+
+"Audit Purpose" means inspecting, verifying, testing or researching the
+Software in order to understand what it does, to assess its security and
+privacy properties, or to confirm that an Official Binary corresponds to this
+source code.
+
+2. WHAT YOU MAY DO
+
+You may, free of charge and for an Audit Purpose only:
+
+a. view, read, search and analyze the Software, including with automated
+   analysis tools;
+b. download an unmodified copy of the Software, build it unmodified on your own
+   machines, and run its tests and the resulting build, solely to carry out the
+   audit (including comparing the result with an Official Binary);
+c. quote short excerpts of the Software, with attribution, in security
+   reports, research, reviews and technical discussion;
+d. report issues, vulnerabilities and suggestions to SpendBranch.
+
+3. WHAT YOU MAY NOT DO
+
+Except as SpendBranch expressly permits in writing, you may not:
+
+a. use the Software, or anything derived from it, for any commercial purpose,
+   or in any product or service, whether or not you charge for it;
+b. fork the Software, or create any derivative work from it;
+c. modify, adapt, translate, port or patch the Software, other than the
+   temporary, local, unredistributed changes strictly needed to run an audit
+   (for example, adding logging to observe behavior), which you must discard
+   when the audit ends;
+d. copy, publish, host, distribute, sublicense, sell, lease or otherwise make
+   the Software available to anyone else, in source or binary form, in whole
+   or in part (other than the excerpts allowed in section 2c);
+e. run or deploy a build you made yourself as a substitute for an Official
+   Binary, or offer one to others;
+f. remove or alter any copyright, license or attribution notice;
+g. use the SpendBranch name, logos or marks to endorse or promote anything
+   without permission.
+
+Using an Official Binary is governed by the terms under which SpendBranch
+provides it, not by this license.
+
+4. GITHUB AND OTHER HOSTING PLATFORMS
+
+The terms of a hosting platform may let users view or fork public
+repositories using that platform's features. Those platform features do not
+grant you any license to the Software beyond this license. A fork made with a
+platform feature is still subject to this license, and sections 3b and 3d
+still apply to it.
+
+5. THIRD-PARTY COMPONENTS
+
+This license covers only the material SpendBranch owns. Third-party
+dependencies are not part of the Software; each one stays under its own
+license.
+
+6. FEEDBACK
+
+If you send SpendBranch feedback, suggestions or reports, SpendBranch may use
+them without restriction and without any obligation to you.
+
+7. NO RIGHTS BEYOND THIS LICENSE
+
+SpendBranch keeps all rights not expressly granted here. No patent license is
+granted. Nothing in this license transfers ownership of the Software to you.
+
+8. TERMINATION
+
+This license ends automatically, without notice, if you breach any of its
+terms. When it ends you must stop all use of the Software and delete every
+copy you hold. Sections 3 to 9 survive termination.
+
+9. DISCLAIMER AND LIMITATION OF LIABILITY
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING THE WARRANTIES OF MERCHANTABILITY, FITNESS FOR A PARTICULAR
+PURPOSE AND NON-INFRINGEMENT. TO THE MAXIMUM EXTENT PERMITTED BY LAW,
+SPENDBRANCH IS NOT LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY ARISING
+FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR ITS USE.
+
+10. CONTACT
+
+To request permission for anything this license does not allow, contact
+SpendBranch through the channels published on its official website.
