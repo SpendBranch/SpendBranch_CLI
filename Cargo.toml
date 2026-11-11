@@ -1,0 +1,22 @@
+[package]
+name = "spendbranch"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.89" # File::try_lock (stable in 1.89)
+description = "SpendBranch CLI: collects only authorized AI agent session metadata"
+publish = false
+license-file = "LICENSE"
+
+[[bin]]
+name = "spendbranch"
+path = "src/main.rs"
+
+[dev-dependencies]
+serde_json = "1"
+jsonschema = { version = "0.30", default-features = false }
+
+[profile.release]
+opt-level = "z"
+lto = true
+codegen-units = 1
+strip = true

@@ -1,0 +1,268 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "properties": {
+    "contractVersion": {
+      "type": "string",
+      "const": "ingest/v1"
+    },
+    "installationId": {
+      "type": "string",
+      "format": "uuid",
+      "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
+    },
+    "observations": {
+      "maxItems": 500,
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "source": {
+            "type": "string",
+            "enum": [
+              "claude_code",
+              "codex"
+            ]
+          },
+          "externalSessionId": {
+            "type": "string",
+            "pattern": "^[A-Za-z0-9_:-]{1,128}$"
+          },
+          "externalEventId": {
+            "type": "string",
+            "pattern": "^[A-Za-z0-9_:-]{1,128}$"
+          },
+          "occurredAt": {
+            "type": "string",
+            "format": "date-time",
+            "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d:[0-5]\\d(?:\\.\\d+)?(?:Z|([+-](?:[01]\\d|2[0-3]):[0-5]\\d)))$"
+          },
+          "model": {
+            "type": "string",
+            "pattern": "^[A-Za-z0-9<>._-]{1,64}$"
+          },
+          "agentRole": {
+            "type": "string",
+            "enum": [
+              "main",
+              "subagent"
+            ]
+          },
+          "counters": {
+            "type": "object",
+            "properties": {
+              "inputTokens": {
+                "anyOf": [
+                  {
+                    "type": "integer",
+                    "minimum": 0,
+                    "maximum": 1000000000000
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "outputTokens": {
+                "anyOf": [
+                  {
+                    "type": "integer",
+                    "minimum": 0,
+                    "maximum": 1000000000000
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "cacheReadTokens": {
+                "anyOf": [
+                  {
+                    "type": "integer",
+                    "minimum": 0,
+                    "maximum": 1000000000000
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "cacheWriteTokens": {
+                "anyOf": [
+                  {
+                    "type": "integer",
+                    "minimum": 0,
+                    "maximum": 1000000000000
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "reasoningTokens": {
+                "anyOf": [
+                  {
+                    "type": "integer",
+                    "minimum": 0,
+                    "maximum": 1000000000000
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "cacheWrite1hTokens": {
+                "anyOf": [
+                  {
+                    "type": "integer",
+                    "minimum": 0,
+                    "maximum": 1000000000000
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "webSearchRequests": {
+                "anyOf": [
+                  {
+                    "type": "integer",
+                    "minimum": 0,
+                    "maximum": 1000000000000
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              }
+            },
+            "required": [
+              "inputTokens",
+              "outputTokens",
+              "cacheReadTokens",
+              "cacheWriteTokens",
+              "reasoningTokens"
+            ],
+            "additionalProperties": false
+          },
+          "counterOrigin": {
+            "type": "string",
+            "enum": [
+              "reported_delta",
+              "derived_from_cumulative"
+            ]
+          },
+          "baseEventId": {
+            "type": "string",
+            "pattern": "^[A-Za-z0-9_:-]{1,128}$"
+          },
+          "parserVersion": {
+            "type": "string",
+            "pattern": "^[a-z0-9-]{1,48}\\/v[0-9]{1,4}$"
+          },
+          "sourceVersion": {
+            "type": "string",
+            "pattern": "^[A-Za-z0-9._+-]{1,32}$"
+          },
+          "payerAccountRef": {
+            "type": "string",
+            "pattern": "^[A-Za-z0-9._:-]{1,200}$"
+          },
+          "payerEvidence": {
+            "type": "string",
+            "enum": [
+              "transcript",
+              "local_account",
+              "otlp"
+            ]
+          },
+          "billingMode": {
+            "type": "string",
+            "enum": [
+              "subscription",
+              "api"
+            ]
+          },
+          "repository": {
+            "type": "string",
+            "maxLength": 200,
+            "pattern": "^[a-z0-9.-]+(:[0-9]{1,5})?(\\/[A-Za-z0-9._~-]+){2,}$"
+          },
+          "branch": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 255,
+            "pattern": "^[^\\p{Cc}\\p{Cf}\\s]+$"
+          }
+        },
+        "required": [
+          "source",
+          "externalSessionId",
+          "externalEventId",
+          "occurredAt",
+          "model",
+          "agentRole",
+          "counters",
+          "counterOrigin",
+          "parserVersion"
+        ],
+        "additionalProperties": false
+      }
+    },
+    "coverage": {
+      "maxItems": 50,
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "source": {
+            "type": "string",
+            "enum": [
+              "claude_code",
+              "codex"
+            ]
+          },
+          "from": {
+            "type": "string",
+            "format": "date-time",
+            "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d:[0-5]\\d(?:\\.\\d+)?(?:Z|([+-](?:[01]\\d|2[0-3]):[0-5]\\d)))$"
+          },
+          "to": {
+            "type": "string",
+            "format": "date-time",
+            "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d:[0-5]\\d(?:\\.\\d+)?(?:Z|([+-](?:[01]\\d|2[0-3]):[0-5]\\d)))$"
+          },
+          "state": {
+            "type": "string",
+            "enum": [
+              "observed",
+              "unavailable"
+            ]
+          },
+          "reason": {
+            "type": "string",
+            "enum": [
+              "buffer_full",
+              "adapter_error",
+              "source_missing",
+              "unsupported_format"
+            ]
+          }
+        },
+        "required": [
+          "source",
+          "from",
+          "to",
+          "state"
+        ],
+        "additionalProperties": false
+      }
+    }
+  },
+  "required": [
+    "contractVersion",
+    "installationId",
+    "observations"
+  ],
+  "additionalProperties": false
+}
