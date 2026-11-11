@@ -1,0 +1,31 @@
+{
+  "observations": [
+    {
+      "source": "claude_code",
+      "externalSessionId": "sess_synth_1",
+      "externalEventId": "msg:abc123",
+      "occurredAt": "2026-01-01T10:00:01.000Z",
+      "model": "claude-test-1",
+      "agentRole": "main",
+      "counters": {
+        "inputTokens": 10,
+        "outputTokens": 20,
+        "cacheReadTokens": 30,
+        "cacheWriteTokens": 40,
+        "reasoningTokens": null,
+        "cacheWrite1hTokens": null,
+        "webSearchRequests": null
+      },
+      "counterOrigin": "reported_delta",
+      "parserVersion": "claude-code/v2",
+      "sourceVersion": "2.1.300",
+      "branch": "main"
+    }
+  ],
+  "newKeys": [
+    "msg:abc123"
+  ],
+  "unsupportedLines": [],
+  "untestedVersion": null,
+  "format": "ok"
+}

@@ -1,0 +1,16 @@
+{
+  "threadId": "thread_synth_1",
+  "sessionId": "sess_codex_1",
+  "observations": [],
+  "newKeys": [],
+  "lastOrdinal": 2,
+  "foreignRecords": 0,
+  "unsupportedLines": [
+    {
+      "line": 3,
+      "code": "inconsistent_counters"
+    }
+  ],
+  "untestedVersion": null,
+  "format": "ok"
+}

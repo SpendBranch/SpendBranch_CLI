@@ -1,0 +1,58 @@
+[
+  {
+    "input": "git@github.com:Acme/Portal.git",
+    "expected": "github.com/acme/portal"
+  },
+  {
+    "input": "ssh://git@gitlab.example.com:2222/group/sub/app.git",
+    "expected": "gitlab.example.com/group/sub/app"
+  },
+  {
+    "input": "https://user:tok_FIXTURE_FAKE@github.com/acme/portal.git",
+    "expected": "github.com/acme/portal"
+  },
+  {
+    "input": "http://github.com/acme/portal/",
+    "expected": "github.com/acme/portal"
+  },
+  {
+    "input": "git://example.com/Owner/Repo.git",
+    "expected": "example.com/owner/repo"
+  },
+  {
+    "input": "https://gitlab.com/group/subgroup/project",
+    "expected": "gitlab.com/group/subgroup/project"
+  },
+  {
+    "input": "https://GitHub.com/Acme/Mixed-Case_Repo",
+    "expected": "github.com/acme/mixed-case_repo"
+  },
+  {
+    "input": "/home/dev/repo",
+    "expected": null
+  },
+  {
+    "input": "file:///home/dev/repo.git",
+    "expected": null
+  },
+  {
+    "input": "https://github.com/acme",
+    "expected": null
+  },
+  {
+    "input": "ftp://github.com/acme/portal",
+    "expected": null
+  },
+  {
+    "input": "not a url",
+    "expected": null
+  },
+  {
+    "input": "",
+    "expected": null
+  },
+  {
+    "input": "https://example.com/a/a/a/a/a/a/a/a/a/a/a/a/a/a/a/a/a/a/a/a/a/a/a/a/a/a/a/a/a/a/a/a/a/a/a/a/a/a/a/a/a/a/a/a/a/a/a/a/a/a/a/a/a/a/a/a/a/a/a/a/a/a/a/a/a/a/a/a/a/a/a/a/a/a/a/a/a/a/a/a/a/a/a/a/a/a/a/a/a/a/a/a/a/a/a/a/a/a/a/a/a/a/a/a/a/a/a/a/a/a/a/a/a/a/a/a/a/a/a/a/repo",
+    "expected": null
+  }
+]

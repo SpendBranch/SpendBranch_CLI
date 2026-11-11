@@ -1,0 +1,3 @@
+{"timestamp":"2026-01-01T10:00:00.000Z","type":"session_meta","ordinal":0,"payload":{"id":"thread_synth_1","session_id":"sess_codex_1","cli_version":"0.160.0"}}
+{"timestamp":"2026-01-01T10:00:01.000Z","type":"turn_context","ordinal":1,"payload":{"turn_id":"turn_1","model":"gpt-test-1"}}
+{"timestamp":"2026-01-01T10:00:02.000Z","type":"event_msg","ordinal":2,"payload":{"type":"token_count","rate_limits":{"plan_type":"plus"}}}

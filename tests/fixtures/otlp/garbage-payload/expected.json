@@ -1,0 +1,16 @@
+{
+  "observations": [],
+  "rejected": 0,
+  "total": 0,
+  "relayPayload": {
+    "resourceLogs": [
+      {
+        "scopeLogs": [
+          {
+            "logRecords": []
+          }
+        ]
+      }
+    ]
+  }
+}

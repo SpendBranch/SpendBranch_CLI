@@ -1,0 +1,37 @@
+{
+  "threadId": "thread_synth_1",
+  "sessionId": "sess_codex_1",
+  "observations": [
+    {
+      "source": "codex",
+      "externalSessionId": "sess_codex_1",
+      "externalEventId": "resp_1",
+      "occurredAt": "2026-01-01T10:00:02.000Z",
+      "model": "gpt-test-1",
+      "agentRole": "main",
+      "counters": {
+        "inputTokens": 500,
+        "outputTokens": 200,
+        "cacheReadTokens": 400,
+        "cacheWriteTokens": 100,
+        "reasoningTokens": 50
+      },
+      "counterOrigin": "reported_delta",
+      "parserVersion": "codex/v1",
+      "sourceVersion": "0.160.0"
+    }
+  ],
+  "newKeys": [
+    "resp_1"
+  ],
+  "lastOrdinal": 3,
+  "foreignRecords": 0,
+  "unsupportedLines": [
+    {
+      "line": 4,
+      "code": "conflicting_response"
+    }
+  ],
+  "untestedVersion": null,
+  "format": "ok"
+}

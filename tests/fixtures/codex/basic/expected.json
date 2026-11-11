@@ -1,0 +1,61 @@
+{
+  "threadId": "thread_synth_1",
+  "sessionId": "sess_codex_1",
+  "observations": [
+    {
+      "source": "codex",
+      "externalSessionId": "sess_codex_1",
+      "externalEventId": "resp_1",
+      "occurredAt": "2026-01-01T10:00:02.000Z",
+      "model": "gpt-test-1",
+      "agentRole": "main",
+      "counters": {
+        "inputTokens": 500,
+        "outputTokens": 200,
+        "cacheReadTokens": 400,
+        "cacheWriteTokens": 100,
+        "reasoningTokens": 50
+      },
+      "counterOrigin": "reported_delta",
+      "parserVersion": "codex/v1",
+      "sourceVersion": "0.160.0",
+      "payerAccountRef": "acct_synth_9",
+      "payerEvidence": "transcript",
+      "billingMode": "subscription",
+      "repository": "github.com/acme/portal",
+      "branch": "feat/x"
+    },
+    {
+      "source": "codex",
+      "externalSessionId": "sess_codex_1",
+      "externalEventId": "resp_2",
+      "occurredAt": "2026-01-01T10:00:04.000Z",
+      "model": "gpt-test-1",
+      "agentRole": "main",
+      "counters": {
+        "inputTokens": 500,
+        "outputTokens": 300,
+        "cacheReadTokens": 1500,
+        "cacheWriteTokens": 0,
+        "reasoningTokens": 0
+      },
+      "counterOrigin": "reported_delta",
+      "parserVersion": "codex/v1",
+      "sourceVersion": "0.160.0",
+      "payerAccountRef": "acct_synth_9",
+      "payerEvidence": "transcript",
+      "billingMode": "subscription",
+      "repository": "github.com/acme/portal",
+      "branch": "feat/x"
+    }
+  ],
+  "newKeys": [
+    "resp_1",
+    "resp_2"
+  ],
+  "lastOrdinal": 4,
+  "foreignRecords": 0,
+  "unsupportedLines": [],
+  "untestedVersion": null,
+  "format": "ok"
+}
