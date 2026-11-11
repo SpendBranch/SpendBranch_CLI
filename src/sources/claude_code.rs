@@ -187,38 +187,75 @@ fn max(a: Option<u64>, b: Option<u64>) -> Option<u64> {
     }
 }
 
+/// Reads a whole text at once. Same result as feeding its lines to a `Parser`.
 pub fn read(text: &str, options: &ReadOptions) -> ReadResult {
-    let mut order: Vec<String> = Vec::new();
-    let mut messages: HashMap<String, Pending> = HashMap::new();
-    let mut unsupported = Vec::new();
-    let mut recognized = 0usize;
-    let mut payer: Option<String> = None;
-    let mut untested: Option<String> = None;
+    let mut parser = Parser::new(options);
+    for raw in text.split('\n') {
+        parser.push_line(raw);
+    }
+    parser.finish()
+}
 
-    for (index, raw) in text.split('\n').enumerate() {
-        let n = index + 1;
+/// Incremental form of `read`, for readers that stream a file line by line.
+/// Memory grows with the number of distinct requests, never with the text.
+pub struct Parser<'a> {
+    options: &'a ReadOptions<'a>,
+    order: Vec<String>,
+    messages: HashMap<String, Pending>,
+    unsupported: Vec<usize>,
+    line: usize,
+    recognized: usize,
+    payer: Option<String>,
+    untested: Option<String>,
+}
+
+impl<'a> Parser<'a> {
+    pub fn new(options: &'a ReadOptions<'a>) -> Self {
+        Self {
+            options,
+            order: Vec::new(),
+            messages: HashMap::new(),
+            unsupported: Vec::new(),
+            line: 0,
+            recognized: 0,
+            payer: None,
+            untested: None,
+        }
+    }
+
+    /// A line the reader refused to load (too long to be a usage record). It counts as
+    /// an unsupported line, so a file full of them becomes a gap.
+    pub fn push_unsupported_line(&mut self) {
+        self.line += 1;
+        self.unsupported.push(self.line);
+    }
+
+    /// One line, without its line break.
+    pub fn push_line(&mut self, raw: &str) {
+        self.line += 1;
+        let n = self.line;
         if raw.trim().is_empty() {
-            continue;
+            return;
         }
         let Ok(Obj(Some(line))) = serde_json::from_str::<Obj<Line>>(raw) else {
-            unsupported.push(n);
-            continue;
+            self.unsupported.push(n);
+            return;
         };
         if line.kind.str() == Some("bridge-session") {
-            recognized += 1;
+            self.recognized += 1;
             if let Some(owner) = line
                 .owner_organization_uuid
                 .str()
                 .filter(|o| AccountRef::new(o).is_some())
             {
-                payer = Some(owner.to_owned());
+                self.payer = Some(owner.to_owned());
             }
-            continue;
+            return;
         }
         let Some(session_id) = line.session_id.str().filter(|s| is_id(s)) else {
-            continue;
+            return;
         };
-        recognized += 1;
+        self.recognized += 1;
         let line_version = line
             .version
             .str()
@@ -226,23 +263,23 @@ pub fn read(text: &str, options: &ReadOptions) -> ReadResult {
         if let Some(v) =
             line_version.filter(|v| !version::in_range(v, &version::CLAUDE_CODE_TESTED))
         {
-            untested = Some(v.to_owned());
+            self.untested = Some(v.to_owned());
         }
         if line.kind.str() != Some("assistant") {
-            continue;
+            return;
         }
         let (Some(message), Some(usage)) = (
             line.message.0.as_ref(),
             line.message.0.as_ref().and_then(|m| m.usage.0.as_ref()),
         ) else {
-            continue;
+            return;
         };
         if message.model.str() == Some("<synthetic>") {
-            continue;
+            return;
         }
         let Some(model) = message.model.str().filter(|m| Model::new(m).is_some()) else {
-            unsupported.push(n);
-            continue;
+            self.unsupported.push(n);
+            return;
         };
         let key = match (line.request_id.str().filter(|r| is_id(r)), message.id.str()) {
             (Some(request), _) => Some(request.to_owned()),
@@ -252,8 +289,8 @@ pub fn read(text: &str, options: &ReadOptions) -> ReadResult {
         let counters = counters_of(usage);
         let at = line.timestamp.str().and_then(Iso::parse);
         let (Some(key), Some(counters), Some(at)) = (key, counters, at) else {
-            unsupported.push(n);
-            continue;
+            self.unsupported.push(n);
+            return;
         };
         let at = at.millis();
         let branch = line
@@ -261,16 +298,16 @@ pub fn read(text: &str, options: &ReadOptions) -> ReadResult {
             .str()
             .filter(|b| Branch::new(b).is_some())
             .map(str::to_owned);
-        let role = if options.subagent_file || line.is_sidechain == Leaf::Bool(true) {
+        let role = if self.options.subagent_file || line.is_sidechain == Leaf::Bool(true) {
             AgentRole::Subagent
         } else {
             AgentRole::Main
         };
         let version = line_version.map(str::to_owned);
-        match messages.get_mut(&key) {
+        match self.messages.get_mut(&key) {
             None => {
-                order.push(key.clone());
-                messages.insert(
+                self.order.push(key.clone());
+                self.messages.insert(
                     key,
                     Pending {
                         session_id: session_id.to_owned(),
@@ -286,7 +323,7 @@ pub fn read(text: &str, options: &ReadOptions) -> ReadResult {
             }
             Some(known) if known.model != model || known.session_id != session_id => {
                 known.broken = true;
-                unsupported.push(n);
+                self.unsupported.push(n);
             }
             Some(known) => {
                 known.at = known.at.min(at);
@@ -299,32 +336,39 @@ pub fn read(text: &str, options: &ReadOptions) -> ReadResult {
         }
     }
 
-    let mut observations = Vec::new();
-    let mut new_keys = Vec::new();
-    for key in order {
-        let m = &messages[&key];
-        if m.broken || options.seen.is_some_and(|s| s.contains(&key_hash(&key))) {
-            continue;
+    pub fn finish(self) -> ReadResult {
+        let mut observations = Vec::new();
+        let mut new_keys = Vec::new();
+        for key in self.order {
+            let m = &self.messages[&key];
+            if m.broken
+                || self
+                    .options
+                    .seen
+                    .is_some_and(|s| s.contains(&key_hash(&key)))
+            {
+                continue;
+            }
+            if m.counters[..4].iter().all(|c| c.is_none_or(|c| c == 0)) {
+                continue; // nothing priced in this message
+            }
+            if let Some(observation) = observation_of(&key, m, self.payer.as_deref()) {
+                observations.push(observation);
+                new_keys.push(key);
+            }
         }
-        if m.counters[..4].iter().all(|c| c.is_none_or(|c| c == 0)) {
-            continue; // nothing priced in this message
-        }
-        if let Some(observation) = observation_of(&key, m, payer.as_deref()) {
-            observations.push(observation);
-            new_keys.push(key);
-        }
-    }
-    let unsupported_nonempty = !unsupported.is_empty();
-    ReadResult {
-        observations,
-        new_keys,
-        unsupported_lines: unsupported,
-        untested_version: untested,
-        format: if recognized == 0 && unsupported_nonempty {
+        let format = if self.recognized == 0 && !self.unsupported.is_empty() {
             Format::UnsupportedFormat
         } else {
             Format::Ok
-        },
+        };
+        ReadResult {
+            observations,
+            new_keys,
+            unsupported_lines: self.unsupported,
+            untested_version: self.untested,
+            format,
+        }
     }
 }
 

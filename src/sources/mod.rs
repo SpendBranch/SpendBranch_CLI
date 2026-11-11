@@ -15,7 +15,9 @@
 //! - repository URLs with international host names or percent-escapes give no repository.
 pub mod claude_code;
 pub mod codex;
-mod json;
+pub mod coverage;
+pub(crate) mod json;
+pub mod outcome;
 pub mod repository;
 pub mod version;
 

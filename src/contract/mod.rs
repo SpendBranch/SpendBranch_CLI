@@ -16,6 +16,16 @@ pub enum Source {
     Codex,
 }
 
+impl Source {
+    /// The contract's name for the source, also the key used in `state.db`.
+    pub fn name(self) -> &'static str {
+        match self {
+            Source::ClaudeCode => "claude_code",
+            Source::Codex => "codex",
+        }
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum AgentRole {
@@ -264,6 +274,19 @@ pub struct CoverageReport {
 }
 
 impl CoverageReport {
+    pub fn source(&self) -> Source {
+        self.source
+    }
+    pub fn from(&self) -> Iso {
+        self.from
+    }
+    pub fn to(&self) -> Iso {
+        self.to
+    }
+    pub fn state(&self) -> CoverageState {
+        self.state
+    }
+
     /// `None` unless `from` precedes `to`.
     pub fn new(source: Source, from: Iso, to: Iso, state: CoverageState) -> Option<Self> {
         (from < to).then_some(Self {

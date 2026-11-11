@@ -194,3 +194,77 @@ fn nothing_but_allowlisted_metadata_reaches_the_output() {
         }
     }
 }
+
+#[test]
+fn a_rollout_read_in_two_parts_gives_what_one_read_gives() {
+    use codex::{Parser, ReadOptions};
+    let opts = ReadOptions::default();
+    for name in [
+        "basic",
+        "model-switch",
+        "subagent",
+        "foreign-record",
+        "broken-line-skips-step-check",
+        "untested-version",
+    ] {
+        let text = fs::read_to_string(
+            Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("tests/fixtures/codex")
+                .join(name)
+                .join("input.jsonl"),
+        )
+        .unwrap();
+        let whole = codex::read(&text, &opts);
+        let lines: Vec<&str> = text
+            .split_inclusive('\n')
+            .map(|l| l.trim_end_matches('\n'))
+            .collect();
+        let mut checked = 0;
+        for split in 1..lines.len() {
+            let mut first = Parser::new(&opts);
+            lines[..split].iter().for_each(|l| first.push_line(l));
+            let (a, resume) = first.finish();
+            let Some(resume) = resume else { continue }; // that prefix is not readable on its own
+            let mut second = Parser::resume(&opts, resume);
+            lines[split..].iter().for_each(|l| second.push_line(l));
+            let (b, _) = second.finish();
+            // The billing mode is learned from a plan event that may come after the records it
+            // applies to, so a read cut before that event cannot know it: compare the rest.
+            let plain = |o: &spendbranch::contract::UsageObservation| {
+                let mut o = o.clone();
+                o.billing_mode = None;
+                o
+            };
+            let joined: Vec<_> = a
+                .observations
+                .iter()
+                .chain(&b.observations)
+                .map(plain)
+                .collect();
+            let expected: Vec<_> = whole.observations.iter().map(plain).collect();
+            assert_eq!(joined, expected, "{name} split at line {split}");
+            assert_eq!(
+                b.last_ordinal, whole.last_ordinal,
+                "{name} split at line {split}"
+            );
+            checked += 1;
+        }
+        assert!(checked > 0, "{name}: no split point was usable");
+    }
+}
+
+#[test]
+fn a_resume_state_survives_being_saved_as_json() {
+    use codex::{Parser, ReadOptions, Resume};
+    let opts = ReadOptions::default();
+    let text = fs::read_to_string(
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/codex/basic/input.jsonl"),
+    )
+    .unwrap();
+    let mut p = Parser::new(&opts);
+    text.lines().for_each(|l| p.push_line(l));
+    let (_, resume) = p.finish();
+    let resume = resume.unwrap();
+    let again: Resume = serde_json::from_str(&serde_json::to_string(&resume).unwrap()).unwrap();
+    assert_eq!(again, resume);
+}

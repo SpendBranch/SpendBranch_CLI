@@ -4,4 +4,5 @@ pub mod cli;
 pub mod commands;
 pub mod contract;
 pub mod infra;
+pub mod readers;
 pub mod sources;

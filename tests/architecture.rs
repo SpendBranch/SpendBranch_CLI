@@ -12,6 +12,7 @@ const PURE: &[&str] = &[
 ];
 const FORBIDDEN: &[&str] = &[
     "crate::infra",
+    "crate::readers",
     "rusqlite",
     "std::fs",
     "std::env",
@@ -63,7 +64,7 @@ fn infra_does_not_depend_on_the_command_layers() {
     assert!(!files.is_empty());
     for file in files {
         let text = fs::read_to_string(&file).unwrap();
-        for bad in ["crate::cli", "crate::commands"] {
+        for bad in ["crate::cli", "crate::commands", "crate::readers"] {
             assert!(
                 !text.contains(bad),
                 "{} must not depend on `{bad}`",

@@ -1,0 +1,342 @@
+//! Reads Codex rollouts (`sessions/**/rollout-*.jsonl` and `archived_sessions/*.zst`).
+//!
+//! The cursor is per thread (so `codex archive`, which moves and compresses a file, does
+//! not resend anything) and per `.jsonl` file (an offset plus what the thread's first lines
+//! told us, so only the appended part is read). A `.zst` is read once, in full.
+use super::{
+    Env, discover, identity,
+    lines::{Lines, MAX_LINE, Next},
+    mtime_ms, tail_hash, user_home,
+};
+use crate::contract::{GapReason, Iso, Source};
+use crate::sources::{
+    Format,
+    codex::{Parser, ReadOptions, ReadResult, Resume},
+    coverage::{failure_now, too_many_unsupported, with_observed},
+    outcome::{ReadOutcome, ReaderState},
+};
+use serde::{Deserialize, Serialize};
+use std::{
+    collections::HashMap,
+    fs::{self, File},
+    io::{self, BufReader, Read, Seek, SeekFrom},
+    path::{Path, PathBuf},
+};
+
+/// A `.zst` that decompresses to more than this is refused (it could be a zip bomb).
+pub const MAX_ARCHIVE_OUTPUT: u64 = 64 * 1024 * 1024;
+
+pub struct Config {
+    pub root: PathBuf,
+    pub max_line: usize,
+    pub max_archive_output: u64,
+}
+
+impl Config {
+    /// `$CODEX_HOME` or `~/.codex`. `None` when no home folder can be found.
+    pub fn from_env(env: Env) -> Option<Self> {
+        let root = match env("CODEX_HOME").filter(|d| !d.is_empty()) {
+            Some(dir) => PathBuf::from(dir),
+            None => user_home(env)?.join(".codex"),
+        };
+        Some(Self {
+            root,
+            max_line: MAX_LINE,
+            max_archive_output: MAX_ARCHIVE_OUTPUT,
+        })
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+struct FileCursor {
+    size: u64,
+    mtime_ms: i64,
+    dev: u64,
+    ino: u64,
+    /// Where the next read starts (`.jsonl` only), what lies before it, and the thread's context.
+    offset: u64,
+    tail: u64,
+    thread_id: Option<String>,
+    resume: Option<Resume>,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+struct ThreadCursor {
+    last_ordinal: i64,
+    path: String,
+    size: u64,
+    mtime_ms: i64,
+}
+
+struct FileRead {
+    result: ReadResult,
+    resume: Option<Resume>,
+    non_empty: usize,
+    offset: u64,
+    tail: u64,
+}
+
+struct Stat {
+    size: u64,
+    mtime_ms: i64,
+    dev: u64,
+    ino: u64,
+}
+
+/// Streams `input` into a parser, then settles which thread it was to learn the ordinal to skip.
+fn stream<R: Read>(
+    input: R,
+    start: u64,
+    max_line: usize,
+    mut parser: Parser<'_>,
+    path: &str,
+    threads: &HashMap<String, ThreadCursor>,
+    size: u64,
+) -> io::Result<(FileRead, R)> {
+    let mut reader = Lines::new(BufReader::with_capacity(64 * 1024, input), start, max_line);
+    let (mut buf, mut non_empty) = (Vec::new(), 0usize);
+    while let Next::Line { too_long } = reader.next(&mut buf)? {
+        non_empty += 1;
+        if too_long {
+            parser.push_unsupported_line();
+        } else {
+            let line = String::from_utf8_lossy(&buf);
+            non_empty -= usize::from(line.is_empty());
+            parser.push_line(&line);
+        }
+    }
+    let offset = reader.complete_end;
+    let after = parser
+        .thread_id()
+        .and_then(|t| threads.get(t))
+        .map_or(-1, |t| {
+            let shrunk = t.path == path && size < t.size;
+            if shrunk { -1 } else { t.last_ordinal }
+        });
+    parser.set_after_ordinal(after);
+    let (result, resume) = parser.finish();
+    let inner = reader.into_inner().into_inner();
+    Ok((
+        FileRead {
+            result,
+            resume,
+            non_empty,
+            offset,
+            tail: 0,
+        },
+        inner,
+    ))
+}
+
+fn read_file(
+    config: &Config,
+    path: &Path,
+    archived: bool,
+    stat: &Stat,
+    known: Option<&FileCursor>,
+    threads: &HashMap<String, ThreadCursor>,
+) -> io::Result<FileRead> {
+    let options = ReadOptions::default();
+    let key = path.to_string_lossy();
+    let mut file = File::open(path)?;
+    if archived {
+        let decoder = zstd::stream::read::Decoder::new(file)?;
+        let limited = decoder.take(config.max_archive_output + 1);
+        let (read, mut limited) = stream(
+            limited,
+            0,
+            config.max_line,
+            Parser::new(&options),
+            &key,
+            threads,
+            stat.size,
+        )?;
+        if limited.limit() == 0 {
+            return Err(io::Error::other("archive expands beyond the limit"));
+        }
+        let _ = &mut limited;
+        return Ok(read);
+    }
+    // Continue from the saved offset only if this is the same file, still holding the bytes
+    // we read last time, and we kept the thread's context.
+    let same = known.filter(|k| k.dev == stat.dev && k.ino == stat.ino && k.size <= stat.size);
+    let resume = same
+        .filter(|k| k.offset > 0 && k.offset <= stat.size)
+        .filter(|k| tail_hash(&mut file, k.offset).ok() == Some(k.tail))
+        .and_then(|k| k.resume.clone().map(|r| (k.offset, r)));
+    let (start, parser) = match resume {
+        Some((offset, state)) => (offset, Parser::resume(&options, state)),
+        None => (0, Parser::new(&options)),
+    };
+    file.seek(SeekFrom::Start(start))?;
+    let (mut read, mut file) = stream(
+        file,
+        start,
+        config.max_line,
+        parser,
+        &key,
+        threads,
+        stat.size,
+    )?;
+    read.tail = if read.offset == 0 {
+        0
+    } else {
+        tail_hash(&mut file, read.offset)?
+    };
+    Ok(read)
+}
+
+/// Everything new in the rollouts since `state`, ready for `Store::commit_read`.
+pub fn read(config: &Config, state: &ReaderState, now: Iso) -> ReadOutcome {
+    let mut out = ReadOutcome::empty(Source::Codex, now);
+    let mut threads: HashMap<String, ThreadCursor> = state
+        .cursors
+        .iter()
+        .filter_map(|(k, v)| {
+            Some((
+                k.strip_prefix("thread:")?.to_owned(),
+                serde_json::from_str(v).ok()?,
+            ))
+        })
+        .collect();
+    let mut cursors: HashMap<String, String> = HashMap::new();
+    let mut unsupported: Vec<String> = Vec::new();
+    let mut untested = state.untested_version.clone();
+
+    for rollout in discover::codex_rollouts(&config.root) {
+        let path = rollout.path.to_string_lossy().into_owned();
+        let key = format!("file:{path}");
+        let Ok(meta) = fs::metadata(&rollout.path) else {
+            continue;
+        };
+        let (dev, ino) = identity(&meta);
+        let stat = Stat {
+            size: meta.len(),
+            mtime_ms: mtime_ms(&meta),
+            dev,
+            ino,
+        };
+        let known: Option<FileCursor> = state
+            .cursors
+            .get(&key)
+            .and_then(|j| serde_json::from_str(j).ok());
+        if let Some(k) = known
+            .as_ref()
+            .filter(|k| k.size == stat.size && k.mtime_ms == stat.mtime_ms)
+        {
+            cursors.insert(key, serde_json::to_string(k).expect("plain data"));
+            if state.unsupported_files.contains(&path) {
+                unsupported.push(path); // already reported: no repeated gap
+            }
+            continue;
+        }
+        let blank = |thread: Option<String>| FileCursor {
+            size: stat.size,
+            mtime_ms: stat.mtime_ms,
+            dev,
+            ino,
+            offset: 0,
+            tail: 0,
+            thread_id: thread,
+            resume: None,
+        };
+        let file = match read_file(
+            config,
+            &rollout.path,
+            rollout.archived,
+            &stat,
+            known.as_ref(),
+            &threads,
+        ) {
+            Ok(f) => f,
+            Err(_) => {
+                out.coverage
+                    .push(failure_now(Source::Codex, now, GapReason::AdapterError));
+                cursors.insert(
+                    key,
+                    serde_json::to_string(&blank(None)).expect("plain data"),
+                );
+                unsupported.push(path);
+                continue;
+            }
+        };
+        let FileRead {
+            result,
+            resume,
+            non_empty,
+            offset,
+            tail,
+        } = file;
+        let mut cursor = FileCursor {
+            thread_id: result.thread_id.clone(),
+            offset,
+            tail,
+            resume,
+            ..blank(None)
+        };
+        let hard = result.format == Format::UnsupportedFormat;
+        if hard || too_many_unsupported(result.unsupported_lines.len(), non_empty) {
+            out.coverage.push(failure_now(
+                Source::Codex,
+                now,
+                GapReason::UnsupportedFormat,
+            ));
+            unsupported.push(path.clone());
+        }
+        if hard {
+            // Not understood: do not advance. A later change re-reads from the old offset.
+            if let Some(k) = known.as_ref() {
+                (cursor.offset, cursor.tail, cursor.resume) = (k.offset, k.tail, k.resume.clone());
+            } else {
+                (cursor.offset, cursor.tail, cursor.resume) = (0, 0, None);
+            }
+            cursors.insert(key, serde_json::to_string(&cursor).expect("plain data"));
+            continue;
+        }
+        cursors.insert(key, serde_json::to_string(&cursor).expect("plain data"));
+        untested = result.untested_version.clone().or(untested);
+        out.observations.extend(result.observations);
+        if let Some(thread) = result.thread_id {
+            let shrunk = threads
+                .get(&thread)
+                .is_some_and(|t| t.path == path && stat.size < t.size);
+            let before = threads
+                .get(&thread)
+                .filter(|_| !shrunk)
+                .map_or(-1, |t| t.last_ordinal);
+            threads.insert(
+                thread,
+                ThreadCursor {
+                    last_ordinal: before.max(result.last_ordinal),
+                    path,
+                    size: stat.size,
+                    mtime_ms: stat.mtime_ms,
+                },
+            );
+        }
+    }
+
+    for (thread, cursor) in threads {
+        cursors.insert(
+            format!("thread:{thread}"),
+            serde_json::to_string(&cursor).expect("plain data"),
+        );
+    }
+    let times: Vec<Iso> = out.observations.iter().map(|o| o.occurred_at).collect();
+    out.coverage = with_observed(Source::Codex, out.coverage, &times, now);
+    out.cursor_remove = state
+        .cursors
+        .keys()
+        .filter(|k| !cursors.contains_key(*k))
+        .cloned()
+        .collect();
+    out.cursor_remove.sort();
+    out.cursor_set = cursors
+        .into_iter()
+        .filter(|(k, v)| state.cursors.get(k) != Some(v))
+        .collect();
+    out.cursor_set.sort();
+    out.unsupported_files = unsupported;
+    out.untested_version = untested;
+    out
+}
