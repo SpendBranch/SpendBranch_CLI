@@ -1,11 +1,5 @@
-// F0 only wires `--version`; the command surface arrives in F1.
 fn main() {
-    let arg = std::env::args().nth(1);
-    match arg.as_deref() {
-        Some("--version" | "-v") => println!("{}", env!("CARGO_PKG_VERSION")),
-        _ => {
-            eprintln!("spendbranch: not implemented yet");
-            std::process::exit(2);
-        }
-    }
+    let args: Vec<String> = std::env::args().skip(1).collect();
+    let code = spendbranch::cli::run(&args, &|k| std::env::var(k).ok(), &mut std::io::stdout());
+    std::process::exit(code);
 }
