@@ -21,3 +21,20 @@ cargo deny check
 
 - `schema/ingest-v1.json`: JSON Schema of the upload contract (`ingest/v1`).
 - `tests/fixtures/`: synthetic fixture corpus; see its README.
+- `cargo test --release --test perf -- --ignored --nocapture`: performance budget.
+
+## Layout
+
+The code is a functional core with an imperative shell, checked by `tests/architecture.rs`:
+
+| Module | Role |
+| --- | --- |
+| `contract` | the `ingest/v1` types; an invalid value cannot be built or read |
+| `sources` | pure parsers and coverage rules; no I/O |
+| `readers` | find session files and read what is new; no database |
+| `infra` | the local database, the sync lock, private files |
+| `cli`, `commands` | arguments, texts, and what each command does |
+
+Pure modules never depend on `infra`, and `readers` never touch the database.
+
+See [SECURITY.md](SECURITY.md) to report a vulnerability.
