@@ -22,7 +22,7 @@ jobs:
   public-repo-guard:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: Private planning files must not be tracked
         run: |
           if git ls-files | grep -E '^(PLANNING\.md|cli/)'; then
@@ -33,14 +33,14 @@ jobs:
   deny:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: EmbarkStudios/cargo-deny-action@3c6349835b2b7b196a839186cb8b78e02f7b5f25 # v2.1.1
 
   # Cargo.toml promises Rust 1.89 (File::try_lock): prove it builds there, tests included.
   msrv:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: Install Rust 1.89
         run: rustup toolchain install 1.89 --profile minimal --no-self-update
       - run: cargo +1.89 check --locked --all-targets
@@ -59,7 +59,7 @@ jobs:
           - { name: macos-x64, os: macos-15-intel }
           - { name: macos-arm64, os: macos-latest }
     steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: Install Rust
         run: rustup toolchain install stable --profile minimal --component rustfmt,clippy --no-self-update && rustup default stable
       - run: cargo fmt --check
