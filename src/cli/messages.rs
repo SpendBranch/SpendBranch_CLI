@@ -43,14 +43,7 @@ normalized repository, and branch). Prompts, responses, code, and paths never le
     )
 }
 
-/// An error code from the server is shown only if it looks like one: it is text we do not
-/// control, and a terminal would obey any escape sequence hidden in it.
-fn is_plain_code(code: &str) -> bool {
-    (1..=64).contains(&code.len())
-        && code
-            .bytes()
-            .all(|b| b.is_ascii_uppercase() || b.is_ascii_digit() || b == b'_')
-}
+use crate::api::is_plain_code;
 
 pub fn failure_message(code: &str) -> String {
     match code {

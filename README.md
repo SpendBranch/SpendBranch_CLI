@@ -30,9 +30,10 @@ The code is a functional core with an imperative shell, checked by `tests/archit
 | Module | Role |
 | --- | --- |
 | `contract` | the `ingest/v1` types; an invalid value cannot be built or read |
+| `auth`, `api` | the device key's signature on every request, the server address rules and the wire messages; no I/O |
 | `sources` | pure parsers and coverage rules; no I/O |
 | `readers` | find session files and read what is new; no database |
-| `infra` | the local database, the sync lock, private files |
+| `infra` | the local database, the sync lock, private files, the device key store, the HTTPS client |
 | `cli`, `commands` | arguments, texts, and what each command does |
 
 Pure modules never depend on `infra`, and `readers` never touch the database.

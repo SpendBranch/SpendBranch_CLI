@@ -8,6 +8,8 @@ const PURE: &[&str] = &[
     "src/cli/args.rs",
     "src/cli/messages.rs",
     "src/contract",
+    "src/auth.rs",
+    "src/api.rs",
     "src/sync",
 ];
 const FORBIDDEN: &[&str] = &[
