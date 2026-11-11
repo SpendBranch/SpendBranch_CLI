@@ -6,12 +6,11 @@ pub mod claude_code;
 pub mod codex;
 pub mod discover;
 pub mod git;
+pub mod hold;
 pub mod lines;
 
+use crate::env::Env;
 use std::path::PathBuf;
-
-/// Reads one environment variable. A parameter so tests never touch the real environment.
-pub type Env<'a> = &'a dyn Fn(&str) -> Option<String>;
 
 pub fn user_home(env: Env) -> Option<PathBuf> {
     let var = if cfg!(windows) { "USERPROFILE" } else { "HOME" };
@@ -65,4 +64,34 @@ pub(crate) fn tail_hash(file: &mut std::fs::File, offset: u64) -> std::io::Resul
     file.seek(SeekFrom::Start(offset - n as u64))?;
     file.read_exact(&mut bytes[n..2 * n])?;
     Ok(fnv(&bytes[..2 * n]))
+}
+
+/// A cursor as the JSON kept in `state.db`. These are plain data, so serializing cannot fail;
+/// an empty string would only make the next read start the file over.
+pub(crate) fn cursor_json<T: serde::Serialize>(cursor: &T) -> String {
+    serde_json::to_string(cursor).unwrap_or_default()
+}
+
+/// Closes a read: adds the `observed` range, and turns the cursors found now into what the
+/// store must change (set what differs, remove what is gone).
+pub(crate) fn settle(
+    out: &mut crate::sources::outcome::ReadOutcome,
+    saved: &std::collections::HashMap<String, String>,
+    found: std::collections::HashMap<String, String>,
+) {
+    let times: Vec<crate::contract::Iso> = out.observations.iter().map(|o| o.occurred_at).collect();
+    let coverage = std::mem::take(&mut out.coverage);
+    out.coverage =
+        crate::sources::coverage::with_observed(out.source, coverage, &times, out.read_at);
+    out.cursor_remove = saved
+        .keys()
+        .filter(|k| !found.contains_key(*k))
+        .cloned()
+        .collect();
+    out.cursor_remove.sort();
+    out.cursor_set = found
+        .into_iter()
+        .filter(|(k, v)| saved.get(k) != Some(v))
+        .collect();
+    out.cursor_set.sort();
 }

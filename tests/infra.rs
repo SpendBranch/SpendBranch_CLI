@@ -213,3 +213,102 @@ fn hook_log_appends_lines_and_rotates_above_1_mib() {
     hook_log::append(dir.path(), "again").unwrap();
     assert_eq!(fs::read(dir.path().join("hook.log.1")).unwrap()[0], b'y');
 }
+
+#[test]
+fn many_processes_opening_a_new_database_at_once_all_succeed() {
+    // A hook and the scheduler can start together on a fresh machine. Each opens its own
+    // connection, like separate processes would.
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("data");
+    let handles: Vec<_> = (0..12)
+        .map(|_| {
+            let path = path.clone();
+            thread::spawn(move || Store::open(&path).map(|_| ()).map_err(|e| e.to_string()))
+        })
+        .collect();
+    for h in handles {
+        h.join().unwrap().expect("every opener must succeed");
+    }
+    assert_eq!(user_version(&path), 1);
+}
+
+#[test]
+fn a_newer_database_is_a_typed_error() {
+    let dir = tempfile::tempdir().unwrap();
+    Store::open(dir.path()).unwrap();
+    Connection::open(dir.path().join("state.db"))
+        .unwrap()
+        .pragma_update(None, "user_version", 7)
+        .unwrap();
+    assert!(matches!(
+        Store::open(dir.path()),
+        Err(spendbranch::infra::store::Error::NewerSchema { found: 7, known: 1 })
+    ));
+}
+
+#[cfg(unix)]
+mod folders {
+    use super::*;
+    use spendbranch::infra::private_fs;
+    use std::os::unix::fs::PermissionsExt;
+
+    fn set(path: &Path, mode: u32) {
+        fs::set_permissions(path, fs::Permissions::from_mode(mode)).unwrap();
+    }
+
+    #[test]
+    fn a_new_folder_is_private_and_so_are_the_parents_we_create() {
+        let tmp = tempfile::tempdir().unwrap();
+        let leaf = tmp.path().join("a/b/data");
+        private_fs::create_dir(&leaf).unwrap();
+        assert_eq!(mode(&leaf), 0o700);
+        assert_eq!(mode(&tmp.path().join("a")), 0o700);
+    }
+
+    #[test]
+    fn a_folder_that_already_exists_is_never_changed() {
+        // SPENDBRANCH_HOME may point at the user's home or a shared folder by mistake.
+        let tmp = tempfile::tempdir().unwrap();
+        for existing in [0o755, 0o775, 0o770, 0o750, 0o700] {
+            let dir = tmp.path().join(format!("d{existing:o}"));
+            fs::create_dir(&dir).unwrap();
+            set(&dir, existing);
+            private_fs::create_dir(&dir).unwrap();
+            assert_eq!(mode(&dir), existing, "must stay {existing:o}");
+        }
+    }
+
+    #[test]
+    fn a_folder_anybody_can_write_to_is_refused_and_left_alone() {
+        let tmp = tempfile::tempdir().unwrap();
+        for open in [0o777, 0o757, 0o702, 0o1777] {
+            let dir = tmp.path().join(format!("w{open:o}"));
+            fs::create_dir(&dir).unwrap();
+            set(&dir, open);
+            let err = private_fs::create_dir(&dir).unwrap_err();
+            assert_eq!(err.kind(), std::io::ErrorKind::PermissionDenied);
+            assert!(
+                err.to_string().contains("SPENDBRANCH_HOME"),
+                "tells what to do: {err}"
+            );
+            assert_eq!(
+                mode(&dir),
+                open & 0o777,
+                "refusing must not change it either"
+            );
+            assert!(
+                Store::open(&dir).is_err(),
+                "and no database is created in it"
+            );
+            assert!(!dir.join("state.db").exists());
+        }
+    }
+
+    #[test]
+    fn a_file_where_the_folder_should_be_is_an_error() {
+        let tmp = tempfile::tempdir().unwrap();
+        let file = tmp.path().join("not-a-folder");
+        fs::write(&file, "x").unwrap();
+        assert!(private_fs::create_dir(&file).is_err());
+    }
+}

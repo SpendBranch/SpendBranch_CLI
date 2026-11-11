@@ -4,15 +4,16 @@
 //! not resend anything) and per `.jsonl` file (an offset plus what the thread's first lines
 //! told us, so only the appended part is read). A `.zst` is read once, in full.
 use super::{
-    Env, discover, identity,
+    cursor_json, discover, identity,
     lines::{Lines, MAX_LINE, Next},
-    mtime_ms, tail_hash, user_home,
+    mtime_ms, settle, tail_hash, user_home,
 };
 use crate::contract::{GapReason, Iso, Source};
+use crate::env::Env;
 use crate::sources::{
     Format,
     codex::{Parser, ReadOptions, ReadResult, Resume},
-    coverage::{failure_now, too_many_unsupported, with_observed},
+    coverage::{failure_now, too_many_unsupported},
     outcome::{ReadOutcome, ReaderState},
 };
 use serde::{Deserialize, Serialize};
@@ -142,7 +143,7 @@ fn read_file(
     if archived {
         let decoder = zstd::stream::read::Decoder::new(file)?;
         let limited = decoder.take(config.max_archive_output + 1);
-        let (read, mut limited) = stream(
+        let (read, limited) = stream(
             limited,
             0,
             config.max_line,
@@ -154,7 +155,6 @@ fn read_file(
         if limited.limit() == 0 {
             return Err(io::Error::other("archive expands beyond the limit"));
         }
-        let _ = &mut limited;
         return Ok(read);
     }
     // Continue from the saved offset only if this is the same file, still holding the bytes
@@ -224,7 +224,7 @@ pub fn read(config: &Config, state: &ReaderState, now: Iso) -> ReadOutcome {
             .as_ref()
             .filter(|k| k.size == stat.size && k.mtime_ms == stat.mtime_ms)
         {
-            cursors.insert(key, serde_json::to_string(k).expect("plain data"));
+            cursors.insert(key, cursor_json(k));
             if state.unsupported_files.contains(&path) {
                 unsupported.push(path); // already reported: no repeated gap
             }
@@ -250,12 +250,16 @@ pub fn read(config: &Config, state: &ReaderState, now: Iso) -> ReadOutcome {
         ) {
             Ok(f) => f,
             Err(_) => {
-                out.coverage
-                    .push(failure_now(Source::Codex, now, GapReason::AdapterError));
-                cursors.insert(
-                    key,
-                    serde_json::to_string(&blank(None)).expect("plain data"),
-                );
+                if !state.unsupported_files.contains(&path) {
+                    out.coverage
+                        .push(failure_now(Source::Codex, now, GapReason::AdapterError));
+                }
+                // A plain rollout is tried again next time (the failure may be passing). An
+                // archive that cannot be decompressed stays as it is: trying again would
+                // repeat expensive work for the same result.
+                if rollout.archived {
+                    cursors.insert(key, cursor_json(&blank(None)));
+                }
                 unsupported.push(path);
                 continue;
             }
@@ -290,10 +294,10 @@ pub fn read(config: &Config, state: &ReaderState, now: Iso) -> ReadOutcome {
             } else {
                 (cursor.offset, cursor.tail, cursor.resume) = (0, 0, None);
             }
-            cursors.insert(key, serde_json::to_string(&cursor).expect("plain data"));
+            cursors.insert(key, cursor_json(&cursor));
             continue;
         }
-        cursors.insert(key, serde_json::to_string(&cursor).expect("plain data"));
+        cursors.insert(key, cursor_json(&cursor));
         untested = result.untested_version.clone().or(untested);
         out.observations.extend(result.observations);
         if let Some(thread) = result.thread_id {
@@ -317,25 +321,9 @@ pub fn read(config: &Config, state: &ReaderState, now: Iso) -> ReadOutcome {
     }
 
     for (thread, cursor) in threads {
-        cursors.insert(
-            format!("thread:{thread}"),
-            serde_json::to_string(&cursor).expect("plain data"),
-        );
+        cursors.insert(format!("thread:{thread}"), cursor_json(&cursor));
     }
-    let times: Vec<Iso> = out.observations.iter().map(|o| o.occurred_at).collect();
-    out.coverage = with_observed(Source::Codex, out.coverage, &times, now);
-    out.cursor_remove = state
-        .cursors
-        .keys()
-        .filter(|k| !cursors.contains_key(*k))
-        .cloned()
-        .collect();
-    out.cursor_remove.sort();
-    out.cursor_set = cursors
-        .into_iter()
-        .filter(|(k, v)| state.cursors.get(k) != Some(v))
-        .collect();
-    out.cursor_set.sort();
+    settle(&mut out, &state.cursors, cursors);
     out.unsupported_files = unsupported;
     out.untested_version = untested;
     out

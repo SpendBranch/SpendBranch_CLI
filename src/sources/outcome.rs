@@ -4,15 +4,41 @@ use crate::contract::{CoverageReport, Iso, Source, UsageObservation};
 use std::collections::{HashMap, HashSet};
 
 /// The saved state a reader starts from (read from `state.db`, never written by the reader).
-#[derive(Debug, Default)]
-pub struct ReaderState {
+pub struct ReaderState<'a> {
     /// Cursor key to its JSON. Claude: one per file. Codex: `file:<path>` and `thread:<id>`.
     pub cursors: HashMap<String, String>,
-    /// Hashes (`key_hash`) of the events already read.
-    pub seen: HashSet<u64>,
     /// Files whose format we could not read, so a repeated gap is not reported.
     pub unsupported_files: HashSet<String>,
     pub untested_version: Option<String>,
+    seen: Box<dyn Fn(u64) -> bool + 'a>,
+}
+
+impl<'a> ReaderState<'a> {
+    pub fn new(
+        cursors: HashMap<String, String>,
+        unsupported_files: HashSet<String>,
+        untested_version: Option<String>,
+        seen: impl Fn(u64) -> bool + 'a,
+    ) -> Self {
+        Self {
+            cursors,
+            unsupported_files,
+            untested_version,
+            seen: Box::new(seen),
+        }
+    }
+
+    /// Whether the event with this `key_hash` was already read.
+    pub fn is_seen(&self, hash: u64) -> bool {
+        (self.seen)(hash)
+    }
+}
+
+/// An empty state: nothing read yet.
+impl Default for ReaderState<'static> {
+    fn default() -> Self {
+        Self::new(HashMap::new(), HashSet::new(), None, |_| false)
+    }
 }
 
 #[derive(Debug)]

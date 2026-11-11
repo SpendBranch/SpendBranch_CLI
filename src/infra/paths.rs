@@ -1,9 +1,10 @@
 //! Where the device keeps its data.
+use crate::env::Env;
 use std::{io, path::PathBuf};
 
 /// `$SPENDBRANCH_HOME` > `$XDG_CONFIG_HOME/spendbranch` > `%APPDATA%\spendbranch` (Windows)
 /// or `~/.config/spendbranch`. Empty variables count as unset.
-pub fn data_dir(env: &dyn Fn(&str) -> Option<String>) -> io::Result<PathBuf> {
+pub fn data_dir(env: Env) -> io::Result<PathBuf> {
     let get = |k: &str| env(k).filter(|v| !v.is_empty());
     if let Some(home) = get("SPENDBRANCH_HOME") {
         return Ok(PathBuf::from(home));

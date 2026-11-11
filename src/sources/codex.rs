@@ -14,7 +14,7 @@ use crate::contract::{
     UsageCounters, UsageObservation,
 };
 use serde::{Deserialize, Serialize};
-use std::collections::{HashMap, HashSet, VecDeque};
+use std::collections::{HashMap, VecDeque};
 
 pub const PARSER: &str = "codex/v1";
 
@@ -51,8 +51,8 @@ pub const FIELDS: [&str; 25] = [
 pub struct ReadOptions<'a> {
     /// Only records with a greater ordinal are emitted (the thread was read up to here).
     pub after_ordinal: Option<i64>,
-    /// Hashes (see `key_hash`) of the response ids already sent.
-    pub seen: Option<&'a HashSet<u64>>,
+    /// Whether a response id (see `key_hash`) was already read.
+    pub seen: Option<&'a dyn Fn(u64) -> bool>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
@@ -285,10 +285,15 @@ impl TurnModels {
         }
     }
 
+    /// The most recent `RESUME_KEEP` turns, oldest first: what a saved state needs. A response
+    /// of an older turn falls back to the model in force when it was written.
     fn into_pairs(self) -> Vec<(String, String)> {
+        const RESUME_KEEP: usize = 64;
+        let skip = self.order.len().saturating_sub(RESUME_KEEP);
         let mut map = self.map;
         self.order
             .into_iter()
+            .skip(skip)
             .filter_map(|t| map.remove(&t).map(|m| (t, m)))
             .collect()
     }
@@ -559,7 +564,7 @@ impl<'a> Parser<'a> {
                 || self
                     .options
                     .seen
-                    .is_some_and(|s| s.contains(&key_hash(&record.response_id)))
+                    .is_some_and(|seen| seen(key_hash(&record.response_id)))
             {
                 continue;
             }

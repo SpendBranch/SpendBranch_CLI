@@ -10,15 +10,7 @@ pub fn too_many_unsupported(unsupported: usize, lines: usize) -> bool {
 
 /// A one-second gap ending now, for a failure with no better time range.
 pub fn failure_now(source: Source, now: Iso, reason: GapReason) -> CoverageReport {
-    let from = Iso::from_millis((now.millis() - 1000).max(0)).unwrap_or(now);
-    CoverageReport::new(source, from, now, CoverageState::Unavailable { reason })
-        .or_else(|| {
-            // `now` is the epoch itself: widen to the next millisecond to keep from < to
-            Iso::from_millis(now.millis() + 1).and_then(|to| {
-                CoverageReport::new(source, now, to, CoverageState::Unavailable { reason })
-            })
-        })
-        .expect("a one-second range is always ordered")
+    CoverageReport::unavailable_ending(source, now, reason)
 }
 
 /// Adds an `observed` report from the earliest event read up to the first gap of this same

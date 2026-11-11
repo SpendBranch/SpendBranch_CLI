@@ -743,11 +743,7 @@ fn a_failure_in_the_middle_of_a_commit_rolls_everything_back() {
         "the buffered observation was rolled back"
     );
     assert!(
-        rig.store
-            .reader_state(Source::ClaudeCode)
-            .unwrap()
-            .seen
-            .is_empty(),
+        rig.store.seen_count(Source::ClaudeCode).unwrap() == 0,
         "and so were the seen keys"
     );
 }
@@ -764,26 +760,13 @@ fn the_state_roundtrips_and_old_event_keys_are_forgotten_after_45_days() {
         &[line("s1", "r1", "2026-06-01T10:00:00Z", 5)],
     );
     rig.collect();
-    assert_eq!(
-        rig.store
-            .reader_state(Source::ClaudeCode)
-            .unwrap()
-            .seen
-            .len(),
-        1
-    );
+    assert_eq!(rig.store.seen_count(Source::ClaudeCode).unwrap(), 1);
     let later = Iso::parse("2026-07-30T12:00:00Z").unwrap(); // 59 days on
     let empty = ReadOutcome::empty(Source::ClaudeCode, later);
     rig.store
         .commit_read(&empty, SpoolLimits::default())
         .unwrap();
-    assert!(
-        rig.store
-            .reader_state(Source::ClaudeCode)
-            .unwrap()
-            .seen
-            .is_empty()
-    );
+    assert_eq!(rig.store.seen_count(Source::ClaudeCode).unwrap(), 0);
 }
 
 #[test]

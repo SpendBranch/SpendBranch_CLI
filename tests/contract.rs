@@ -260,3 +260,151 @@ fn a_batch_respects_its_limits_and_the_schema() {
     .unwrap();
     assert!(schema().is_valid(&serde_json::to_value(only_coverage).unwrap()));
 }
+
+// ---- reading the contract back (the buffer is JSON text in state.db)
+
+fn fixture_observations() -> Vec<serde_json::Value> {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures");
+    let mut all = Vec::new();
+    for tool in ["claude-code", "codex", "otlp"] {
+        for dir in fs::read_dir(root.join(tool)).unwrap() {
+            let expected: serde_json::Value = serde_json::from_str(
+                &fs::read_to_string(dir.unwrap().path().join("expected.json")).unwrap(),
+            )
+            .unwrap();
+            all.extend(expected["observations"].as_array().unwrap().iter().cloned());
+        }
+    }
+    all
+}
+
+#[test]
+fn every_fixture_observation_reads_back_and_writes_out_identically() {
+    let all = fixture_observations();
+    assert!(all.len() >= 30, "the corpus shrank: {}", all.len());
+    for original in all {
+        let read: UsageObservation =
+            serde_json::from_value(original.clone()).unwrap_or_else(|e| panic!("{e}: {original}"));
+        assert_eq!(serde_json::to_value(&read).unwrap(), original, "lossless");
+    }
+}
+
+#[test]
+fn a_tampered_observation_is_refused_and_its_text_is_never_echoed() {
+    let good = serde_json::to_value(observation()).unwrap();
+    let with = |key: &str, value: serde_json::Value| {
+        let mut o = good.clone();
+        o[key] = value;
+        serde_json::from_value::<UsageObservation>(o)
+    };
+    assert!(with("externalEventId", json!("has space")).is_err());
+    assert!(with("model", json!("x".repeat(65))).is_err());
+    assert!(with("occurredAt", json!("yesterday")).is_err());
+    assert!(with("agentRole", json!("owner")).is_err());
+    assert!(with("source", json!("gemini")).is_err());
+    assert!(with("branch", json!("a b")).is_err());
+    assert!(
+        with("surprise", json!(1)).is_err(),
+        "unknown keys are refused, like the schema does"
+    );
+    let mut over = good.clone();
+    over["counters"]["inputTokens"] = json!(MAX_TOKENS_PER_COUNTER + 1);
+    assert!(serde_json::from_value::<UsageObservation>(over).is_err());
+    let mut extra = good.clone();
+    extra["counters"]["extraTokens"] = json!(1);
+    assert!(serde_json::from_value::<UsageObservation>(extra).is_err());
+
+    let secret = "SECRET_VALUE_THAT_MUST_NOT_LEAK";
+    let err = with("model", json!(format!("{secret}!!")))
+        .unwrap_err()
+        .to_string();
+    assert!(!err.contains(secret), "{err}");
+}
+
+#[test]
+fn the_base_event_and_the_origin_must_come_together() {
+    let good = serde_json::to_value(observation()).unwrap();
+    let mut derived_alone = good.clone();
+    derived_alone["counterOrigin"] = json!("derived_from_cumulative");
+    assert!(serde_json::from_value::<UsageObservation>(derived_alone).is_err());
+    let mut base_alone = good.clone();
+    base_alone["baseEventId"] = json!("base_1");
+    assert!(serde_json::from_value::<UsageObservation>(base_alone).is_err());
+    let mut both = good;
+    both["counterOrigin"] = json!("derived_from_cumulative");
+    both["baseEventId"] = json!("base_1");
+    let read: UsageObservation = serde_json::from_value(both).unwrap();
+    assert!(matches!(
+        read.origin,
+        CounterOrigin::DerivedFromCumulative { .. }
+    ));
+}
+
+#[test]
+fn a_null_counter_stays_present_and_a_missing_one_stays_missing() {
+    let mut o = serde_json::to_value(observation()).unwrap();
+    o["counters"]["cacheWrite1hTokens"] = json!(null);
+    let read: UsageObservation = serde_json::from_value(o.clone()).unwrap();
+    assert_eq!(read.counters.cache_write_1h_tokens, Some(Count::UNKNOWN));
+    assert_eq!(read.counters.web_search_requests, None);
+    assert_eq!(serde_json::to_value(&read).unwrap(), o);
+}
+
+#[test]
+fn coverage_reads_back_and_keeps_its_rules() {
+    let (a, b) = (
+        Iso::from_millis(1_000).unwrap(),
+        Iso::from_millis(2_000).unwrap(),
+    );
+    for report in [
+        CoverageReport::new(Source::Codex, a, b, CoverageState::Observed).unwrap(),
+        CoverageReport::new(
+            Source::ClaudeCode,
+            a,
+            b,
+            CoverageState::Unavailable {
+                reason: GapReason::UnsupportedFormat,
+            },
+        )
+        .unwrap(),
+    ] {
+        let value = serde_json::to_value(&report).unwrap();
+        assert_eq!(
+            serde_json::from_value::<CoverageReport>(value).unwrap(),
+            report
+        );
+    }
+    let base = json!({"source": "codex", "from": "1970-01-01T00:00:01.000Z", "to": "1970-01-01T00:00:02.000Z", "state": "observed"});
+    assert!(serde_json::from_value::<CoverageReport>(base.clone()).is_ok());
+    let mut reversed = base.clone();
+    reversed["from"] = json!("1970-01-01T00:00:03.000Z");
+    assert!(
+        serde_json::from_value::<CoverageReport>(reversed).is_err(),
+        "from must precede to"
+    );
+    let mut reason_on_observed = base.clone();
+    reason_on_observed["reason"] = json!("buffer_full");
+    assert!(serde_json::from_value::<CoverageReport>(reason_on_observed).is_err());
+    let mut unavailable_without_reason = base.clone();
+    unavailable_without_reason["state"] = json!("unavailable");
+    assert!(serde_json::from_value::<CoverageReport>(unavailable_without_reason).is_err());
+    let mut unknown_key = base;
+    unknown_key["note"] = json!("x");
+    assert!(serde_json::from_value::<CoverageReport>(unknown_key).is_err());
+}
+
+#[test]
+fn a_gap_ending_at_any_time_is_always_well_formed() {
+    for end in [0, 1, 999, 1_000, 1_001, 1_767_261_600_000] {
+        let gap = CoverageReport::unavailable_ending(
+            Source::Codex,
+            Iso::from_millis(end).unwrap(),
+            GapReason::AdapterError,
+        );
+        assert!(gap.from() < gap.to(), "end={end}");
+        assert!(gap.to().millis() >= 1);
+        let batch = json!({"contractVersion": "ingest/v1", "installationId": Uuid::new_v4().to_string(),
+            "observations": [], "coverage": [serde_json::to_value(&gap).unwrap()]});
+        assert!(schema().is_valid(&batch), "end={end}");
+    }
+}

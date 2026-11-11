@@ -1,19 +1,21 @@
 //! Reads Claude Code transcripts (`<projects>/**/*.jsonl`) incrementally.
 use super::{
-    Env, account, discover,
+    account, cursor_json, discover,
     git::RepoResolver,
+    hold::OpenMessage,
     identity,
     lines::{Lines, MAX_LINE, Next},
-    mtime_ms, tail_hash, user_home,
+    mtime_ms, settle, tail_hash, user_home,
 };
 use crate::contract::{
     AccountRef, AgentRole, BillingMode, CoverageReport, CoverageState, GapReason, Iso,
     PayerEvidence, Repository, Source, UsageObservation,
 };
+use crate::env::Env;
 use crate::sources::{
     Format,
     claude_code::{Parser, ReadOptions},
-    coverage::{failure_now, too_many_unsupported, with_observed},
+    coverage::{failure_now, too_many_unsupported},
     key_hash,
     outcome::{ReadOutcome, ReaderState},
 };
@@ -101,17 +103,11 @@ fn cwd_of(line: &str) -> Option<String> {
     None
 }
 
-struct Held {
-    bytes: Vec<u8>,
-    too_long: bool,
-    start: u64,
-}
-
 fn read_file(
     path: &std::path::Path,
     known: Option<&FileCursor>,
     role: AgentRole,
-    seen: &HashSet<u64>,
+    seen: &dyn Fn(u64) -> bool,
     now: Iso,
     max_line: usize,
 ) -> io::Result<Option<FileRead>> {
@@ -183,53 +179,22 @@ fn read_file(
         parser.push_line(&line);
     };
 
-    // The lines of the last message stay pending until a different message follows: a file
-    // still being written would freeze a smaller counter if we sent them now.
     let mut reader = Lines::new(BufReader::with_capacity(64 * 1024, file), start, max_line);
-    let (mut pending, mut run_key): (Vec<Held>, Option<String>) = (Vec::new(), None);
+    let mut open_message = OpenMessage::default();
     let mut buf = Vec::new();
     loop {
         let line_start = reader.complete_end;
         let Next::Line { too_long } = reader.next(&mut buf)? else {
             break;
         };
-        let key = if too_long {
-            None
-        } else {
-            request_key(&String::from_utf8_lossy(&buf)).map(str::to_owned)
-        };
-        let held = Held {
-            bytes: buf.clone(),
-            too_long,
-            start: line_start,
-        };
-        let same_run = match (&run_key, &key) {
-            (Some(run), Some(k)) => k == run,
-            (Some(_), None) => true, // a line with no key stays with the open message
-            (None, _) => false,
-        };
-        if run_key.is_none() && key.is_none() {
-            feed(&buf, too_long);
-        } else if same_run {
-            pending.push(held);
-        } else {
-            for h in pending.drain(..) {
-                feed(&h.bytes, h.too_long);
-            }
-            run_key = key;
-            pending.push(held);
-        }
+        let text = String::from_utf8_lossy(&buf);
+        let key = if too_long { None } else { request_key(&text) };
+        open_message.push(&buf, too_long, line_start, key, &mut feed);
     }
-    let mut end = reader.complete_end;
-    if now.millis() - mtime < OPEN_MESSAGE_MS
-        && let Some(first) = pending.first()
-    {
-        end = first.start;
-    } else {
-        for h in pending.drain(..) {
-            feed(&h.bytes, h.too_long);
-        }
-    }
+    let recent = now.millis() - mtime < OPEN_MESSAGE_MS;
+    let end = open_message
+        .finish(recent, &mut feed)
+        .unwrap_or(reader.complete_end);
     let mut file = reader.into_inner().into_inner();
     let tail = if end == 0 {
         0
@@ -255,7 +220,8 @@ fn read_file(
 /// Everything new in the transcripts since `state`, ready for `Store::commit_read`.
 pub fn read(config: &Config, state: &ReaderState, now: Iso) -> ReadOutcome {
     let mut out = ReadOutcome::empty(Source::ClaudeCode, now);
-    let mut seen = state.seen.clone();
+    // Events found in this very read: a forked session copies history into other files.
+    let mut fresh: HashSet<u64> = HashSet::new();
     let local = account::read_local_account(&config.account_file);
     let mut repos = RepoResolver::new(config.home.clone());
     let listed = discover::claude_transcripts(&config.projects_dir);
@@ -269,7 +235,8 @@ pub fn read(config: &Config, state: &ReaderState, now: Iso) -> ReadOutcome {
             .cursors
             .get(&key)
             .and_then(|j| serde_json::from_str(j).ok());
-        let file = match read_file(path, known.as_ref(), *role, &seen, now, config.max_line) {
+        let is_seen = |hash: u64| fresh.contains(&hash) || state.is_seen(hash);
+        let file = match read_file(path, known.as_ref(), *role, &is_seen, now, config.max_line) {
             Ok(Some(f)) => f,
             Ok(None) => continue,
             Err(_) => {
@@ -284,10 +251,7 @@ pub fn read(config: &Config, state: &ReaderState, now: Iso) -> ReadOutcome {
                 continue;
             }
         };
-        cursors.insert(
-            key.clone(),
-            serde_json::to_string(&file.cursor).expect("plain data"),
-        );
+        cursors.insert(key.clone(), cursor_json(&file.cursor));
         let Some(result) = file.result.filter(|_| file.fed > 0) else {
             continue;
         };
@@ -322,7 +286,7 @@ pub fn read(config: &Config, state: &ReaderState, now: Iso) -> ReadOutcome {
             .and_then(|r| Repository::new(&r));
         for mut observation in result.observations {
             let hash = key_hash(observation.external_event_id.as_str());
-            seen.insert(hash);
+            fresh.insert(hash);
             out.seen.push((hash, observation.occurred_at));
             observation.repository = repository.clone();
             with_account(&mut observation, local.as_ref());
@@ -339,20 +303,7 @@ pub fn read(config: &Config, state: &ReaderState, now: Iso) -> ReadOutcome {
             unsupported.push(path.clone());
         }
     }
-    let times: Vec<Iso> = out.observations.iter().map(|o| o.occurred_at).collect();
-    out.coverage = with_observed(Source::ClaudeCode, out.coverage, &times, now);
-    out.cursor_remove = state
-        .cursors
-        .keys()
-        .filter(|k| !cursors.contains_key(*k))
-        .cloned()
-        .collect();
-    out.cursor_remove.sort();
-    out.cursor_set = cursors
-        .into_iter()
-        .filter(|(k, v)| state.cursors.get(k) != Some(v))
-        .collect();
-    out.cursor_set.sort();
+    settle(&mut out, &state.cursors, cursors);
     out.unsupported_files = unsupported;
     out.untested_version = untested;
     out

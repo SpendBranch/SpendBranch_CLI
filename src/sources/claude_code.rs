@@ -10,7 +10,7 @@ use crate::contract::{
     PayerEvidence, Source, SourceVersion, UsageCounters, UsageObservation,
 };
 use serde::{Deserialize, Serialize};
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 
 pub const PARSER: &str = "claude-code/v2";
 
@@ -55,8 +55,8 @@ pub const FIELDS: [&str; 32] = [
 pub struct ReadOptions<'a> {
     /// The file lives under a `subagents` folder.
     pub subagent_file: bool,
-    /// Hashes (see `key_hash`) of the event keys already sent: a forked session copies history.
-    pub seen: Option<&'a HashSet<u64>>,
+    /// Whether an event key (see `key_hash`) was already read: a forked session copies history.
+    pub seen: Option<&'a dyn Fn(u64) -> bool>,
 }
 
 #[derive(Debug, PartialEq, Serialize)]
@@ -341,12 +341,7 @@ impl<'a> Parser<'a> {
         let mut new_keys = Vec::new();
         for key in self.order {
             let m = &self.messages[&key];
-            if m.broken
-                || self
-                    .options
-                    .seen
-                    .is_some_and(|s| s.contains(&key_hash(&key)))
-            {
+            if m.broken || self.options.seen.is_some_and(|seen| seen(key_hash(&key))) {
                 continue;
             }
             if m.counters[..4].iter().all(|c| c.is_none_or(|c| c == 0)) {

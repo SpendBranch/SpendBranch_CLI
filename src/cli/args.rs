@@ -1,10 +1,19 @@
 //! Turns argv into a `Command`. Pure: no I/O, no process exit.
 use lexopt::prelude::*;
 
+/// What the command line asked for.
 #[derive(Debug, PartialEq, Eq)]
-pub enum Command {
+pub enum Parsed {
     Help,
     Version,
+    /// A word that is not a command.
+    Unknown(String),
+    Run(Command),
+}
+
+/// A command that does work. Help, version and unknown words are not commands.
+#[derive(Debug, PartialEq, Eq)]
+pub enum Command {
     Setup {
         server: Option<String>,
         source: Option<String>,
@@ -30,11 +39,10 @@ pub enum Command {
         port: Option<u16>,
     },
     Logout,
-    Unknown(String),
 }
 
 /// `Err` carries a usage message; the caller prints it with the help and exits 2.
-pub fn parse(args: &[String]) -> Result<Command, String> {
+pub fn parse(args: &[String]) -> Result<Parsed, String> {
     let (mut server, mut source, mut port) = (None, None, None);
     let (mut relogin, mut version, mut help) = (false, false, false);
     let mut positionals = Vec::new();
@@ -53,11 +61,11 @@ pub fn parse(args: &[String]) -> Result<Command, String> {
         }
     }
     if version {
-        return Ok(Command::Version);
+        return Ok(Parsed::Version);
     }
     let mut pos = positionals.into_iter();
     let (command, a1, a2) = (pos.next(), pos.next(), pos.next());
-    Ok(match command.as_deref() {
+    let run = match command.as_deref() {
         Some("login") => Command::Login { server },
         Some("setup") => Command::Setup {
             server,
@@ -83,7 +91,8 @@ pub fn parse(args: &[String]) -> Result<Command, String> {
                 .transpose()?,
         },
         Some("logout") => Command::Logout,
-        Some(other) if !help => Command::Unknown(other.to_string()),
-        _ => Command::Help,
-    })
+        Some(other) if !help => return Ok(Parsed::Unknown(other.to_string())),
+        _ => return Ok(Parsed::Help),
+    };
+    Ok(Parsed::Run(run))
 }

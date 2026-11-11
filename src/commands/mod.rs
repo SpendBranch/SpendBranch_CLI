@@ -2,7 +2,8 @@
 //! F1 covers everything that needs no network: usage checks and the "not connected"
 //! answers. Commands that need the server end in `NOT_AVAILABLE` until their phase
 //! (login/status/logout F5, sync F6, hooks and setup F7, otel/relay F8).
-use crate::cli::{Env, args::Command, messages as m};
+use crate::cli::{args::Command, messages as m};
+use crate::env::Env;
 use crate::infra::{lock, paths, store::Store};
 use crate::sources::Source;
 use std::{error::Error, io::Write};
@@ -53,9 +54,6 @@ pub fn run(command: Command, ctx: &mut Ctx) -> Result<i32> {
             } else {
                 say(ctx, m::ALREADY_DISCONNECTED, 0)
             }
-        }
-        Command::Help | Command::Version | Command::Unknown(_) => {
-            unreachable!("handled by cli::run")
         }
     }
 }

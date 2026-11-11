@@ -1,37 +1,12 @@
 //! A huge prompt line must not grow the parser's memory: conversation text is skipped,
 //! never stored. One test only: it reads a process-wide allocation counter.
 use spendbranch::sources::{claude_code, codex};
-use std::alloc::{GlobalAlloc, Layout, System};
-use std::sync::atomic::{AtomicUsize, Ordering::SeqCst};
 
-struct Counting;
-static CURRENT: AtomicUsize = AtomicUsize::new(0);
-static PEAK: AtomicUsize = AtomicUsize::new(0);
-
-unsafe impl GlobalAlloc for Counting {
-    unsafe fn alloc(&self, l: Layout) -> *mut u8 {
-        let p = unsafe { System.alloc(l) };
-        if !p.is_null() {
-            PEAK.fetch_max(CURRENT.fetch_add(l.size(), SeqCst) + l.size(), SeqCst);
-        }
-        p
-    }
-    unsafe fn dealloc(&self, p: *mut u8, l: Layout) {
-        CURRENT.fetch_sub(l.size(), SeqCst);
-        unsafe { System.dealloc(p, l) }
-    }
-}
+mod common;
+use common::extra_peak;
 
 #[global_allocator]
-static ALLOC: Counting = Counting;
-
-/// Extra memory used while `f` runs, beyond what was allocated before it.
-fn extra_peak<T>(f: impl FnOnce() -> T) -> (usize, T) {
-    let base = CURRENT.load(SeqCst);
-    PEAK.store(base, SeqCst);
-    let out = f();
-    (PEAK.load(SeqCst) - base, out)
-}
+static ALLOC: common::Counting = common::Counting;
 
 #[test]
 fn a_40_mib_prompt_line_costs_the_parser_almost_no_memory() {

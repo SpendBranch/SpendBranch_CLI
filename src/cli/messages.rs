@@ -43,6 +43,15 @@ normalized repository, and branch). Prompts, responses, code, and paths never le
     )
 }
 
+/// An error code from the server is shown only if it looks like one: it is text we do not
+/// control, and a terminal would obey any escape sequence hidden in it.
+fn is_plain_code(code: &str) -> bool {
+    (1..=64).contains(&code.len())
+        && code
+            .bytes()
+            .all(|b| b.is_ascii_uppercase() || b.is_ascii_digit() || b == b'_')
+}
+
 pub fn failure_message(code: &str) -> String {
     match code {
         "NETWORK" => "Could not reach the server. Check your network and server address (--server).".into(),
@@ -55,6 +64,7 @@ pub fn failure_message(code: &str) -> String {
         "BEFORE_COLLECTION_WINDOW" => "Events precede the month when the company authorized collection.".into(),
         "SESSION_OWNED" => "This session already belongs to another member. Only the person who ran it can send its usage.".into(),
         "INTERNAL" => "The server failed to receive the data.".into(),
-        other => format!("The server rejected the request ({other})."),
+        other if is_plain_code(other) => format!("The server rejected the request ({other})."),
+        _ => "The server rejected the request.".into(),
     }
 }

@@ -241,3 +241,54 @@ fn data_folder_precedence() {
     assert_eq!(paths::data_dir(&empty_is_unset).unwrap(), expected);
     assert!(paths::data_dir(&env(&[])).is_err());
 }
+
+#[test]
+fn a_code_from_the_server_is_echoed_only_if_it_looks_like_a_code() {
+    // The server's text is not ours: a terminal would obey an escape sequence hidden in it.
+    assert_eq!(
+        messages::failure_message("NEW_CODE_42"),
+        "The server rejected the request (NEW_CODE_42)."
+    );
+    for hostile in [
+        "\u{1b}[31mred",
+        "line\nbreak",
+        "lower_case",
+        "has space",
+        "",
+        &"A".repeat(65),
+        "\u{202e}RTL",
+        "ÉCOLE",
+    ] {
+        let m = messages::failure_message(hostile);
+        assert_eq!(m, "The server rejected the request.", "{hostile:?}");
+        assert!(!m.contains(hostile) || hostile.is_empty());
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn an_argument_that_is_not_text_is_a_usage_error_not_a_crash() {
+    use std::os::unix::ffi::OsStrExt;
+    let dir = tempfile::tempdir().unwrap();
+    for args in [
+        &[b"\xff\xfe".as_slice()][..],
+        &[b"status", b"\xff"],
+        &[b"--server", b"\xc3\x28"],
+    ] {
+        let out = Command::new(env!("CARGO_BIN_EXE_spendbranch"))
+            .args(args.iter().map(|a| std::ffi::OsStr::from_bytes(a)))
+            .env("SPENDBRANCH_HOME", dir.path().join("data"))
+            .output()
+            .unwrap();
+        let code = out.status.code();
+        assert!(
+            matches!(code, Some(0..=2)),
+            "{args:?} exited with {code:?} (101 would be a panic)"
+        );
+        assert!(
+            out.stderr.is_empty(),
+            "{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+    }
+}

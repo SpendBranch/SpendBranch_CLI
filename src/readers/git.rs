@@ -48,22 +48,45 @@ impl RepoResolver {
 
     fn is_project_folder(&self, cwd: &str) -> bool {
         let path = Path::new(cwd);
-        path.is_absolute() && path.parent().is_some() && self.home.as_deref() != Some(path)
+        path.is_absolute()
+            && path.parent().is_some()
+            && self.home.as_deref() != Some(path)
+            && !is_network_path(cwd)
     }
 
-    fn ask_git(&self, cwd: &str) -> Option<String> {
+    /// The command that asks git, without running it.
+    pub fn build_command(&self, cwd: &str) -> Command {
         let mut command = Command::new(&self.program);
         command
             .args(["-C", cwd, "remote", "get-url", "origin"])
             .env("GIT_TERMINAL_PROMPT", "0")
+            .env("GIT_OPTIONAL_LOCKS", "0")
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
             .stderr(Stdio::null());
+        // `-C` picks the repository; variables inherited from the user's shell must not
+        // redirect git somewhere else.
+        for var in [
+            "GIT_DIR",
+            "GIT_WORK_TREE",
+            "GIT_INDEX_FILE",
+            "GIT_OBJECT_DIRECTORY",
+            "GIT_ALTERNATE_OBJECT_DIRECTORIES",
+            "GIT_COMMON_DIR",
+            "GIT_NAMESPACE",
+        ] {
+            command.env_remove(var);
+        }
         #[cfg(windows)]
         {
             use std::os::windows::process::CommandExt;
             command.creation_flags(0x0800_0000); // CREATE_NO_WINDOW
         }
+        command
+    }
+
+    fn ask_git(&self, cwd: &str) -> Option<String> {
+        let mut command = self.build_command(cwd);
         let mut child = command.spawn().ok()?;
         let deadline = Instant::now() + self.timeout;
         let status = loop {
@@ -86,4 +109,14 @@ impl RepoResolver {
             .ok()?;
         status.success().then(|| repository_key_of(&out)).flatten()
     }
+}
+
+/// A network share (`\\host\share`, `//host/share`, `\\?\UNC\...`). The folder comes from a
+/// transcript, so it must never make this machine contact another one.
+pub fn is_network_path(path: &str) -> bool {
+    let p = path.replace('/', "\\");
+    if p.starts_with("\\\\?\\UNC\\") || p.starts_with("\\\\.\\UNC\\") {
+        return true;
+    }
+    p.starts_with("\\\\") && !p.starts_with("\\\\?\\") && !p.starts_with("\\\\.\\")
 }

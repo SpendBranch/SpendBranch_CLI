@@ -1,7 +1,7 @@
 //! The `ingest/v1` contract (schema/ingest-v1.json) as Rust types. Pure: no I/O.
 //! Every text type validates in its constructor, so an invalid value cannot exist.
 //! Only deltas travel: the server never sums totals.
-use serde::{Serialize, Serializer};
+use serde::{Deserialize, Deserializer, Serialize, Serializer, de::Error as _};
 use std::fmt;
 
 pub const CONTRACT_VERSION: &str = "ingest/v1";
@@ -9,7 +9,7 @@ pub const MAX_BATCH_OBSERVATIONS: usize = 500;
 pub const MAX_BATCH_COVERAGE: usize = 50;
 pub const MAX_TOKENS_PER_COUNTER: u64 = 1_000_000_000_000;
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Source {
     ClaudeCode,
@@ -26,14 +26,14 @@ impl Source {
     }
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum AgentRole {
     Main,
     Subagent,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum PayerEvidence {
     Transcript,
@@ -41,7 +41,7 @@ pub enum PayerEvidence {
     Otlp,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum BillingMode {
     Subscription,
@@ -54,6 +54,13 @@ macro_rules! text_type {
         #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
         #[serde(transparent)]
         pub struct $name(String);
+        impl<'de> Deserialize<'de> for $name {
+            fn deserialize<D: Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+                let text = String::deserialize(d)?;
+                // The message never repeats the text: it may come from a tampered file.
+                Self::new(&text).ok_or_else(|| D::Error::custom(concat!("invalid ", stringify!($name))))
+            }
+        }
         impl $name {
             /// `None` when the text breaks the contract's pattern or length.
             pub fn new(text: &str) -> Option<Self> {
@@ -146,6 +153,21 @@ fn is_format_char(c: char) -> bool {
 #[serde(transparent)]
 pub struct Count(Option<u64>);
 
+impl<'de> Deserialize<'de> for Count {
+    fn deserialize<D: Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+        match Option::<u64>::deserialize(d)? {
+            None => Ok(Count::UNKNOWN),
+            Some(n) => Count::new(n).ok_or_else(|| D::Error::custom("counter above the ceiling")),
+        }
+    }
+}
+
+/// A counter that is present even when it is `null` (unknown): present and unknown differ
+/// from absent only in the text, and we keep the text as it was written.
+fn present<'de, D: Deserializer<'de>>(d: D) -> Result<Option<Count>, D::Error> {
+    Count::deserialize(d).map(Some)
+}
+
 impl Count {
     pub const UNKNOWN: Count = Count(None);
     /// `None` above 1e12, the contract's ceiling.
@@ -157,17 +179,25 @@ impl Count {
     }
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
-#[serde(rename_all = "camelCase")]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct UsageCounters {
     pub input_tokens: Count,
     pub output_tokens: Count,
     pub cache_read_tokens: Count,
     pub cache_write_tokens: Count,
     pub reasoning_tokens: Count,
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        deserialize_with = "present",
+        skip_serializing_if = "Option::is_none"
+    )]
     pub cache_write_1h_tokens: Option<Count>,
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        deserialize_with = "present",
+        skip_serializing_if = "Option::is_none"
+    )]
     pub web_search_requests: Option<Count>,
 }
 
@@ -178,6 +208,7 @@ pub struct Iso(i64);
 
 impl Iso {
     const MAX_MS: i64 = 253_402_300_799_999;
+    pub const EPOCH: Iso = Iso(0);
 
     pub fn from_millis(ms: i64) -> Option<Self> {
         (0..=Self::MAX_MS).contains(&ms).then_some(Self(ms))
@@ -202,6 +233,13 @@ impl fmt::Display for Iso {
     }
 }
 
+impl<'de> Deserialize<'de> for Iso {
+    fn deserialize<D: Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+        let text = String::deserialize(d)?;
+        Iso::parse(&text).ok_or_else(|| D::Error::custom("invalid datetime"))
+    }
+}
+
 impl Serialize for Iso {
     fn serialize<S: Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
         s.collect_str(self)
@@ -220,8 +258,8 @@ pub enum CounterOrigin {
 }
 
 /// Identity of an event: (`source`, `external_session_id`, `external_event_id`).
-#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
-#[serde(rename_all = "camelCase")]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", try_from = "RawObservation")]
 pub struct UsageObservation {
     pub source: Source,
     pub external_session_id: ExternalId,
@@ -247,7 +285,67 @@ pub struct UsageObservation {
     pub branch: Option<Branch>,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+/// An observation as written, before the origin and its base event are checked together.
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct RawObservation {
+    source: Source,
+    external_session_id: ExternalId,
+    external_event_id: ExternalId,
+    occurred_at: Iso,
+    model: Model,
+    agent_role: AgentRole,
+    counters: UsageCounters,
+    counter_origin: RawOrigin,
+    base_event_id: Option<ExternalId>,
+    parser_version: ParserVersion,
+    source_version: Option<SourceVersion>,
+    payer_account_ref: Option<AccountRef>,
+    payer_evidence: Option<PayerEvidence>,
+    billing_mode: Option<BillingMode>,
+    repository: Option<Repository>,
+    branch: Option<Branch>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum RawOrigin {
+    ReportedDelta,
+    DerivedFromCumulative,
+}
+
+impl TryFrom<RawObservation> for UsageObservation {
+    type Error = &'static str;
+
+    fn try_from(r: RawObservation) -> Result<Self, Self::Error> {
+        let origin = match (r.counter_origin, r.base_event_id) {
+            (RawOrigin::ReportedDelta, None) => CounterOrigin::ReportedDelta,
+            (RawOrigin::DerivedFromCumulative, Some(base_event_id)) => {
+                CounterOrigin::DerivedFromCumulative { base_event_id }
+            }
+            _ => return Err("baseEventId is required only with derived_from_cumulative"),
+        };
+        Ok(Self {
+            source: r.source,
+            external_session_id: r.external_session_id,
+            external_event_id: r.external_event_id,
+            occurred_at: r.occurred_at,
+            model: r.model,
+            agent_role: r.agent_role,
+            counters: r.counters,
+            origin,
+            parser_version: r.parser_version,
+            source_version: r.source_version,
+            payer_account_ref: r.payer_account_ref,
+            payer_evidence: r.payer_evidence,
+            billing_mode: r.billing_mode,
+            repository: r.repository,
+            branch: r.branch,
+        })
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum GapReason {
     BufferFull,
@@ -264,13 +362,44 @@ pub enum CoverageState {
 }
 
 /// A missing-data gap or an observed range. Missing data is a gap, never zero.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(try_from = "RawCoverage")]
 pub struct CoverageReport {
     source: Source,
     from: Iso,
     to: Iso,
     #[serde(flatten)]
     state: CoverageState,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RawCoverage {
+    source: Source,
+    from: Iso,
+    to: Iso,
+    state: RawState,
+    reason: Option<GapReason>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum RawState {
+    Observed,
+    Unavailable,
+}
+
+impl TryFrom<RawCoverage> for CoverageReport {
+    type Error = &'static str;
+
+    fn try_from(r: RawCoverage) -> Result<Self, Self::Error> {
+        let state = match (r.state, r.reason) {
+            (RawState::Observed, None) => CoverageState::Observed,
+            (RawState::Unavailable, Some(reason)) => CoverageState::Unavailable { reason },
+            _ => return Err("reason is required only with unavailable"),
+        };
+        CoverageReport::new(r.source, r.from, r.to, state).ok_or("from must precede to")
+    }
 }
 
 impl CoverageReport {
@@ -285,6 +414,17 @@ impl CoverageReport {
     }
     pub fn state(&self) -> CoverageState {
         self.state
+    }
+
+    /// A gap of one second that ends at `end` (at least 1 ms after the epoch). Never fails.
+    pub fn unavailable_ending(source: Source, end: Iso, reason: GapReason) -> Self {
+        let to = Iso(end.0.max(1));
+        Self {
+            source,
+            from: Iso((to.0 - 1000).max(0)),
+            to,
+            state: CoverageState::Unavailable { reason },
+        }
     }
 
     /// `None` unless `from` precedes `to`.

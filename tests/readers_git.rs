@@ -135,3 +135,92 @@ fn the_folder_name_is_never_interpreted_by_a_shell() {
         );
     }
 }
+
+#[test]
+fn network_shares_are_recognized_in_every_spelling() {
+    use spendbranch::readers::git::is_network_path;
+    for share in [
+        r"\\server\share\repo",
+        "//server/share/repo",
+        r"\\?\UNC\server\share",
+        r"\\.\UNC\server\share",
+        r"\\server",
+    ] {
+        assert!(is_network_path(share), "{share}");
+    }
+    for local in [
+        r"C:\work\repo",
+        "C:/work/repo",
+        r"\\?\C:\work\repo",
+        r"\\.\C:\work",
+        "/home/dev/repo",
+        "relative/dir",
+        "",
+    ] {
+        assert!(!is_network_path(local), "{local}");
+    }
+}
+
+#[test]
+fn a_network_path_never_reaches_git() {
+    let tmp = tempfile::tempdir().unwrap();
+    let marker = tmp.path().join("git-was-run");
+    // A "git" that records being run: it must not be, for a path that points at another machine.
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let fake = tmp.path().join("fake-git");
+        fs::write(
+            &fake,
+            format!(
+                "#!/bin/sh\ntouch '{}'\necho https://github.com/a/b\n",
+                marker.display()
+            ),
+        )
+        .unwrap();
+        fs::set_permissions(&fake, fs::Permissions::from_mode(0o755)).unwrap();
+        let mut r = RepoResolver::with_program(fake.into(), None, Duration::from_secs(2));
+        assert_eq!(r.resolve("//server/share/repo"), None);
+        assert!(!marker.exists(), "git was started for a network path");
+    }
+    let _ = marker;
+}
+
+#[test]
+fn git_is_run_with_a_clean_environment_and_exact_arguments() {
+    let r = RepoResolver::new(None);
+    let cmd = r.build_command("/work/portal");
+    assert_eq!(cmd.get_program(), "git");
+    let args: Vec<_> = cmd
+        .get_args()
+        .map(|a| a.to_string_lossy().into_owned())
+        .collect();
+    assert_eq!(
+        args,
+        ["-C", "/work/portal", "remote", "get-url", "origin"],
+        "no shell, no extra options"
+    );
+    let envs: std::collections::HashMap<_, _> = cmd
+        .get_envs()
+        .map(|(k, v)| {
+            (
+                k.to_string_lossy().into_owned(),
+                v.map(|v| v.to_string_lossy().into_owned()),
+            )
+        })
+        .collect();
+    assert_eq!(envs["GIT_TERMINAL_PROMPT"].as_deref(), Some("0"));
+    for var in [
+        "GIT_DIR",
+        "GIT_WORK_TREE",
+        "GIT_INDEX_FILE",
+        "GIT_OBJECT_DIRECTORY",
+        "GIT_COMMON_DIR",
+    ] {
+        assert_eq!(
+            envs.get(var),
+            Some(&None),
+            "{var} must be removed, not inherited"
+        );
+    }
+}

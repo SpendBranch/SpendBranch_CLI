@@ -3,40 +3,13 @@
 use spendbranch::contract::Iso;
 use spendbranch::readers::{claude_code, codex};
 use spendbranch::sources::outcome::ReaderState;
-use std::alloc::{GlobalAlloc, Layout, System};
-use std::{
-    fs,
-    io::Write,
-    sync::atomic::{AtomicUsize, Ordering::SeqCst},
-};
+use std::{fs, io::Write};
 
-struct Counting;
-static CURRENT: AtomicUsize = AtomicUsize::new(0);
-static PEAK: AtomicUsize = AtomicUsize::new(0);
-
-unsafe impl GlobalAlloc for Counting {
-    unsafe fn alloc(&self, l: Layout) -> *mut u8 {
-        let p = unsafe { System.alloc(l) };
-        if !p.is_null() {
-            PEAK.fetch_max(CURRENT.fetch_add(l.size(), SeqCst) + l.size(), SeqCst);
-        }
-        p
-    }
-    unsafe fn dealloc(&self, p: *mut u8, l: Layout) {
-        CURRENT.fetch_sub(l.size(), SeqCst);
-        unsafe { System.dealloc(p, l) }
-    }
-}
+mod common;
+use common::extra_peak;
 
 #[global_allocator]
-static ALLOC: Counting = Counting;
-
-fn extra_peak<T>(f: impl FnOnce() -> T) -> (usize, T) {
-    let base = CURRENT.load(SeqCst);
-    PEAK.store(base, SeqCst);
-    let out = f();
-    (PEAK.load(SeqCst) - base, out)
-}
+static ALLOC: common::Counting = common::Counting;
 
 fn big_line(prefix: &str, suffix: &str, mib: usize, f: &mut fs::File) {
     f.write_all(prefix.as_bytes()).unwrap();

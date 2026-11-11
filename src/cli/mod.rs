@@ -3,11 +3,9 @@ pub mod args;
 pub mod messages;
 
 use crate::commands::{self, Ctx};
-use args::Command;
+use crate::env::Env;
+use args::Parsed;
 use std::io::Write;
-
-/// Reads one environment variable. A parameter so tests never touch the real environment.
-pub type Env<'a> = &'a dyn Fn(&str) -> Option<String>;
 
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
 
@@ -36,13 +34,13 @@ fn dispatch(
         }
     };
     match command {
-        Command::Version => writeln!(out, "{VERSION}")?,
-        Command::Help => writeln!(out, "{help}")?,
-        Command::Unknown(name) => {
+        Parsed::Version => writeln!(out, "{VERSION}")?,
+        Parsed::Help => writeln!(out, "{help}")?,
+        Parsed::Unknown(name) => {
             writeln!(out, "Unknown command: {name}.\n\n{help}")?;
             return Ok(2);
         }
-        other => return commands::run(other, &mut Ctx { env, out }),
+        Parsed::Run(command) => return commands::run(command, &mut Ctx { env, out }),
     }
     Ok(0)
 }

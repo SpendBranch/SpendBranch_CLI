@@ -368,7 +368,7 @@ fn an_unreadable_format_is_one_gap_then_stays_quiet() {
 
 #[cfg(unix)]
 #[test]
-fn an_unreadable_rollout_is_one_gap() {
+fn an_unreadable_rollout_is_one_gap_and_is_read_once_it_opens_again() {
     use std::os::unix::fs::PermissionsExt;
     let mut rig = Rig::new();
     let file = rig.session("rollout-a.jsonl");
@@ -378,7 +378,17 @@ fn an_unreadable_rollout_is_one_gap() {
         return; // running as root
     }
     assert_eq!(gaps(&rig.collect()), [GapReason::AdapterError]);
-    assert!(gaps(&rig.collect()).is_empty());
+    assert!(gaps(&rig.collect()).is_empty(), "reported once");
+    // a failure may be passing: the file is tried again, not given up on
+    fs::set_permissions(&file, fs::Permissions::from_mode(0o600)).unwrap();
+    assert_eq!(ids(&rig.collect()).len(), 2);
+    assert!(
+        rig.store
+            .reader_state(Source::Codex)
+            .unwrap()
+            .unsupported_files
+            .is_empty()
+    );
 }
 
 #[test]

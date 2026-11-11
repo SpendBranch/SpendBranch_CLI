@@ -6,13 +6,52 @@ use std::{
     path::Path,
 };
 
-/// Creates the folder (and parents) and forces 0700 on the leaf.
+/// Makes sure the folder exists. A folder we create is 0700. A folder that already exists
+/// is never touched (it may be the user's home or a shared folder chosen by mistake), but it
+/// is refused if anybody could write in it: another user could plant the files we open.
+/// Group write is allowed: with a private group per user, the Debian default, it is normal.
 pub fn create_dir(path: &Path) -> io::Result<()> {
-    fs::create_dir_all(path)?;
+    match fs::metadata(path) {
+        Ok(meta) => check_existing(path, &meta),
+        Err(e) if e.kind() == io::ErrorKind::NotFound => create_new(path),
+        Err(e) => Err(e),
+    }
+}
+
+fn create_new(path: &Path) -> io::Result<()> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::DirBuilderExt;
+        fs::DirBuilder::new()
+            .recursive(true)
+            .mode(0o700)
+            .create(path)
+    }
+    #[cfg(not(unix))]
+    {
+        fs::create_dir_all(path)
+    }
+}
+
+fn check_existing(path: &Path, meta: &fs::Metadata) -> io::Result<()> {
+    if !meta.is_dir() {
+        return Err(io::Error::new(
+            io::ErrorKind::AlreadyExists,
+            format!("{} exists and is not a folder", path.display()),
+        ));
+    }
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
-        fs::set_permissions(path, fs::Permissions::from_mode(0o700))?;
+        if meta.permissions().mode() & 0o002 != 0 {
+            return Err(io::Error::new(
+                io::ErrorKind::PermissionDenied,
+                format!(
+                    "{} can be written by any user; make it private (chmod 700) or pick another folder with SPENDBRANCH_HOME",
+                    path.display()
+                ),
+            ));
+        }
     }
     Ok(())
 }

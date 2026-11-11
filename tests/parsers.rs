@@ -35,10 +35,11 @@ fn seen_of(options: &Value) -> Option<HashSet<u64>> {
 fn run_claude(dir: &Path) -> Value {
     let text = fs::read_to_string(dir.join("input.jsonl")).unwrap();
     let options = json_file(&dir.join("options.json")).unwrap_or(Value::Null);
-    let seen = seen_of(&options);
+    let seen = seen_of(&options).unwrap_or_default();
+    let is_seen = |h: u64| seen.contains(&h);
     let opts = claude_code::ReadOptions {
         subagent_file: options["role"] == "subagent",
-        seen: seen.as_ref(),
+        seen: Some(&is_seen),
     };
     let first = claude_code::read(&text, &opts);
     assert_eq!(
@@ -53,10 +54,11 @@ fn run_claude(dir: &Path) -> Value {
 fn run_codex(dir: &Path) -> Value {
     let text = fs::read_to_string(dir.join("input.jsonl")).unwrap();
     let options = json_file(&dir.join("options.json")).unwrap_or(Value::Null);
-    let seen = seen_of(&options);
+    let seen = seen_of(&options).unwrap_or_default();
+    let is_seen = |h: u64| seen.contains(&h);
     let opts = codex::ReadOptions {
         after_ordinal: options["afterOrdinal"].as_i64(),
-        seen: seen.as_ref(),
+        seen: Some(&is_seen),
     };
     let first = codex::read(&text, &opts);
     assert_eq!(
@@ -163,10 +165,11 @@ fn reading_again_with_the_new_keys_as_seen_emits_nothing() {
     let first = claude_code::read(&text, &claude_code::ReadOptions::default());
     let seen: HashSet<u64> = first.new_keys.iter().map(|k| key_hash(k)).collect();
     assert!(!first.observations.is_empty());
+    let is_seen = |h: u64| seen.contains(&h);
     let again = claude_code::read(
         &text,
         &claude_code::ReadOptions {
-            seen: Some(&seen),
+            seen: Some(&is_seen),
             ..Default::default()
         },
     );
@@ -267,4 +270,24 @@ fn a_resume_state_survives_being_saved_as_json() {
     let resume = resume.unwrap();
     let again: Resume = serde_json::from_str(&serde_json::to_string(&resume).unwrap()).unwrap();
     assert_eq!(again, resume);
+}
+
+#[test]
+fn a_saved_resume_state_stays_small_however_long_the_session() {
+    use codex::{Parser, ReadOptions};
+    let opts = ReadOptions::default();
+    let mut p = Parser::new(&opts);
+    p.push_line(r#"{"timestamp":"2026-01-01T00:00:00Z","type":"session_meta","ordinal":0,"payload":{"id":"t1"}}"#);
+    for i in 0..500 {
+        p.push_line(&format!(r#"{{"timestamp":"2026-01-01T00:00:00Z","type":"turn_context","ordinal":{},"payload":{{"turn_id":"turn_{i}","model":"gpt-test-1"}}}}"#, i + 1));
+    }
+    let (_, resume) = p.finish();
+    let resume = resume.unwrap();
+    assert_eq!(resume.turn_models.len(), 64);
+    assert_eq!(
+        resume.turn_models.last().unwrap().0,
+        "turn_499",
+        "the most recent turns are the ones kept"
+    );
+    assert!(serde_json::to_string(&resume).unwrap().len() < 8 * 1024);
 }
