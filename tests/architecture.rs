@@ -12,6 +12,7 @@ const PURE: &[&str] = &[
     "src/auth.rs",
     "src/api.rs",
     "src/hooks.rs",
+    "src/relay.rs",
     "src/scheduler.rs",
     "src/sync",
 ];

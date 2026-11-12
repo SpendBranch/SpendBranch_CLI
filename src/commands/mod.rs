@@ -1,16 +1,17 @@
 //! One function per command; they orchestrate, the business rules live elsewhere.
 //! F1 covers everything that needs no network: usage checks and the "not connected"
-//! answers. Commands that need the server end in `NOT_AVAILABLE` until their phase
-//! (otel/relay F8).
+//! answers.
 mod account;
 mod hook;
 mod hooks;
+mod otel;
+mod relay;
 mod setup;
 mod sync;
 
 use crate::cli::{args::Command, messages as m};
 use crate::env::Env;
-use crate::infra::{paths, store::Store, system::System};
+use crate::infra::system::System;
 use crate::sources::Source;
 use std::{
     error::Error,
@@ -46,7 +47,7 @@ pub fn run(command: Command, ctx: &mut Ctx) -> Result<i32> {
         },
         Command::Login { server } => account::login(ctx, server),
         Command::Status => account::status(ctx),
-        Command::Relay { .. } => require_connection(ctx),
+        Command::Relay { port } => relay::run(ctx, port),
         Command::Sync => sync::run(ctx),
         Command::Enable(s) => match s.as_deref().and_then(Source::parse) {
             Some(source) => account::enable(ctx, source),
@@ -74,22 +75,9 @@ pub(super) fn say(ctx: &mut Ctx, text: &str, code: i32) -> Result<i32> {
     Ok(code)
 }
 
-fn connected(ctx: &Ctx) -> Result<bool> {
-    Ok(Store::open(&paths::data_dir(ctx.env)?)?.is_connected()?)
-}
-
-/// Commands that only make sense once paired.
-fn require_connection(ctx: &mut Ctx) -> Result<i32> {
-    if connected(ctx)? {
-        say(ctx, m::NOT_AVAILABLE, 1)
-    } else {
-        say(ctx, m::NOT_CONNECTED, 1)
-    }
-}
-
 fn otel(ctx: &mut Ctx, source: Option<String>) -> Result<i32> {
     match source.map(|s| s.replace('-', "_")).as_deref() {
-        Some("claude_code") => require_connection(ctx),
+        Some("claude_code") => otel::run(ctx),
         Some("codex") => say(ctx, m::OTEL_CODEX_REFUSED, 2),
         _ => say(ctx, m::USAGE_OTEL, 2),
     }

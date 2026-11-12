@@ -17,6 +17,7 @@ pub mod claude_code;
 pub mod codex;
 pub mod coverage;
 pub(crate) mod json;
+pub mod otlp;
 pub mod outcome;
 pub mod repository;
 pub mod version;

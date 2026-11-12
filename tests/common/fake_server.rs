@@ -61,6 +61,7 @@ pub struct State {
     pub collection: Vec<serde_json::Value>,
     /// How `POST /api/ingest/v1/events` behaves, and what it was given.
     pub ingest: Ingest,
+    pub otlp: Otlp,
     /// Every observation accepted, once per identity: what the API would have stored.
     pub stored: Vec<serde_json::Value>,
     pub stored_coverage: Vec<serde_json::Value>,
@@ -74,6 +75,15 @@ pub struct State {
     gaps: Vec<(String, i64, i64, String, usize)>,
     observed: Vec<(String, i64, i64, usize)>,
     reports: usize,
+}
+
+/// `POST /api/ingest/otlp/v1/logs`: what the relay sent, and how the route answers.
+#[derive(Default)]
+pub struct Otlp {
+    /// Batch-level failures served first, one per request: (status, code).
+    pub fail_next: VecDeque<(u16, String)>,
+    /// Every payload that reached the route signed and well-formed: (device, JSON).
+    pub received: Vec<(String, serde_json::Value)>,
 }
 
 #[derive(Default)]
@@ -308,6 +318,10 @@ fn route(s: &mut State, req: Seen) -> Reply {
             Ok(id) => ingest(s, &req, &id),
             Err(reply) => reply,
         },
+        ("POST", "/api/ingest/otlp/v1/logs") => match authenticate(s, &req) {
+            Ok(id) => otlp_logs(s, &req, &id),
+            Err(reply) => reply,
+        },
         ("GET", "/redirect") => (
             302,
             vec![("Location".into(), s.redirect_to.clone())],
@@ -523,6 +537,60 @@ fn authenticate(s: &mut State, req: &Seen) -> Result<String, Reply> {
     }
     s.nonces.push(pair);
     Ok(id.to_owned())
+}
+
+/// `POST /api/ingest/otlp/v1/logs`: JSON up to 1 MiB, and the strict filter: a record with any
+/// attribute outside the declared twelve is refused whole.
+fn otlp_logs(s: &mut State, req: &Seen, device: &str) -> Reply {
+    const ALLOWED: [&str; 12] = [
+        "event.name",
+        "event.timestamp",
+        "session.id",
+        "request_id",
+        "model",
+        "input_tokens",
+        "output_tokens",
+        "cache_read_tokens",
+        "cache_creation_tokens",
+        "cache_creation_1h_tokens",
+        "query_source",
+        "organization.id",
+    ];
+    if let Some((status, code)) = s.otlp.fail_next.pop_front() {
+        return error(status, &code);
+    }
+    let header = |n: &str| req.headers.get(n).map(String::as_str);
+    if header("content-type") != Some("application/json") || header("content-encoding").is_some() {
+        return error(415, "UNSUPPORTED_MEDIA_TYPE");
+    }
+    if req.body.len() > 1024 * 1024 {
+        return error(413, "PAYLOAD_TOO_LARGE");
+    }
+    let Ok(v) = serde_json::from_slice::<serde_json::Value>(&req.body) else {
+        return error(400, "VALIDATION_FAILED");
+    };
+    let mut refused = 0;
+    for resource in v["resourceLogs"].as_array().into_iter().flatten() {
+        for scope in resource["scopeLogs"].as_array().into_iter().flatten() {
+            for record in scope["logRecords"].as_array().into_iter().flatten() {
+                let outside = record["attributes"]
+                    .as_array()
+                    .into_iter()
+                    .flatten()
+                    .any(|a| !ALLOWED.contains(&a["key"].as_str().unwrap_or("")));
+                refused += u64::from(outside);
+            }
+        }
+    }
+    s.otlp.received.push((device.to_owned(), v));
+    if refused == 0 {
+        json(200, serde_json::json!({}))
+    } else {
+        json(
+            200,
+            serde_json::json!({"partialSuccess": {"rejectedLogRecords": refused, "errorMessage": "x"}}),
+        )
+    }
 }
 
 /// `POST /api/ingest/v1/events` as the contract describes it: gzip, at most 1 MiB once

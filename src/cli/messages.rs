@@ -205,3 +205,43 @@ pub fn scheduler_failed(why: &str) -> String {
 pub fn scheduler_not_removed(why: &str) -> String {
     format!("Could not remove the scheduled sync: {why}")
 }
+
+// --- otel and relay -------------------------------------------------------------------
+
+pub const OTEL_WARNING: &str = "Do not turn on OTEL_LOG_USER_PROMPTS, OTEL_LOG_TOOL_DETAILS or OTEL_LOG_RAW_API_BODIES. OpenTelemetry carries no history: `spendbranch sync` stays the source of the final numbers.";
+pub const RELAY_DEFAULT_PORT: u16 = 4318;
+
+pub fn otel_written(file: &str, windows: bool) -> String {
+    let load = if windows {
+        format!(
+            "Get-Content -Raw '{}' | Invoke-Expression",
+            file.replace('\'', "''")
+        )
+    } else {
+        format!("source '{}'", file.replace('\'', "'\\''"))
+    };
+    format!(
+        "Wrote {file}.\nLoad it in the terminal where you start Claude Code:\n  {load}\nand keep `spendbranch relay` running while you work. Nothing secret is in that file."
+    )
+}
+
+pub fn relay_listening(port: u16, server: &str) -> String {
+    let mut text = format!(
+        "Relay listening on http://127.0.0.1:{port}{} and forwarding to {server}. Press Ctrl+C to stop.",
+        crate::relay::PATH
+    );
+    if port != RELAY_DEFAULT_PORT {
+        text.push_str(&format!(
+            "\n`spendbranch otel` writes port {RELAY_DEFAULT_PORT}: point the agent's OTEL_EXPORTER_OTLP_LOGS_ENDPOINT at this port."
+        ));
+    }
+    text
+}
+
+pub fn relay_port_busy(port: u16, why: &str) -> String {
+    format!("Cannot listen on 127.0.0.1:{port}: {why}. Pick another port with `--port`.")
+}
+
+pub fn relay_dropped(n: u64, why: &str) -> String {
+    format!("Dropped {n} batch(es) so far: {why}")
+}

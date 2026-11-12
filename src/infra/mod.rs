@@ -9,6 +9,7 @@ pub mod keys;
 pub mod lock;
 pub mod paths;
 pub mod private_fs;
+pub mod relay_server;
 pub mod scheduler;
 pub mod store;
 pub mod system;

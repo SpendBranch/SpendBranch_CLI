@@ -78,3 +78,11 @@ pub fn open(path: &Path, append: bool) -> io::Result<File> {
     }
     Ok(file)
 }
+
+/// Replaces the content of an owner-only file.
+pub fn write(path: &Path, text: &str) -> io::Result<()> {
+    use std::io::Write;
+    let mut file = open(path, false)?;
+    file.set_len(0)?;
+    file.write_all(text.as_bytes())
+}

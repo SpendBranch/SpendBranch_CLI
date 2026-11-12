@@ -25,6 +25,7 @@ pub mod env;
 pub mod hooks;
 pub mod infra;
 pub mod readers;
+pub mod relay;
 pub mod scheduler;
 pub mod sources;
 pub mod sync;

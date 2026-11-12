@@ -28,6 +28,9 @@ pub trait System {
     fn spawn_detached(&self, exe: &Path, args: &[&str], log: &Path) -> io::Result<()>;
     /// Runs a tool to the end.
     fn run(&self, program: &str, args: &[&str], stdin: Option<&str>) -> io::Result<Ran>;
+    /// A long-running command (`relay`) should end now. The real answer is never: it ends with
+    /// the signal (Ctrl+C), which holds nothing that needs closing.
+    fn stopped(&self) -> bool;
 }
 
 pub struct Real;
@@ -97,6 +100,10 @@ impl System for Real {
             stderr: String::from_utf8_lossy(&out.stderr).into_owned(),
         })
     }
+
+    fn stopped(&self) -> bool {
+        false
+    }
 }
 
 /// For `cli::run`, which must never start anything.
@@ -117,5 +124,8 @@ impl System for Inert {
             io::ErrorKind::NotFound,
             "no tools in this mode",
         ))
+    }
+    fn stopped(&self) -> bool {
+        true
     }
 }

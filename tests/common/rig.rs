@@ -90,6 +90,9 @@ impl System for FakeSystem {
         ));
         Ok(())
     }
+    fn stopped(&self) -> bool {
+        true
+    }
     fn run(&self, program: &str, args: &[&str], stdin: Option<&str>) -> io::Result<Ran> {
         if self.missing.borrow().contains(program) {
             return Err(io::Error::new(io::ErrorKind::NotFound, "not found"));
