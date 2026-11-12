@@ -5,6 +5,10 @@
 //! so they wait until a different message follows or the file has settled.
 //! Pure ordering logic: it knows nothing about files.
 
+/// Most bytes kept for one open message. Past it the lines are sent: memory stays flat even for
+/// a file with a huge run of lines that carry no request id.
+pub const MAX_HELD_BYTES: usize = 16 * 1024 * 1024;
+
 struct Line {
     bytes: Vec<u8>,
     too_long: bool,
@@ -16,6 +20,7 @@ struct Line {
 pub struct OpenMessage {
     key: Option<String>,
     pending: Vec<Line>,
+    held: usize,
 }
 
 impl OpenMessage {
@@ -46,12 +51,17 @@ impl OpenMessage {
             too_long,
             start,
         });
+        self.held += bytes.len();
+        if self.held > MAX_HELD_BYTES {
+            self.flush(feed);
+        }
     }
 
     fn flush(&mut self, feed: &mut impl FnMut(&[u8], bool)) {
         for line in self.pending.drain(..) {
             feed(&line.bytes, line.too_long);
         }
+        self.held = 0;
     }
 
     /// The file ended. With `hold`, the open message stays unsent and the offset where it

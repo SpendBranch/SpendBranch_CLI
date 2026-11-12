@@ -288,9 +288,11 @@ impl PairingStarted {
                 }
             });
         let timing_ok = (1..=3600).contains(&self.expires_in) && (1..=60).contains(&self.interval);
-        let links_ok = server.same_origin(&self.verification_uri)
-            && server.same_origin(&self.verification_uri_complete)
-            && !self.verification_uri_complete.contains(char::is_whitespace);
+        // The links are printed, so nothing but visible ASCII: no escape sequence, no bidi mark.
+        let plain = |link: &str| link.len() <= 2048 && link.bytes().all(|b| b.is_ascii_graphic());
+        let links_ok = [&self.verification_uri, &self.verification_uri_complete]
+            .into_iter()
+            .all(|link| plain(link) && server.same_origin(link));
         (code_ok && user_ok && timing_ok && links_ok).then_some(self)
     }
 }

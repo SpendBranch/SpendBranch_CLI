@@ -90,3 +90,18 @@ fn a_message_that_comes_back_after_another_is_a_new_message() {
     );
     assert_eq!(sent, ["a", "b"]);
 }
+
+#[test]
+fn a_long_run_of_keyless_lines_is_not_held_without_limit() {
+    use spendbranch::readers::hold::MAX_HELD_BYTES;
+    let sent = std::cell::Cell::new(0usize);
+    let mut feed = |bytes: &[u8], _: bool| sent.set(sent.get() + bytes.len());
+    let mut open = OpenMessage::default();
+    open.push(b"m1", false, 0, Some("r1"), &mut feed);
+    let line = vec![b'x'; 1024 * 1024];
+    for i in 0..(2 * MAX_HELD_BYTES / line.len()) {
+        open.push(&line, false, 3 + i as u64, None, &mut feed);
+    }
+    assert!(sent.get() > 0, "past the cap the lines are sent, not kept");
+    open.finish(true, &mut feed);
+}

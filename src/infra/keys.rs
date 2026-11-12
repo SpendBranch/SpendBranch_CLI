@@ -234,15 +234,25 @@ impl KeyStore for KeyFiles {
     fn save(&self, slot: Slot, key: &DeviceKey) -> Result<()> {
         private_fs::create_dir(&self.dir)?;
         // Write beside it, then rename: a crash leaves the old key or the new one, never half.
-        let temp = self.dir.join("device.key.tmp");
-        let mut file = private_fs::open(&temp, false)?;
-        file.set_len(0)?;
-        file.write_all(key.to_text().as_bytes())?;
-        file.write_all(b"\n")?;
-        file.sync_all()?;
-        drop(file);
-        fs::rename(&temp, self.path(slot))?;
-        Ok(())
+        // The name has the slot and the process, so two writers never share a temporary file.
+        let temp = self.dir.join(format!(
+            "device.key.{}.{}.tmp",
+            slot.name(),
+            std::process::id()
+        ));
+        let written = (|| {
+            let mut file = private_fs::open(&temp, false)?;
+            file.set_len(0)?;
+            file.write_all(key.to_text().as_bytes())?;
+            file.write_all(b"\n")?;
+            file.sync_all()?;
+            drop(file);
+            fs::rename(&temp, self.path(slot))
+        })();
+        if written.is_err() {
+            let _ = fs::remove_file(&temp); // never leave a copy of the key lying around
+        }
+        Ok(written?)
     }
 
     fn delete(&self, slot: Slot) -> Result<()> {

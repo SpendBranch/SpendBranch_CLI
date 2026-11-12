@@ -291,3 +291,27 @@ fn a_saved_resume_state_stays_small_however_long_the_session() {
     );
     assert!(serde_json::to_string(&resume).unwrap().len() < 8 * 1024);
 }
+
+#[test]
+fn a_password_with_an_at_sign_never_reaches_the_repository_key() {
+    assert_eq!(
+        repository_key_of("https://user:p@ss@github.com/acme/portal.git").as_deref(),
+        Some("github.com/acme/portal")
+    );
+}
+
+#[test]
+fn lines_of_one_request_keep_the_largest_counter_of_each_kind() {
+    // Claude Code writes one line per content block; the counters only grow, but a later line
+    // may carry a smaller (or missing) one, and the answer must not shrink.
+    let line = |out: &str, cache: &str| {
+        format!(
+            r#"{{"type":"assistant","sessionId":"s1","requestId":"r1","timestamp":"2026-06-01T10:00:00Z","message":{{"id":"m","model":"claude-test-1","usage":{{"input_tokens":5,"output_tokens":{out}{cache}}}}}}}"#
+        )
+    };
+    let text = [line("20", r#","cache_read_input_tokens":7"#), line("3", "")].join("\n");
+    let result = claude_code::read(&text, &claude_code::ReadOptions::default());
+    let c = &result.observations[0].counters;
+    assert_eq!(c.output_tokens.get(), Some(20));
+    assert_eq!(c.cache_read_tokens.get(), Some(7));
+}

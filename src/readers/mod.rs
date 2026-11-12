@@ -60,7 +60,6 @@ pub(crate) fn tail_hash(file: &mut std::fs::File, offset: u64) -> std::io::Resul
     let mut bytes = [0u8; 128];
     file.seek(SeekFrom::Start(0))?;
     file.read_exact(&mut bytes[..n])?;
-    let _ = ();
     file.seek(SeekFrom::Start(offset - n as u64))?;
     file.read_exact(&mut bytes[n..2 * n])?;
     Ok(fnv(&bytes[..2 * n]))
