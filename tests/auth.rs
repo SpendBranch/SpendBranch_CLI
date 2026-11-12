@@ -41,6 +41,12 @@ fn signature_matches_the_shared_vectors() {
         .collect::<Vec<_>>()
         .join("-");
     assert_eq!(fingerprint, text(&v["keyFingerprint"]));
+    assert_eq!(
+        key.fingerprint(),
+        text(&v["keyFingerprint"]),
+        "the crate's own function agrees"
+    );
+    assert_eq!(key.fingerprint(), "5647-5aa7-5463-474c");
     for c in v["cases"].as_array().unwrap() {
         let nonce: [u8; 16] = B64.decode(text(&c["nonce"])).unwrap().try_into().unwrap();
         let (method, path, body) = (text(&c["method"]), text(&c["path"]), text(&c["body"]));

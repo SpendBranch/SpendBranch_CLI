@@ -54,6 +54,21 @@ impl DeviceKey {
     pub fn public_key(&self) -> String {
         B64.encode(self.0.verifying_key().as_bytes())
     }
+
+    /// What `status` shows next to the server's own value: the first 16 lower-case hex
+    /// characters of `sha256` of the 32 raw public-key bytes, in groups of four.
+    pub fn fingerprint(&self) -> String {
+        let hex: String = Sha256::digest(self.0.verifying_key().as_bytes())
+            .iter()
+            .take(8)
+            .map(|b| format!("{b:02x}"))
+            .collect();
+        hex.as_bytes()
+            .chunks(4)
+            .map(|group| String::from_utf8_lossy(group))
+            .collect::<Vec<_>>()
+            .join("-")
+    }
 }
 
 impl fmt::Debug for DeviceKey {

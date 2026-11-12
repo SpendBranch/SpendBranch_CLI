@@ -3,6 +3,8 @@
 //!
 //! It deliberately does not use the crate's own `auth` module. It builds the signed text
 //! by hand from the spec, so a mistake in the client's code is not repeated here.
+// Each test binary that includes this file uses a part of it.
+#![allow(dead_code)]
 use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD as B64};
 use ed25519_dalek::{Signature, VerifyingKey};
 use sha2::{Digest, Sha256};
@@ -32,6 +34,7 @@ pub struct Device {
     key: VerifyingKey,
     pub active: bool,
     pub revoked_reason: Option<String>,
+    installation_id: String,
 }
 
 #[derive(Default)]
@@ -40,12 +43,44 @@ pub struct State {
     /// (device, nonce): what the replay check remembers.
     nonces: Vec<(String, String)>,
     /// How far this server's clock is from the real one.
-    clock_offset_ms: i64,
+    pub clock_offset_ms: i64,
     pub seen: Vec<Seen>,
     /// Where `/redirect` sends the caller.
     pub redirect_to: String,
-    pairing: Option<(String, [u8; 32], bool)>,
+    pairing: Option<(String, [u8; 32], bool, String)>,
     next_device: u32,
+    /// The server's own address, for the links it hands out.
+    base: String,
+    /// How the next pairing goes. By default it waits for `approve()`.
+    pub script: Script,
+    polls: usize,
+    /// The reply to `GET /api/cli/v1/status`, apart from the device (that one is computed).
+    pub organization_name: String,
+    pub sources: Vec<serde_json::Value>,
+    pub collection: Vec<serde_json::Value>,
+}
+
+/// What the person does in the browser, and when the server says so.
+#[derive(Clone, Default)]
+pub struct Script {
+    /// Approve at this poll (1 = the first). `None`: wait for `approve()`.
+    pub approve_at_poll: Option<usize>,
+    /// Answer `slow_down` to this many polls first.
+    pub slow_downs: usize,
+    /// Answer `access_denied` / `expired_token` instead of approving.
+    pub deny: bool,
+    pub expire: bool,
+    /// The `interval` handed out (default 5).
+    pub interval: Option<u64>,
+    pub organization_id: Option<String>,
+    pub organization_name: Option<String>,
+    /// A status code to answer every poll with instead (a broken server).
+    pub poll_status: Option<u16>,
+    /// The verification link is on this origin instead of the server's own.
+    pub link_origin: Option<String>,
+    /// What `status` says about the device, instead of the real fingerprint and expiry.
+    pub fingerprint: Option<String>,
+    pub device_expires_at: Option<String>,
 }
 
 pub struct FakeServer {
@@ -81,7 +116,11 @@ impl FakeServer {
     pub fn start() -> Self {
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let addr = listener.local_addr().unwrap();
-        let state = Arc::new(Mutex::new(State::default()));
+        let state = Arc::new(Mutex::new(State {
+            base: format!("http://127.0.0.1:{}", addr.port()),
+            organization_name: "Acme Inc.".into(),
+            ..State::default()
+        }));
         let stop = Arc::new(AtomicBool::new(false));
         let (s, st) = (state.clone(), stop.clone());
         thread::spawn(move || {
@@ -108,17 +147,7 @@ impl FakeServer {
         let mut s = self.state.lock().unwrap();
         s.next_device += 1;
         let id = format!("dev-{}", s.next_device);
-        let (_, key, approved) = s.pairing.as_mut().expect("no pairing started");
-        let key = VerifyingKey::from_bytes(key).unwrap();
-        *approved = true;
-        s.devices.insert(
-            id.clone(),
-            Device {
-                key,
-                active: true,
-                revoked_reason: None,
-            },
-        );
+        approve_pending(&mut s, &id);
         id
     }
 
@@ -131,8 +160,14 @@ impl FakeServer {
                 key: VerifyingKey::from_bytes(&bytes).unwrap(),
                 active: true,
                 revoked_reason: None,
+                installation_id: String::new(),
             },
         );
+    }
+
+    /// Changes how pairing goes and what `status` says.
+    pub fn configure(&self, edit: impl FnOnce(&mut State)) {
+        edit(&mut self.state.lock().unwrap());
     }
 
     pub fn seen(&self) -> Vec<Seen> {
@@ -225,7 +260,7 @@ fn route(s: &mut State, req: Seen) -> Reply {
         ("POST", "/api/cli/v1/device-codes") => start_pairing(s, &req.body),
         ("POST", "/api/cli/v1/tokens") => poll(s, &req.body),
         ("GET", "/api/cli/v1/status") => match authenticate(s, &req) {
-            Ok(_) => json(200, serde_json::json!({"organizationName": "Acme"})),
+            Ok(id) => status(s, &id),
             Err(reply) => reply,
         },
         ("POST", "/api/cli/v1/logout") => match authenticate(s, &req) {
@@ -275,43 +310,127 @@ fn start_pairing(s: &mut State, body: &[u8]) -> Reply {
     let (true, Some(key)) = (keys == ["cliVersion", "installationId", "publicKey"], key) else {
         return error(400, "VALIDATION_FAILED");
     };
-    s.pairing = Some(("dc-abcdefghijklmnopqrstuvwxyz".into(), key, false));
+    let installation_id = map["installationId"].as_str().unwrap_or("").to_owned();
+    s.pairing = Some((
+        "dc-abcdefghijklmnopqrstuvwxyz".into(),
+        key,
+        false,
+        installation_id,
+    ));
+    s.polls = 0;
+    let origin = s
+        .script
+        .link_origin
+        .clone()
+        .unwrap_or_else(|| s.base.clone());
     json(
         200,
         serde_json::json!({
             "deviceCode": "dc-abcdefghijklmnopqrstuvwxyz",
             "userCode": "BCDF-GHJK",
-            "verificationUri": "http://127.0.0.1/devices/pair",
-            "verificationUriComplete": "http://127.0.0.1/devices/pair?code=BCDF-GHJK",
+            "verificationUri": format!("{origin}/devices/pair"),
+            "verificationUriComplete": format!("{origin}/devices/pair?code=BCDF-GHJK"),
             "expiresIn": 600,
-            "interval": 5
+            "interval": s.script.interval.unwrap_or(5)
         }),
     )
 }
 
 fn poll(s: &mut State, body: &[u8]) -> Reply {
+    if let Some(status) = s.script.poll_status {
+        return error(status, "UNAVAILABLE");
+    }
     let code = serde_json::from_slice::<serde_json::Value>(body)
         .ok()
         .and_then(|v| v["deviceCode"].as_str().map(str::to_owned));
     let status = |st: &str| json(200, serde_json::json!({ "status": st }));
-    match (&s.pairing, code) {
-        (Some((expected, _, approved)), Some(code)) if *expected == code => {
-            if *approved {
-                let id = format!("dev-{}", s.next_device);
-                json(
-                    200,
-                    serde_json::json!({
-                        "status": "approved", "deviceId": id,
-                        "expiresAt": "2027-02-08T00:00:00Z",
-                        "organizationId": "org_1", "organizationName": "Acme Inc."
-                    }),
-                )
-            } else {
-                status("authorization_pending")
-            }
-        }
-        _ => status("expired_token"),
+    let known = matches!((&s.pairing, &code), (Some((expected, ..)), Some(c)) if expected == c);
+    if !known || s.script.expire {
+        return status("expired_token");
     }
+    s.polls += 1;
+    if s.script.deny {
+        return status("access_denied");
+    }
+    let approved = s.pairing.as_ref().is_some_and(|p| p.2);
+    if !approved && s.polls <= s.script.slow_downs {
+        return status("slow_down");
+    }
+    if !approved && s.script.approve_at_poll.is_some_and(|n| s.polls >= n) {
+        s.next_device += 1;
+        let id = format!("dev-{}", s.next_device);
+        approve_pending(s, &id);
+    }
+    if s.pairing.as_ref().is_some_and(|p| p.2) {
+        let id = format!("dev-{}", s.next_device);
+        json(
+            200,
+            serde_json::json!({
+                "status": "approved", "deviceId": id,
+                "expiresAt": "2027-02-08T00:00:00Z",
+                "organizationId": s.script.organization_id.clone().unwrap_or("org_1".into()),
+                "organizationName": s.script.organization_name.clone().unwrap_or(s.organization_name.clone())
+            }),
+        )
+    } else {
+        status("authorization_pending")
+    }
+}
+
+/// The person approved: the device exists, and the one it replaces (same installation) is revoked.
+fn approve_pending(s: &mut State, id: &str) {
+    let (_, key, approved, installation_id) = s.pairing.as_mut().expect("no pairing started");
+    *approved = true;
+    let (key, installation_id) = (
+        VerifyingKey::from_bytes(key).unwrap(),
+        installation_id.clone(),
+    );
+    for d in s.devices.values_mut() {
+        if d.active && d.installation_id == installation_id && !installation_id.is_empty() {
+            (d.active, d.revoked_reason) = (false, Some("replaced".into()));
+        }
+    }
+    s.devices.insert(
+        id.to_owned(),
+        Device {
+            key,
+            active: true,
+            revoked_reason: None,
+            installation_id,
+        },
+    );
+}
+
+/// `CliStatus` of the spec. The fingerprint is worked out here by hand, from the raw key.
+fn status(s: &State, id: &str) -> Reply {
+    let device = &s.devices[id];
+    let hex: String = Sha256::digest(device.key.as_bytes())
+        .iter()
+        .take(8)
+        .map(|b| format!("{b:02x}"))
+        .collect();
+    let fingerprint = format!(
+        "{}-{}-{}-{}",
+        &hex[0..4],
+        &hex[4..8],
+        &hex[8..12],
+        &hex[12..16]
+    );
+    json(
+        200,
+        serde_json::json!({
+            "organizationName": s.organization_name,
+            "memberName": "Jane Doe",
+            "device": {
+                "label": "test-laptop",
+                "keyFingerprint": s.script.fingerprint.clone().unwrap_or(fingerprint),
+                "createdAt": "2026-11-12T10:00:00Z",
+                "expiresAt": s.script.device_expires_at.clone().unwrap_or("2027-02-08T00:00:00Z".into())
+            },
+            "sources": s.sources,
+            "collection": s.collection
+        }),
+    )
 }
 
 /// The checks of the spec, in its order. Returns the device id or the reply to send.

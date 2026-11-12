@@ -149,7 +149,7 @@ fn a_device_pairs_signs_and_logs_out() {
         .unwrap();
     assert!(
         started
-            .checked(&ServerUrl::parse("http://127.0.0.1").unwrap())
+            .checked(&ServerUrl::parse(&server.base).unwrap())
             .is_some()
     );
 
@@ -173,7 +173,10 @@ fn a_device_pairs_signs_and_logs_out() {
     assert_eq!(approval.device_id.as_str(), device_id);
 
     let id = approval.device_id;
-    assert_eq!(status(&c, &key, &id).unwrap()["organizationName"], "Acme");
+    assert_eq!(
+        status(&c, &key, &id).unwrap()["organizationName"],
+        "Acme Inc."
+    );
     c.post_empty(
         "/api/cli/v1/logout",
         Some(&Signer {

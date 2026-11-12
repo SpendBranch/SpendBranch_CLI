@@ -71,3 +71,16 @@ impl ReadOutcome {
         }
     }
 }
+
+/// What the device knows locally about one source.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct SourceFacts {
+    /// `None` when collection is off.
+    pub enabled_since: Option<String>,
+    pub last_read_at: Option<String>,
+    pub untested_version: Option<String>,
+    /// Session files with a cursor.
+    pub tracked_files: u64,
+    /// Files whose format could not be read.
+    pub unreadable_files: u64,
+}

@@ -138,13 +138,21 @@ fn a_paired_device_gets_past_the_connection_check() {
         .unwrap()
         .meta_set("device_id", "dev_synthetic")
         .unwrap();
-    for args in [&["status"][..], &["logout"], &["sync"]] {
-        assert_eq!(
-            run_in(dir.path(), args),
-            (1, format!("{}\n", messages::NOT_AVAILABLE)),
-            "{args:?}"
-        );
-    }
+    // sync is not built yet
+    assert_eq!(
+        run_in(dir.path(), &["sync"]),
+        (1, format!("{}\n", messages::NOT_AVAILABLE))
+    );
+    // status and logout work on what is saved: a device id with no server or key is not usable
+    let (code, out) = run_in(dir.path(), &["status"]);
+    assert_eq!(code, 1);
+    assert!(
+        out.starts_with("The saved connection is not valid."),
+        "{out}"
+    );
+    let (code, out) = run_in(dir.path(), &["logout"]);
+    assert_eq!(code, 0);
+    assert!(out.contains(messages::LOGOUT_LOCAL_DELETED), "{out}");
 }
 
 #[test]

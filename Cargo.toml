@@ -14,6 +14,9 @@ path = "src/main.rs"
 [dev-dependencies]
 jsonschema = { version = "0.60", default-features = false }
 tempfile = "3.27.0"
+# TLS test servers: a throwaway certificate, and rustls with TLS 1.2 so a 1.2-only server exists.
+rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
+rcgen = { version = "0.13", default-features = false, features = ["crypto", "ring"] }
 
 [profile.release]
 opt-level = "z"
@@ -36,6 +39,8 @@ getrandom = "0.4"
 keyring-core = "1"
 sha2 = "0.11"
 ureq = { version = "3.5", default-features = false, features = ["rustls", "platform-verifier"] }
+# Direct, only to hand ureq a crypto provider that has TLS 1.3 suites and nothing older.
+rustls = { version = "0.23", default-features = false, features = ["ring", "std"] }
 
 # The system credential store: one crate per platform, chosen at compile time.
 [target.'cfg(target_os = "macos")'.dependencies]

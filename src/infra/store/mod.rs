@@ -1,6 +1,7 @@
 //! `state.db`: the single local SQLite file that holds all device state.
 //! This file opens and migrates the database and keeps small facts (`meta`, sources);
 //! what readers leave behind (buffer, cursors, seen keys) is in `reads`.
+mod account;
 mod reads;
 
 use super::private_fs;

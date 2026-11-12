@@ -7,6 +7,7 @@ const PURE: &[&str] = &[
     "src/sources",
     "src/cli/args.rs",
     "src/cli/messages.rs",
+    "src/cli/render.rs",
     "src/contract",
     "src/auth.rs",
     "src/api.rs",
