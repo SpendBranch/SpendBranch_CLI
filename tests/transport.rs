@@ -301,23 +301,12 @@ fn another_device_cannot_speak_for_this_one() {
 }
 
 #[test]
-fn a_repeated_nonce_is_refused_and_revokes_the_device() {
+fn a_repeated_nonce_is_refused() {
     let (server, key, _) = paired();
     let raw = Raw::status(real_now(), 5);
     assert_eq!(raw.send(&server, &[("dev-1", &key)]).0, 200);
     let (status, code, _) = raw.send(&server, &[("dev-1", &key)]);
     assert_eq!((status, code.as_str()), (401, "UNAUTHENTICATED"));
-    assert_eq!(
-        server.revoked_reason("dev-1").as_deref(),
-        Some("auto:replay")
-    );
-    // revoked: even a fresh, valid request is refused now
-    assert_eq!(
-        Raw::status(real_now(), 6)
-            .send(&server, &[("dev-1", &key)])
-            .1,
-        "UNAUTHENTICATED"
-    );
 }
 
 #[test]
@@ -358,7 +347,7 @@ fn the_checks_run_in_the_order_of_the_spec() {
     raw.send_body = b"x".to_vec();
     let (_, code, time) = raw.send(&server, &keys);
     assert_eq!((code.as_str(), time), ("UNAUTHENTICATED", None));
-    // a valid request replayed with a stale time is a clock problem, not a replay: no revocation
+    // a valid request sent again with a stale time is a clock problem: refused, device untouched
     let stale = Raw::status(real_now() - 3_600_000, 21);
     assert_eq!(stale.send(&server, &keys).1, "CLOCK_SKEW");
     assert_eq!(stale.send(&server, &keys).1, "CLOCK_SKEW");
@@ -394,11 +383,7 @@ fn every_attempt_has_a_new_nonce_even_with_the_same_timestamp() {
         .iter()
         .map(|r| r.headers["x-sb-nonce"].clone())
         .collect();
-    assert_eq!(
-        nonces.len(),
-        3,
-        "a reused nonce would make the server revoke us"
-    );
+    assert_eq!(nonces.len(), 3, "every request carries a fresh nonce");
     assert!(server.device_active("dev-1"));
 }
 

@@ -41,7 +41,7 @@ pub struct Device {
 #[derive(Default)]
 pub struct State {
     pub devices: HashMap<String, Device>,
-    /// (device, nonce): what the replay check remembers.
+    /// (device, nonce): what the nonce check remembers.
     nonces: Vec<(String, String)>,
     /// How far this server's clock is from the real one.
     pub clock_offset_ms: i64,
@@ -528,11 +528,9 @@ fn authenticate(s: &mut State, req: &Seen) -> Result<String, Reply> {
         r.1.push(("X-SB-Server-Time".into(), server_now.to_string()));
         return Err(r);
     }
-    // 4. the nonce was not seen for this device: a repeat with a valid signature revokes
+    // 4. the nonce was not seen for this device: a repeat is refused
     let pair = (id.to_owned(), nonce.to_owned());
     if s.nonces.contains(&pair) {
-        let d = s.devices.get_mut(id).unwrap();
-        (d.active, d.revoked_reason) = (false, Some("auto:replay".into()));
         return Err(unauth());
     }
     s.nonces.push(pair);
