@@ -191,7 +191,14 @@ fn read_file(
         let key = if too_long { None } else { request_key(&text) };
         open_message.push(&buf, too_long, line_start, key, &mut feed);
     }
-    let recent = now.millis() - mtime < OPEN_MESSAGE_MS;
+    // A modification time well ahead of the clock (the clock was set back, a file was copied)
+    // says nothing about the age. Then only a file that changed since the last read is still
+    // growing: one that did not change has settled, and its last message is sent.
+    let changed = known.is_none_or(|k| !same_file || k.size != size || k.mtime_ms != mtime);
+    let recent = match now.millis() - mtime {
+        age if age < -OPEN_MESSAGE_MS => changed,
+        age => age < OPEN_MESSAGE_MS,
+    };
     let end = open_message
         .finish(recent, &mut feed)
         .unwrap_or(reader.complete_end);

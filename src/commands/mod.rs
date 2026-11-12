@@ -18,7 +18,7 @@ type Result<T> = std::result::Result<T, Box<dyn Error>>;
 pub fn run(command: Command, ctx: &mut Ctx) -> Result<i32> {
     match command {
         Command::Setup { source, .. } => match source.as_deref() {
-            Some(s) if !matches!(s, "claude-code" | "codex") => say(ctx, m::USAGE_SETUP, 2),
+            Some(s) if Source::parse(s).is_none() => say(ctx, m::USAGE_SETUP, 2),
             _ => say(ctx, m::NOT_AVAILABLE, 1),
         },
         Command::Login { .. } => say(ctx, m::NOT_AVAILABLE, 1),

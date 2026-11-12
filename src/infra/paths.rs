@@ -3,14 +3,28 @@ use crate::env::Env;
 use std::{io, path::PathBuf};
 
 /// `$SPENDBRANCH_HOME` > `$XDG_CONFIG_HOME/spendbranch` > `%APPDATA%\spendbranch` (Windows)
-/// or `~/.config/spendbranch`. Empty variables count as unset.
+/// or `~/.config/spendbranch`. Empty variables count as unset. `SPENDBRANCH_HOME` must be absolute
+/// (an error otherwise); a relative `XDG_CONFIG_HOME` is ignored.
 pub fn data_dir(env: Env) -> io::Result<PathBuf> {
     let get = |k: &str| env(k).filter(|v| !v.is_empty());
     if let Some(home) = get("SPENDBRANCH_HOME") {
-        return Ok(PathBuf::from(home));
+        // Hooks and the scheduler start us from any folder: a relative path would split the
+        // state in as many databases as there are folders. Fail loudly, do not guess.
+        let home = PathBuf::from(home);
+        if !home.is_absolute() {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "SPENDBRANCH_HOME must be an absolute path",
+            ));
+        }
+        return Ok(home);
     }
-    if let Some(xdg) = get("XDG_CONFIG_HOME") {
-        return Ok(PathBuf::from(xdg).join("spendbranch"));
+    // The XDG rule: a relative XDG_CONFIG_HOME is invalid and must be ignored.
+    if let Some(xdg) = get("XDG_CONFIG_HOME")
+        .map(PathBuf::from)
+        .filter(|p| p.is_absolute())
+    {
+        return Ok(xdg.join("spendbranch"));
     }
     let (base, var) = if cfg!(windows) {
         (PathBuf::new(), "APPDATA")
