@@ -158,3 +158,49 @@ fn reading_and_saving_stay_within_budget() {
         );
     }
 }
+
+/// The hook is the one thing the agent waits for: from start to exit, under 200 ms (the plan's
+/// budget). Measured on the real binary with a connected device, so it also starts the
+/// detached `sync` (which stops at once: there is no key).
+#[test]
+#[ignore = "slow; run in release mode with the others"]
+fn the_hook_exits_in_under_200_ms() {
+    use std::io::Write;
+    use std::process::{Command, Stdio};
+    let dir = tempfile::tempdir().unwrap();
+    {
+        let store = Store::open(dir.path()).unwrap();
+        store.meta_set("device_id", "dev-1").unwrap();
+    }
+    let body = br#"{"hook_event_name":"SessionEnd","session_id":"s1","transcript_path":"/x"}"#;
+    let mut times = Vec::new();
+    for _ in 0..15 {
+        let started = Instant::now();
+        let mut child = Command::new(env!("CARGO_BIN_EXE_spendbranch"))
+            .args(["hook", "claude-code"])
+            .env("SPENDBRANCH_HOME", dir.path())
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .unwrap();
+        child.stdin.take().unwrap().write_all(body).unwrap();
+        let out = child.wait_with_output().unwrap();
+        times.push(started.elapsed());
+        assert!(out.status.success());
+        assert!(
+            out.stdout.is_empty() && out.stderr.is_empty(),
+            "the hook says nothing"
+        );
+    }
+    times.sort();
+    let (median, worst) = (times[times.len() / 2], times[times.len() - 1]);
+    println!("hook: median {median:?}, worst {worst:?}");
+    std::thread::sleep(Duration::from_millis(500)); // let the detached syncs finish
+    if !cfg!(debug_assertions) {
+        assert!(
+            median < Duration::from_millis(200),
+            "hook median {median:?}"
+        );
+    }
+}

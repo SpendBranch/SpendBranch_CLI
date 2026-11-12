@@ -12,6 +12,7 @@ use crate::infra::{
     http::{Client, Signer},
     keys::{self, Backend, KeyStore, Slot},
     lock,
+    scheduler::{self, Platform},
     store::Store,
 };
 use crate::readers::{claude_code, codex};
@@ -351,7 +352,12 @@ pub fn logout(ctx: &mut Ctx) -> Result<i32> {
     for key in ["device_id", "org_name", "expires_at"] {
         account.store.meta_delete(key)?;
     }
-    say(ctx, m::LOGOUT_LOCAL_DELETED, 0)
+    say(ctx, m::LOGOUT_LOCAL_DELETED, 0)?;
+    match scheduler::remove(ctx.system, ctx.env, Platform::current()) {
+        Ok(true) => say(ctx, m::SCHEDULER_REMOVED, 0),
+        Ok(false) => Ok(0),
+        Err(why) => say(ctx, &m::scheduler_not_removed(&why), 0),
+    }
 }
 
 // --- status ---------------------------------------------------------------------------
@@ -372,6 +378,7 @@ fn local_status(ctx: &Ctx, store: &Store) -> Result<render::Local> {
             source,
             facts: store.source_facts(source)?,
             folder: folder_of(source, ctx),
+            hook: super::hooks::view(ctx, source),
         });
     }
     Ok(render::Local {
@@ -382,6 +389,7 @@ fn local_status(ctx: &Ctx, store: &Store) -> Result<render::Local> {
         last_error: store.sync_get("lastError")?,
         next_attempt: store.sync_get("nextAttemptAt")?,
         sources,
+        scheduled: scheduler::installed(ctx.system, ctx.env, Platform::current()),
     })
 }
 
@@ -437,6 +445,11 @@ fn parser_of(source: Source) -> (&'static str, &'static [&'static str]) {
 }
 
 pub fn enable(ctx: &mut Ctx, source: Source) -> Result<i32> {
+    enable_with(ctx, source, true)
+}
+
+/// `hint`: say how to install the hook. `setup` installs it right after, so it asks for none.
+pub(super) fn enable_with(ctx: &mut Ctx, source: Source, hint: bool) -> Result<i32> {
     let account = open(ctx)?;
     let connection = match load(&account)? {
         Loaded::NotConnected => return say(ctx, m::NOT_CONNECTED, 1),
@@ -480,6 +493,10 @@ pub fn enable(ctx: &mut Ctx, source: Source) -> Result<i32> {
         "Collection on for {agent}. Reading: {}",
         folder_of(source, ctx)
     )?;
+    if hint && super::hooks::state(ctx, source) != crate::hooks::State::Installed {
+        let arg = super::hooks::arg_of(source);
+        writeln!(ctx.out, "{}", m::hook_hint(agent, arg))?;
+    }
     Ok(0)
 }
 

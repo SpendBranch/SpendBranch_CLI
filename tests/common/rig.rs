@@ -8,9 +8,15 @@ use spendbranch::cli::{self, Io};
 use spendbranch::infra::{
     keys::{KeyFiles, KeyStore, Slot},
     store::Store,
+    system::{Ran, System},
 };
 use spendbranch::sources::{claude_code, codex};
-use std::{cell::RefCell, collections::HashMap, io::Cursor};
+use std::{
+    cell::{Cell, RefCell},
+    collections::{HashMap, HashSet},
+    io::{self, Cursor},
+    path::{Path, PathBuf},
+};
 
 pub struct Out {
     pub code: i32,
@@ -20,9 +26,100 @@ pub struct Out {
     pub opened: Vec<String>,
 }
 
+/// Processes that never run: what was asked of them is recorded, and the tools answer as told
+/// (everything succeeds with no output unless said otherwise).
+/// (program, arguments, stdin)
+pub type ToolCall = (String, Vec<String>, Option<String>);
+
+pub struct FakeSystem {
+    pub exe: PathBuf,
+    pub stdin: RefCell<Option<Vec<u8>>>,
+    pub stdin_reads: Cell<u32>,
+    /// (program, arguments, log file) of every detached start.
+    pub spawned: RefCell<Vec<(PathBuf, Vec<String>, PathBuf)>>,
+    /// (program, arguments, stdin) of every tool run.
+    pub ran: RefCell<Vec<ToolCall>>,
+    /// Answers by the start of `"program arguments"`.
+    pub answers: RefCell<HashMap<String, (i32, String)>>,
+    /// Programs that do not exist on this machine.
+    pub missing: RefCell<HashSet<String>>,
+}
+
+impl FakeSystem {
+    pub fn new() -> Self {
+        Self {
+            exe: PathBuf::from("/opt/spend branch/spendbranch"),
+            stdin: RefCell::new(None),
+            stdin_reads: Cell::new(0),
+            spawned: RefCell::default(),
+            ran: RefCell::default(),
+            answers: RefCell::default(),
+            missing: RefCell::default(),
+        }
+    }
+
+    pub fn answer(&self, key: &str, code: i32, stdout: &str) {
+        self.answers
+            .borrow_mut()
+            .insert(key.to_owned(), (code, stdout.to_owned()));
+    }
+
+    pub fn tool_calls(&self, program: &str) -> Vec<Vec<String>> {
+        self.ran
+            .borrow()
+            .iter()
+            .filter(|(p, ..)| p == program)
+            .map(|(_, a, _)| a.clone())
+            .collect()
+    }
+}
+
+impl System for FakeSystem {
+    fn exe(&self) -> io::Result<PathBuf> {
+        Ok(self.exe.clone())
+    }
+    fn stdin_brief(&self) -> Option<Vec<u8>> {
+        self.stdin_reads.set(self.stdin_reads.get() + 1);
+        self.stdin.borrow().clone()
+    }
+    fn spawn_detached(&self, exe: &Path, args: &[&str], log: &Path) -> io::Result<()> {
+        self.spawned.borrow_mut().push((
+            exe.to_path_buf(),
+            args.iter().map(|a| a.to_string()).collect(),
+            log.to_path_buf(),
+        ));
+        Ok(())
+    }
+    fn run(&self, program: &str, args: &[&str], stdin: Option<&str>) -> io::Result<Ran> {
+        if self.missing.borrow().contains(program) {
+            return Err(io::Error::new(io::ErrorKind::NotFound, "not found"));
+        }
+        self.ran.borrow_mut().push((
+            program.to_owned(),
+            args.iter().map(|a| a.to_string()).collect(),
+            stdin.map(str::to_owned),
+        ));
+        // The longest key that starts the command line wins.
+        let line = format!("{program} {}", args.join(" "));
+        let (code, stdout) = self
+            .answers
+            .borrow()
+            .iter()
+            .filter(|(k, _)| line.starts_with(k.as_str()))
+            .max_by_key(|(k, _)| k.len())
+            .map_or((0, String::new()), |(_, v)| v.clone());
+        Ok(Ran {
+            code,
+            stdout,
+            stderr: String::new(),
+        })
+    }
+}
+
 pub struct Rig {
     pub dir: tempfile::TempDir,
     pub server: FakeServer,
+    pub system: FakeSystem,
 }
 
 impl Rig {
@@ -32,6 +129,7 @@ impl Rig {
         Self {
             dir: tempfile::tempdir().unwrap(),
             server,
+            system: FakeSystem::new(),
         }
     }
 
@@ -41,6 +139,7 @@ impl Rig {
             ("SPENDBRANCH_KEY_STORE", "file"),
             ("SPENDBRANCH_SERVER", &self.server.base),
             ("HOME", self.dir.path().to_str().unwrap()),
+            ("USERPROFILE", self.dir.path().to_str().unwrap()),
         ]
         .into_iter()
         .map(|(k, v)| (k.to_owned(), v.to_owned()))
@@ -59,6 +158,7 @@ impl Rig {
                 sleep: &|d| sleeps.borrow_mut().push(d.as_secs()),
                 open_url: &|u| opened.borrow_mut().push(u.to_owned()),
                 interactive: tty,
+                system: &self.system,
             },
         );
         Out {

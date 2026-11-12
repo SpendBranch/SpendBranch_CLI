@@ -1,13 +1,16 @@
 //! One function per command; they orchestrate, the business rules live elsewhere.
 //! F1 covers everything that needs no network: usage checks and the "not connected"
 //! answers. Commands that need the server end in `NOT_AVAILABLE` until their phase
-//! (login/status/logout F5, sync F6, hooks and setup F7, otel/relay F8).
+//! (otel/relay F8).
 mod account;
+mod hook;
+mod hooks;
+mod setup;
 mod sync;
 
 use crate::cli::{args::Command, messages as m};
 use crate::env::Env;
-use crate::infra::{paths, store::Store};
+use crate::infra::{paths, store::Store, system::System};
 use crate::sources::Source;
 use std::{
     error::Error,
@@ -25,15 +28,21 @@ pub struct Ctx<'a> {
     pub open_url: &'a dyn Fn(&str),
     /// Standard output is a terminal: the browser may be opened.
     pub interactive: bool,
+    /// Processes and system tools.
+    pub system: &'a dyn System,
 }
 
 pub(super) type Result<T> = std::result::Result<T, Box<dyn Error>>;
 
 pub fn run(command: Command, ctx: &mut Ctx) -> Result<i32> {
     match command {
-        Command::Setup { source, .. } => match source.as_deref() {
-            Some(s) if Source::parse(s).is_none() => say(ctx, m::USAGE_SETUP, 2),
-            _ => say(ctx, m::NOT_AVAILABLE, 1),
+        Command::Setup {
+            server,
+            source,
+            relogin,
+        } => match source.as_deref().map(Source::parse) {
+            Some(None) => say(ctx, m::USAGE_SETUP, 2),
+            parsed => setup::run(ctx, server, parsed.flatten(), relogin),
         },
         Command::Login { server } => account::login(ctx, server),
         Command::Status => account::status(ctx),
@@ -48,26 +57,13 @@ pub fn run(command: Command, ctx: &mut Ctx) -> Result<i32> {
             None => say(ctx, m::USAGE_DISABLE, 2),
         },
         Command::Hooks { action, source } => {
-            let valid = matches!(action.as_deref(), Some("install" | "uninstall"))
-                && source.as_deref().and_then(Source::parse).is_some();
-            say(
-                ctx,
-                if valid {
-                    m::NOT_AVAILABLE
-                } else {
-                    m::USAGE_HOOKS
-                },
-                if valid { 1 } else { 2 },
-            )
+            match (action.as_deref(), source.as_deref().and_then(Source::parse)) {
+                (Some("install"), Some(s)) => hooks::install(ctx, s),
+                (Some("uninstall"), Some(s)) => hooks::uninstall(ctx, s),
+                _ => say(ctx, m::USAGE_HOOKS, 2),
+            }
         }
-        // Always exits 0 and never writes: it must not disturb the agent. Real work in F7.
-        Command::Hook { agent, .. } => Ok(
-            if matches!(agent.as_deref(), Some("claude-code" | "codex")) {
-                0
-            } else {
-                2
-            },
-        ),
+        Command::Hook { agent, event } => hook::run(ctx, agent.as_deref(), event.as_deref()),
         Command::Otel(s) => otel(ctx, s),
         Command::Logout => account::logout(ctx),
     }

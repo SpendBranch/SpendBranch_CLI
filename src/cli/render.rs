@@ -27,9 +27,16 @@ fn ago(at: Iso, now: Iso) -> String {
     }
 }
 
+/// How the agent's hook stands, and (Codex) when it last ran.
+pub struct HookView {
+    pub state: crate::hooks::State,
+    pub last_firing: Option<Iso>,
+}
+
 pub struct LocalSource {
     pub source: Source,
     pub facts: SourceFacts,
+    pub hook: HookView,
     /// The folder that is read: shown here, never sent.
     pub folder: String,
 }
@@ -42,6 +49,8 @@ pub struct Local {
     pub last_error: Option<String>,
     pub next_attempt: Option<String>,
     pub sources: Vec<LocalSource>,
+    /// The system runs `sync` on a schedule.
+    pub scheduled: bool,
 }
 
 /// The part that needs no network.
@@ -89,6 +98,7 @@ pub fn local_lines(local: &Local, now: Iso) -> Vec<String> {
             )),
             None => out.push(format!("{name}: collection off here")),
         }
+        out.extend(hook_lines(s, now));
         if s.facts.unreadable_files > 0 {
             out.push(format!(
                 "  unread files (unrecognized format or no permission): {} (become gaps, not zero spending)",
@@ -111,6 +121,44 @@ pub fn local_lines(local: &Local, now: Iso) -> Vec<String> {
             .is_none_or(|at| now.millis() - at.millis() > DAY_MS);
         if s.facts.enabled_since.is_some() && stale {
             out.push("  last read was more than 24 hours ago: run `spendbranch sync`".into());
+        }
+    }
+    out.push(if local.scheduled {
+        "Scheduled sync: installed".into()
+    } else {
+        "Scheduled sync: not installed (run `spendbranch setup`)".into()
+    });
+    out
+}
+
+fn hook_lines(s: &LocalSource, now: Iso) -> Vec<String> {
+    use crate::hooks::State;
+    let (name, arg) = match s.source {
+        Source::ClaudeCode => ("Claude Code", "claude-code"),
+        Source::Codex => ("Codex", "codex"),
+    };
+    let mut out = vec![match s.hook.state {
+        State::NotInstalled => {
+            format!("  Hook: not installed (run `spendbranch hooks install {arg}`)")
+        }
+        State::Installed => "  Hook: installed".into(),
+        State::Outdated => format!(
+            "  Hook: installed, but it is not the line this build writes (the binary moved?): run `spendbranch hooks install {arg}`"
+        ),
+        State::Invalid => "  Hook: the agent's hook file cannot be used (not valid JSON)".into(),
+    }];
+    if s.source == Source::Codex && s.hook.state == State::Installed {
+        if let Some(at) = s.hook.last_firing {
+            out.push(format!("  Last hook run: {at}"));
+        }
+        let silent = s
+            .hook
+            .last_firing
+            .is_none_or(|at| now.millis() - at.millis() > DAY_MS);
+        if s.facts.enabled_since.is_some() && silent {
+            out.push(format!(
+                "  {name} has not run the hook in 24 hours; it may not have trusted it: open {name} and review it under /hooks"
+            ));
         }
     }
     out

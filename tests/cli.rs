@@ -321,14 +321,17 @@ fn an_argument_that_is_not_text_is_a_usage_error_not_a_crash() {
 
 #[test]
 fn setup_takes_the_same_source_spellings_as_enable() {
+    // A bad server stops it before any network call; what matters is that the source is not
+    // the reason (that would be the usage text).
     for source in ["claude-code", "claude_code", "codex"] {
-        let (code, out) = run(&["setup", "--source", source]);
-        assert_eq!(
-            (code, out.as_str()),
-            (1, format!("{}\n", messages::NOT_AVAILABLE).as_str()),
-            "{source}"
-        );
+        let (code, out) = run(&["setup", "--source", source, "--server", "not a url"]);
+        assert_eq!(code, 2, "{source}");
+        assert!(out.starts_with(messages::INVALID_SERVER), "{source}: {out}");
     }
+    assert_eq!(
+        run(&["setup", "--source", "gemini"]),
+        (2, format!("{}\n", messages::USAGE_SETUP))
+    );
 }
 
 /// `eprintln!` panics (exit 101) when stderr cannot be written; `/dev/full` fails every write.

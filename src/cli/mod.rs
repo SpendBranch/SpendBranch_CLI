@@ -5,6 +5,7 @@ pub mod render;
 
 use crate::commands::{self, Ctx};
 use crate::env::Env;
+use crate::infra::system::{Inert, System};
 use args::Parsed;
 use std::{
     io::{BufRead, Write},
@@ -21,6 +22,7 @@ pub struct Io<'a> {
     pub sleep: &'a dyn Fn(Duration),
     pub open_url: &'a dyn Fn(&str),
     pub interactive: bool,
+    pub system: &'a dyn System,
 }
 
 /// Exit codes: 0 success, 1 failure, 2 wrong usage.
@@ -31,6 +33,7 @@ pub fn run(args: &[String], env: Env, out: &mut dyn Write) -> i32 {
         sleep: &|_| {},
         open_url: &|_| {},
         interactive: false,
+        system: &Inert,
     };
     run_with(args, env, &mut io)
 }
@@ -70,6 +73,7 @@ fn dispatch(args: &[String], env: Env, io: &mut Io) -> Result<i32, Box<dyn std::
                 sleep: io.sleep,
                 open_url: io.open_url,
                 interactive: io.interactive,
+                system: io.system,
             };
             return commands::run(command, &mut ctx);
         }

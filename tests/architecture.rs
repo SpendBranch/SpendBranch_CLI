@@ -11,6 +11,8 @@ const PURE: &[&str] = &[
     "src/contract",
     "src/auth.rs",
     "src/api.rs",
+    "src/hooks.rs",
+    "src/scheduler.rs",
     "src/sync",
 ];
 const FORBIDDEN: &[&str] = &[

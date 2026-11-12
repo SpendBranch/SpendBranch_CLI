@@ -138,3 +138,70 @@ pub fn rejected_line(code: &str, n: u64) -> String {
         ),
     }
 }
+
+// --- hooks, scheduler, setup ----------------------------------------------------------
+
+pub const NO_HOME: &str = "Cannot locate your home folder.";
+pub const CODEX_TRUST: &str = "Open Codex and trust the hook under /hooks; Codex ignores new or changed hooks until they are reviewed.";
+pub const HOME_NOT_CARRIED: &str = "Note: SPENDBRANCH_HOME is set here, but the agent starts the hook with its own environment. Set it there too if you use a custom data folder.";
+pub const SETUP_NO_AGENT: &str = "No supported agent was found (Claude Code or Codex). Install one, then run `spendbranch setup` again.";
+pub const SETUP_RECONNECT: &str = "This device was revoked or expired; reconnecting.";
+pub const SCHEDULER_REMOVED: &str = "Scheduled sync removed.";
+
+pub fn hook_file_problem(file: &str, layout: bool) -> String {
+    if layout {
+        format!(
+            "File {file} does not have the layout the agent documents for hooks; nothing was changed."
+        )
+    } else {
+        format!("File {file} is not valid JSON; nothing was changed.")
+    }
+}
+
+pub fn hook_installed(agent: &str, file: &str) -> String {
+    format!("Installed the {agent} hook in {file}.")
+}
+
+pub fn hook_already(agent: &str) -> String {
+    format!("The {agent} hook is already installed.")
+}
+
+pub fn hook_removed(agent: &str, file: &str) -> String {
+    format!("Removed the {agent} hook from {file}.")
+}
+
+pub fn hook_absent(agent: &str) -> String {
+    format!("The {agent} hook was not installed.")
+}
+
+pub fn hook_hint(agent: &str, arg: &str) -> String {
+    format!(
+        "The {agent} hook is not installed: run `spendbranch hooks install {arg}` so the usage is sent when a session ends."
+    )
+}
+
+pub fn setup_server_differs(saved: &str, wanted: &str) -> String {
+    format!(
+        "This device is connected to {saved}. To switch to {wanted}, run `spendbranch setup --relogin --server {wanted}`."
+    )
+}
+
+pub fn setup_already(organization: &str) -> String {
+    format!("Already connected to {organization}. Use --relogin to switch.")
+}
+
+pub fn agent_found(agent: &str, found: bool) -> String {
+    format!("{agent}: {}", if found { "found" } else { "not found" })
+}
+
+pub fn scheduler_installed(method: &str) -> String {
+    format!("Scheduled sync: every 30 minutes and at login ({method}).")
+}
+
+pub fn scheduler_failed(why: &str) -> String {
+    format!("Scheduled sync: not installed ({why}). Hooks still send usage when a session ends.")
+}
+
+pub fn scheduler_not_removed(why: &str) -> String {
+    format!("Could not remove the scheduled sync: {why}")
+}
