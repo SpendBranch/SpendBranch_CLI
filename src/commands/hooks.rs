@@ -4,7 +4,7 @@ use crate::cli::{messages as m, render};
 use crate::contract::Source;
 use crate::env::agent_dir;
 use crate::hooks::{self as rules, Plan, Problem, State};
-use crate::infra::{agent_files, hook_log, paths};
+use crate::infra::{agent_files, hook_log, paths, system::Platform};
 use std::{io, path::PathBuf};
 
 fn hook_file(ctx: &Ctx, source: Source) -> Option<PathBuf> {
@@ -13,6 +13,11 @@ fn hook_file(ctx: &Ctx, source: Source) -> Option<PathBuf> {
         Source::Codex => "hooks.json",
     };
     agent_dir(ctx.env, source).map(|d| d.join(name))
+}
+
+/// Hook lines are quoted for the shell of the system the agent runs on.
+fn windows(ctx: &Ctx) -> bool {
+    ctx.system.platform() == Platform::Windows
 }
 
 /// The absolute path of this program, as text (the hook and schedule lines are text).
@@ -48,7 +53,7 @@ pub(super) fn install(ctx: &mut Ctx, source: Source) -> Result<i32> {
     let Read::Text(original) = read(&file)? else {
         return say(ctx, &m::hook_file_problem(&shown, false), 1);
     };
-    let plan = match rules::install(source, original.as_deref(), &exe_text(ctx)?, cfg!(windows)) {
+    let plan = match rules::install(source, original.as_deref(), &exe_text(ctx)?, windows(ctx)) {
         Ok(plan) => plan,
         Err(problem) => {
             return say(
@@ -109,7 +114,7 @@ pub(super) fn state(ctx: &Ctx, source: Source) -> State {
         return State::Invalid;
     };
     let exe = exe_text(ctx).unwrap_or_default();
-    rules::state(source, original.as_deref(), &exe, cfg!(windows))
+    rules::state(source, original.as_deref(), &exe, windows(ctx))
 }
 
 /// The state plus, for Codex, when the hook last ran (Codex ignores hooks it does not trust).

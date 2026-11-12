@@ -16,11 +16,7 @@ fn otel_writes_a_private_environment_file_with_no_secret_in_it() {
     assert_eq!(rig.run(&["login"]).code, 0);
     let out = rig.run(&["otel", "claude-code"]);
     assert_eq!(out.code, 0, "{}", out.text);
-    let file = rig.dir.path().join(if cfg!(windows) {
-        "otel-claude_code.ps1"
-    } else {
-        "otel-claude_code.env"
-    });
+    let file = rig.dir.path().join("otel-claude_code.env");
     let text = fs::read_to_string(&file).unwrap();
     for line in [
         "CLAUDE_CODE_ENABLE_TELEMETRY",
@@ -68,7 +64,7 @@ fn otel_writes_a_private_environment_file_with_no_secret_in_it() {
         );
     }
     assert!(
-        out.text.contains(&format!("source '{}'", file.display())) || cfg!(windows),
+        out.text.contains(&format!("source '{}'", file.display())),
         "{}",
         out.text
     );
@@ -82,6 +78,19 @@ fn otel_writes_a_private_environment_file_with_no_secret_in_it() {
     fs::write(&file, "x".repeat(5000)).unwrap();
     assert_eq!(rig.run(&["otel", "claude_code"]).code, 0);
     assert_eq!(fs::read_to_string(&file).unwrap(), text);
+}
+
+#[test]
+fn on_windows_otel_writes_a_powershell_file() {
+    let mut rig = Rig::new();
+    rig.system.platform = spendbranch::infra::system::Platform::Windows;
+    authorize(&rig);
+    assert_eq!(rig.run(&["login"]).code, 0);
+    let out = rig.run(&["otel", "claude-code"]);
+    assert_eq!(out.code, 0, "{}", out.text);
+    let text = fs::read_to_string(rig.dir.path().join("otel-claude_code.ps1")).unwrap();
+    assert!(text.contains("$env:OTEL_LOGS_EXPORTER = 'otlp'"), "{text}");
+    assert!(out.text.contains("Invoke-Expression"), "{}", out.text);
 }
 
 #[test]

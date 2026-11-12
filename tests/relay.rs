@@ -250,6 +250,7 @@ fn start_program(rig: &Rig, port: u16) -> Child {
         .env("SPENDBRANCH_HOME", rig.dir.path())
         .env("SPENDBRANCH_KEY_STORE", "file")
         .env("HOME", rig.dir.path())
+        .env("USERPROFILE", rig.dir.path())
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())

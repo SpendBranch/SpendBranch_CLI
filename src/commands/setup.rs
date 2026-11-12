@@ -9,7 +9,7 @@ use crate::api::ServerUrl;
 use crate::cli::{messages as m, render};
 use crate::contract::Source;
 use crate::env::agent_dir;
-use crate::infra::scheduler::{self, Platform};
+use crate::infra::scheduler;
 
 const AGENTS: [Source; 2] = [Source::ClaudeCode, Source::Codex];
 
@@ -30,7 +30,7 @@ pub(super) fn run(
     let (parts, all_on) = turn_on(ctx, &found)?;
     let scheduled = hooks::exe_text(ctx)
         .map_err(|e| e.to_string())
-        .and_then(|exe| scheduler::install(ctx.system, ctx.env, Platform::current(), &exe));
+        .and_then(|exe| scheduler::install(ctx.system, ctx.env, ctx.system.platform(), &exe));
     match &scheduled {
         Ok(method) => say(ctx, &m::scheduler_installed(method.describe()), 0)?,
         Err(why) => say(ctx, &m::scheduler_failed(why), 0)?,

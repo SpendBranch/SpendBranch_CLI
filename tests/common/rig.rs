@@ -8,7 +8,7 @@ use spendbranch::cli::{self, Io};
 use spendbranch::infra::{
     keys::{KeyFiles, KeyStore, Slot},
     store::Store,
-    system::{Ran, System},
+    system::{Platform, Ran, System},
 };
 use spendbranch::sources::{claude_code, codex};
 use std::{
@@ -43,6 +43,8 @@ pub struct FakeSystem {
     pub answers: RefCell<HashMap<String, (i32, String)>>,
     /// Programs that do not exist on this machine.
     pub missing: RefCell<HashSet<String>>,
+    /// The system this pretends to be; Linux unless a test says otherwise, whatever runs it.
+    pub platform: Platform,
 }
 
 impl FakeSystem {
@@ -55,6 +57,7 @@ impl FakeSystem {
             ran: RefCell::default(),
             answers: RefCell::default(),
             missing: RefCell::default(),
+            platform: Platform::Linux,
         }
     }
 
@@ -75,6 +78,9 @@ impl FakeSystem {
 }
 
 impl System for FakeSystem {
+    fn platform(&self) -> Platform {
+        self.platform
+    }
     fn exe(&self) -> io::Result<PathBuf> {
         Ok(self.exe.clone())
     }

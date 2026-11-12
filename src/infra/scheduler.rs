@@ -1,5 +1,6 @@
 //! Installs and removes the system's periodic `sync`: a systemd user timer (or the crontab
 //! where there is no systemd), a LaunchAgent, or Task Scheduler tasks. Idempotent.
+pub use super::system::Platform;
 use super::system::System;
 use crate::env::{Env, user_home};
 use crate::scheduler::{self as text, Job};
@@ -7,25 +8,6 @@ use std::{
     fs,
     path::{Path, PathBuf},
 };
-
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
-pub enum Platform {
-    Linux,
-    MacOs,
-    Windows,
-}
-
-impl Platform {
-    pub fn current() -> Self {
-        if cfg!(windows) {
-            Self::Windows
-        } else if cfg!(target_os = "macos") {
-            Self::MacOs
-        } else {
-            Self::Linux
-        }
-    }
-}
 
 /// What ended up scheduling the sync.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
