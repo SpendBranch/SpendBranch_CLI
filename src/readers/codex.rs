@@ -4,7 +4,9 @@
 //! not resend anything) and per `.jsonl` file (an offset plus what the thread's first lines
 //! told us, so only the appended part is read). A `.zst` is read once, in full.
 use super::{
-    cursor_json, discover, identity,
+    cursor_json,
+    discover::{self, Rollout},
+    identity,
     lines::{Lines, MAX_LINE, Next},
     mtime_ms, settle, tail_hash,
 };
@@ -182,28 +184,61 @@ fn read_file(
     Ok(read)
 }
 
-/// Everything new in the rollouts since `state`, ready for `Store::commit_read`.
-pub fn read(config: &Config, state: &ReaderState, now: Iso) -> ReadOutcome {
-    let mut out = ReadOutcome::empty(Source::Codex, now);
-    let mut threads: HashMap<String, ThreadCursor> = state
-        .cursors
-        .iter()
-        .filter_map(|(k, v)| {
-            Some((
-                k.strip_prefix("thread:")?.to_owned(),
-                serde_json::from_str(v).ok()?,
-            ))
-        })
-        .collect();
-    let mut cursors: HashMap<String, String> = HashMap::new();
-    let mut unsupported: Vec<String> = Vec::new();
-    let mut untested = state.untested_version.clone();
+/// The cursor of a file that has not been read yet.
+fn blank(stat: &Stat) -> FileCursor {
+    FileCursor {
+        size: stat.size,
+        mtime_ms: stat.mtime_ms,
+        dev: stat.dev,
+        ino: stat.ino,
+        offset: 0,
+        tail: 0,
+        thread_id: None,
+        resume: None,
+    }
+}
 
-    for rollout in discover::codex_rollouts(&config.root) {
+/// One pass over the rollouts: the cursors being rebuilt, and what was found.
+struct Scan<'a> {
+    config: &'a Config,
+    state: &'a ReaderState<'a>,
+    now: Iso,
+    out: ReadOutcome,
+    threads: HashMap<String, ThreadCursor>,
+    cursors: HashMap<String, String>,
+    unsupported: Vec<String>,
+    untested: Option<String>,
+}
+
+impl<'a> Scan<'a> {
+    fn new(config: &'a Config, state: &'a ReaderState<'a>, now: Iso) -> Self {
+        let threads = state
+            .cursors
+            .iter()
+            .filter_map(|(k, v)| {
+                Some((
+                    k.strip_prefix("thread:")?.to_owned(),
+                    serde_json::from_str(v).ok()?,
+                ))
+            })
+            .collect();
+        Self {
+            config,
+            state,
+            now,
+            out: ReadOutcome::empty(Source::Codex, now),
+            threads,
+            cursors: HashMap::new(),
+            unsupported: Vec::new(),
+            untested: state.untested_version.clone(),
+        }
+    }
+
+    fn rollout(&mut self, rollout: &Rollout) {
         let path = rollout.path.to_string_lossy().into_owned();
         let key = format!("file:{path}");
         let Ok(meta) = fs::metadata(&rollout.path) else {
-            continue;
+            return;
         };
         let (dev, ino) = identity(&meta);
         let stat = Stat {
@@ -212,7 +247,8 @@ pub fn read(config: &Config, state: &ReaderState, now: Iso) -> ReadOutcome {
             dev,
             ino,
         };
-        let known: Option<FileCursor> = state
+        let known: Option<FileCursor> = self
+            .state
             .cursors
             .get(&key)
             .and_then(|j| serde_json::from_str(j).ok());
@@ -220,46 +256,50 @@ pub fn read(config: &Config, state: &ReaderState, now: Iso) -> ReadOutcome {
             .as_ref()
             .filter(|k| k.size == stat.size && k.mtime_ms == stat.mtime_ms)
         {
-            cursors.insert(key, cursor_json(k));
-            if state.unsupported_files.contains(&path) {
-                unsupported.push(path); // already reported: no repeated gap
+            self.cursors.insert(key, cursor_json(k));
+            if self.state.unsupported_files.contains(&path) {
+                self.unsupported.push(path); // already reported: no repeated gap
             }
-            continue;
+            return;
         }
-        let blank = |thread: Option<String>| FileCursor {
-            size: stat.size,
-            mtime_ms: stat.mtime_ms,
-            dev,
-            ino,
-            offset: 0,
-            tail: 0,
-            thread_id: thread,
-            resume: None,
-        };
-        let file = match read_file(
-            config,
+        match read_file(
+            self.config,
             &rollout.path,
             rollout.archived,
             &stat,
             known.as_ref(),
-            &threads,
+            &self.threads,
         ) {
-            Ok(f) => f,
-            Err(_) => {
-                if !state.unsupported_files.contains(&path) {
-                    out.coverage
-                        .push(failure_now(Source::Codex, now, GapReason::AdapterError));
-                }
-                // A plain rollout is tried again next time (the failure may be passing). An
-                // archive that cannot be decompressed stays as it is: trying again would
-                // repeat expensive work for the same result.
-                if rollout.archived {
-                    cursors.insert(key, cursor_json(&blank(None)));
-                }
-                unsupported.push(path);
-                continue;
-            }
-        };
+            Ok(file) => self.accept(file, key, path, &stat, known.as_ref()),
+            Err(_) => self.failed(rollout.archived, key, path, &stat),
+        }
+    }
+
+    fn failed(&mut self, archived: bool, key: String, path: String, stat: &Stat) {
+        if !self.state.unsupported_files.contains(&path) {
+            self.out.coverage.push(failure_now(
+                Source::Codex,
+                self.now,
+                GapReason::AdapterError,
+            ));
+        }
+        // A plain rollout is tried again next time (the failure may be passing). An archive
+        // that cannot be decompressed stays as it is: trying again would repeat expensive work
+        // for the same result.
+        if archived {
+            self.cursors.insert(key, cursor_json(&blank(stat)));
+        }
+        self.unsupported.push(path);
+    }
+
+    fn accept(
+        &mut self,
+        file: FileRead,
+        key: String,
+        path: String,
+        stat: &Stat,
+        known: Option<&FileCursor>,
+    ) {
         let FileRead {
             result,
             resume,
@@ -272,55 +312,74 @@ pub fn read(config: &Config, state: &ReaderState, now: Iso) -> ReadOutcome {
             offset,
             tail,
             resume,
-            ..blank(None)
+            ..blank(stat)
         };
         let hard = result.format == Format::UnsupportedFormat;
         if hard || too_many_unsupported(result.unsupported_lines.len(), non_empty) {
-            out.coverage.push(failure_now(
+            self.out.coverage.push(failure_now(
                 Source::Codex,
-                now,
+                self.now,
                 GapReason::UnsupportedFormat,
             ));
-            unsupported.push(path.clone());
+            self.unsupported.push(path.clone());
         }
         if hard {
             // Not understood: do not advance. A later change re-reads from the old offset.
-            if let Some(k) = known.as_ref() {
-                (cursor.offset, cursor.tail, cursor.resume) = (k.offset, k.tail, k.resume.clone());
-            } else {
-                (cursor.offset, cursor.tail, cursor.resume) = (0, 0, None);
-            }
-            cursors.insert(key, cursor_json(&cursor));
-            continue;
+            (cursor.offset, cursor.tail, cursor.resume) = match known {
+                Some(k) => (k.offset, k.tail, k.resume.clone()),
+                None => (0, 0, None),
+            };
+            self.cursors.insert(key, cursor_json(&cursor));
+            return;
         }
-        cursors.insert(key, cursor_json(&cursor));
-        untested = result.untested_version.clone().or(untested);
-        out.observations.extend(result.observations);
+        self.cursors.insert(key, cursor_json(&cursor));
+        self.untested = result.untested_version.clone().or(self.untested.take());
+        self.out.observations.extend(result.observations);
         if let Some(thread) = result.thread_id {
-            let shrunk = threads
-                .get(&thread)
-                .is_some_and(|t| t.path == path && stat.size < t.size);
-            let before = threads
-                .get(&thread)
-                .filter(|_| !shrunk)
-                .map_or(-1, |t| t.last_ordinal);
-            threads.insert(
-                thread,
-                ThreadCursor {
-                    last_ordinal: before.max(result.last_ordinal),
-                    path,
-                    size: stat.size,
-                    mtime_ms: stat.mtime_ms,
-                },
-            );
+            self.advance_thread(thread, result.last_ordinal, path, stat);
         }
     }
 
-    for (thread, cursor) in threads {
-        cursors.insert(format!("thread:{thread}"), cursor_json(&cursor));
+    /// The thread's cursor moves to the highest ordinal seen, unless its file shrank (then the
+    /// old ordinal means nothing).
+    fn advance_thread(&mut self, thread: String, last_ordinal: i64, path: String, stat: &Stat) {
+        let shrunk = self
+            .threads
+            .get(&thread)
+            .is_some_and(|t| t.path == path && stat.size < t.size);
+        let before = self
+            .threads
+            .get(&thread)
+            .filter(|_| !shrunk)
+            .map_or(-1, |t| t.last_ordinal);
+        self.threads.insert(
+            thread,
+            ThreadCursor {
+                last_ordinal: before.max(last_ordinal),
+                path,
+                size: stat.size,
+                mtime_ms: stat.mtime_ms,
+            },
+        );
     }
-    settle(&mut out, &state.cursors, cursors);
-    out.unsupported_files = unsupported;
-    out.untested_version = untested;
-    out
+
+    fn finish(mut self) -> ReadOutcome {
+        for (thread, cursor) in self.threads {
+            self.cursors
+                .insert(format!("thread:{thread}"), cursor_json(&cursor));
+        }
+        settle(&mut self.out, &self.state.cursors, self.cursors);
+        self.out.unsupported_files = self.unsupported;
+        self.out.untested_version = self.untested;
+        self.out
+    }
+}
+
+/// Everything new in the rollouts since `state`, ready for `Store::commit_read`.
+pub fn read(config: &Config, state: &ReaderState, now: Iso) -> ReadOutcome {
+    let mut scan = Scan::new(config, state, now);
+    for rollout in discover::codex_rollouts(&config.root) {
+        scan.rollout(&rollout);
+    }
+    scan.finish()
 }
