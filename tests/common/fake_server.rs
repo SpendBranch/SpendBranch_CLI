@@ -84,7 +84,12 @@ pub struct Otlp {
     pub fail_next: VecDeque<(u16, String)>,
     /// Every payload that reached the route signed and well-formed: (device, JSON).
     pub received: Vec<(String, serde_json::Value)>,
+    /// Batches counted in the current minute, per device: (start of the minute, batches).
+    window: HashMap<String, (std::time::Instant, u32)>,
 }
+
+/// The route's own ceiling, apart from the `sync`'s.
+const OTLP_PER_MINUTE: u32 = 60;
 
 #[derive(Default)]
 pub struct Ingest {
@@ -537,8 +542,9 @@ fn authenticate(s: &mut State, req: &Seen) -> Result<String, Reply> {
     Ok(id.to_owned())
 }
 
-/// `POST /api/ingest/otlp/v1/logs`: JSON up to 1 MiB, and the strict filter: a record with any
-/// attribute outside the declared twelve is refused whole.
+/// `POST /api/ingest/otlp/v1/logs`: its own ceiling of 60 batches a minute per device, JSON up to
+/// 1 MiB, and the strict filter: a record with an attribute outside the declared twelve, or with a
+/// key given twice, is refused whole.
 fn otlp_logs(s: &mut State, req: &Seen, device: &str) -> Reply {
     const ALLOWED: [&str; 12] = [
         "event.name",
@@ -554,6 +560,20 @@ fn otlp_logs(s: &mut State, req: &Seen, device: &str) -> Reply {
         "query_source",
         "organization.id",
     ];
+    let now = std::time::Instant::now();
+    let (start, count) = s.otlp.window.entry(device.to_owned()).or_insert((now, 0));
+    if now.duration_since(*start).as_secs() >= 60 {
+        (*start, *count) = (now, 0);
+    }
+    *count += 1;
+    if *count > OTLP_PER_MINUTE {
+        let wait = 60u64
+            .saturating_sub(now.duration_since(*start).as_secs())
+            .max(1);
+        let mut reply = error(429, "RATE_LIMITED");
+        reply.1.push(("Retry-After".into(), wait.to_string()));
+        return reply;
+    }
     if let Some((status, code)) = s.otlp.fail_next.pop_front() {
         return error(status, &code);
     }
@@ -571,12 +591,16 @@ fn otlp_logs(s: &mut State, req: &Seen, device: &str) -> Reply {
     for resource in v["resourceLogs"].as_array().into_iter().flatten() {
         for scope in resource["scopeLogs"].as_array().into_iter().flatten() {
             for record in scope["logRecords"].as_array().into_iter().flatten() {
-                let outside = record["attributes"]
+                let keys: Vec<&str> = record["attributes"]
                     .as_array()
                     .into_iter()
                     .flatten()
-                    .any(|a| !ALLOWED.contains(&a["key"].as_str().unwrap_or("")));
-                refused += u64::from(outside);
+                    .map(|a| a["key"].as_str().unwrap_or(""))
+                    .collect();
+                let outside = keys.iter().any(|k| !ALLOWED.contains(k));
+                // A repeated key refuses the record, the same as one outside the twelve.
+                let repeated = keys.iter().enumerate().any(|(i, k)| keys[..i].contains(k));
+                refused += u64::from(outside || repeated);
             }
         }
     }

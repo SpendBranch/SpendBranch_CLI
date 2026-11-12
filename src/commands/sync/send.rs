@@ -1,121 +1,17 @@
-//! `sync`: read what is new from the sources that are on, then send the buffer in batches.
-//! Nothing leaves the buffer until the server answered for it, so a crash loses nothing.
-use super::account::{self, Connection, Loaded, now, open, status_of};
-use super::{Ctx, Result, say};
+//! The sending half of `sync`: batches, answers, retries and what each answer does to the buffer.
+use super::super::account::{Connection, now, status_of};
+use super::super::{Ctx, Result, say};
+use super::report::{dropped_batch, summary};
+use super::{BOTH, INGEST, MAX_PASSES, Tally, ms, random};
 use crate::api::{ApiFailure, IngestResults, SourceState};
-use crate::cli::{VERSION, messages as m, render};
-use crate::contract::{Iso, Source};
+use crate::cli::{VERSION, messages as m};
+use crate::contract::Iso;
 use crate::infra::{
-    clock::{Clock, SystemClock},
     http::{Client, Signer},
-    lock,
-    store::{Change, Commit, Queued, SpoolLimits, Store},
+    store::{Change, Queued, Store},
 };
-use crate::readers::{claude_code, codex};
 use crate::sync::{self as rules, Failed, TRIES_PER_RUN};
 use std::collections::BTreeMap;
-
-const INGEST: &str = "/api/ingest/v1/events";
-const MAX_PASSES: usize = 100_000;
-const BOTH: [Source; 2] = [Source::ClaudeCode, Source::Codex];
-
-/// What this run did, for the last lines.
-#[derive(Default)]
-struct Tally {
-    collected: u64,
-    accepted: u64,
-    sent_any: bool,
-    rejected: BTreeMap<String, u64>,
-    /// Observations of a source the company has not (or no longer) authorized: kept, not sent.
-    held: BTreeMap<&'static str, u64>,
-}
-
-impl Tally {
-    fn add(&mut self, code: &str, n: u64) {
-        *self.rejected.entry(code.to_owned()).or_default() += n;
-    }
-}
-
-fn random() -> f64 {
-    let mut bytes = [0u8; 8];
-    // Without entropy the jitter is just the middle of the range: a wait is still a wait.
-    if getrandom::fill(&mut bytes).is_err() {
-        return 0.5;
-    }
-    u64::from_le_bytes(bytes) as f64 / u64::MAX as f64
-}
-
-fn ms() -> i64 {
-    SystemClock.now_ms()
-}
-
-pub fn run(ctx: &mut Ctx) -> Result<i32> {
-    let dir = crate::infra::paths::data_dir(ctx.env)?;
-    let Some(_lock) = lock::try_acquire(&dir)? else {
-        return say(ctx, m::SYNC_RUNNING, 0);
-    };
-    let mut account = open(ctx)?;
-    let connection = match account::load(&account)? {
-        Loaded::NotConnected => return say(ctx, m::NOT_CONNECTED, 1),
-        Loaded::Broken(text) => return say(ctx, &text, 1),
-        Loaded::Ready(c) => c,
-    };
-    let mut tally = Tally::default();
-    collect(ctx, &mut account.store, &mut tally)?;
-    // `Some` is a run that ended early: what to say is already on the screen.
-    if let Some(code) = upload(ctx, &mut account.store, &connection, &mut tally)? {
-        return Ok(code);
-    }
-    account.store.sync_set("lastSyncAt", &now().to_string())?;
-    summary(ctx, &tally)?;
-    Ok(0)
-}
-
-// --- Reading ---------------------------------------------------------------------------
-
-fn collect(ctx: &mut Ctx, store: &mut Store, tally: &mut Tally) -> Result<()> {
-    let at = now();
-    let mut any_on = false;
-    for source in BOTH {
-        let facts = store.source_facts(source)?;
-        if facts.enabled_since.is_none() {
-            continue;
-        }
-        any_on = true;
-        let outcome = {
-            let state = store.reader_state(source)?;
-            match source {
-                Source::ClaudeCode => claude_code::Config::from_env(ctx.env)
-                    .map(|c| claude_code::read(&c, &state, at)),
-                Source::Codex => {
-                    codex::Config::from_env(ctx.env).map(|c| codex::read(&c, &state, at))
-                }
-            }
-        };
-        let Some(outcome) = outcome else { continue };
-        match store.commit_read(&outcome, SpoolLimits::default())? {
-            Commit::Stored => tally.collected += outcome.observations.len() as u64,
-            Commit::Full => {
-                // Nothing was saved, so the same data is read again once there is room. The
-                // time it covers is a gap, not zero spending.
-                let last = facts.last_read_at.as_deref().and_then(Iso::parse);
-                let gap = rules::full_gap(source, last, at);
-                store.add_pending_coverage(&[gap])?;
-                writeln!(
-                    ctx.out,
-                    "{}: the local buffer is full; reading resumes when it has room.",
-                    render::agent_name(source)
-                )?;
-            }
-        }
-    }
-    if !any_on {
-        writeln!(ctx.out, "{}", m::NO_SOURCE_ON)?;
-    }
-    Ok(())
-}
-
-// --- Sending ---------------------------------------------------------------------------
 
 /// A call to the server, tried again while the trouble looks passing. `Err(Final)` is what is
 /// left when it is not.
@@ -174,7 +70,7 @@ fn stop(ctx: &mut Ctx, store: &Store, f: &ApiFailure) -> Result<Option<i32>> {
     say(ctx, &m::failure_text(f, ms()), 1).map(Some)
 }
 
-fn upload(
+pub(super) fn upload(
     ctx: &mut Ctx,
     store: &mut Store,
     c: &Connection,
@@ -363,49 +259,4 @@ fn upload(
         }
     }
     Ok(None)
-}
-
-/// `Dropped N batch(es) so far`, said on the first drop and then every 50th.
-fn dropped_batch(ctx: &mut Ctx, store: &Store) -> Result<()> {
-    let n = store
-        .sync_get("droppedBatches")?
-        .and_then(|v| v.parse::<u64>().ok())
-        .unwrap_or(0)
-        + 1;
-    store.sync_set("droppedBatches", &n.to_string())?;
-    if m::report_drop(n) {
-        writeln!(
-            ctx.out,
-            "Dropped {n} batch(es) so far: the server said they were out of contract."
-        )?;
-    }
-    Ok(())
-}
-
-fn summary(ctx: &mut Ctx, tally: &Tally) -> Result<()> {
-    for (code, n) in &tally.rejected {
-        if *n > 0 {
-            writeln!(ctx.out, "{}", m::rejected_line(code, *n))?;
-        }
-    }
-    for (name, n) in &tally.held {
-        let agent = render::agent_name(if *name == "codex" {
-            Source::Codex
-        } else {
-            Source::ClaudeCode
-        });
-        writeln!(
-            ctx.out,
-            "{n} {agent} items stay in the buffer: the company has not authorized {agent} collection."
-        )?;
-    }
-    let line = if tally.accepted > 0 {
-        format!("Uploaded {} usage events.", tally.accepted)
-    } else if tally.sent_any {
-        "No events accepted.".to_owned()
-    } else {
-        "Nothing new to upload.".to_owned()
-    };
-    writeln!(ctx.out, "{line}")?;
-    Ok(())
 }

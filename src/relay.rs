@@ -11,7 +11,8 @@ pub const PATH: &str = "/v1/logs";
 /// Where the agent's exporter is pointed (`otel` writes it) and where `relay` listens by default.
 pub const DEFAULT_PORT: u16 = 4318;
 pub const MAX_BODY: u64 = 1024 * 1024;
-pub const MAX_PER_MINUTE: u32 = 600;
+/// The same ceiling the server keeps for these routes: more would only come back refused.
+pub const MAX_PER_MINUTE: u32 = 60;
 const WINDOW_MS: i64 = 60_000;
 
 /// What the server read of the request line and the headers.
@@ -77,7 +78,7 @@ pub fn check(head: &Head) -> Result<usize, u16> {
     usize::try_from(length).map_err(|_| 413)
 }
 
-/// At most 600 batches a minute, in fixed windows.
+/// At most `MAX_PER_MINUTE` batches a minute, in fixed windows.
 #[derive(Default)]
 pub struct RateLimit {
     start_ms: i64,

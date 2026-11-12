@@ -210,10 +210,10 @@ fn each_row_of_the_table_has_its_status() {
 }
 
 #[test]
-fn at_most_600_batches_a_minute_in_fixed_windows() {
+fn at_most_60_batches_a_minute_in_fixed_windows() {
     let mut limit = RateLimit::default();
     let t0 = 1_000_000;
-    assert!((0..600).all(|i| limit.allow(t0 + i)));
+    assert!((0..60).all(|i| limit.allow(t0 + i)));
     assert!(!limit.allow(t0 + 700));
     assert!(!limit.allow(t0 + 59_000));
     assert!(limit.allow(t0 + 60_000), "a new window");
