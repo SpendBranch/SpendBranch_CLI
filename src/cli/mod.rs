@@ -14,7 +14,8 @@ pub fn run(args: &[String], env: Env, out: &mut dyn Write) -> i32 {
     match dispatch(args, env, out) {
         Ok(code) => code,
         Err(e) => {
-            eprintln!("unexpected error: {e}");
+            // `eprintln!` panics when stderr cannot be written; a failed message is no reason to crash.
+            let _ = writeln!(std::io::stderr(), "unexpected error: {e}");
             1
         }
     }

@@ -192,6 +192,49 @@ fn the_last_message_of_a_file_still_being_written_is_held_until_it_settles() {
 }
 
 #[test]
+fn a_modification_time_in_the_future_does_not_hold_the_last_message_forever() {
+    let mut rig = Rig::new();
+    let file = rig.path("p/s1.jsonl");
+    write(
+        &file,
+        &[
+            line("s1", "r1", "2026-06-01T10:00:00Z", 5),
+            line("s1", "r2", "2026-06-01T10:00:01Z", 9),
+        ],
+    );
+    // the clock was set back after the file was written: its time is a year ahead
+    let ahead = UNIX_EPOCH + Duration::from_millis(now().millis() as u64 + 365 * 24 * 3600 * 1000);
+    let touch = |at| {
+        OpenOptions::new()
+            .write(true)
+            .open(&file)
+            .unwrap()
+            .set_modified(at)
+            .unwrap();
+    };
+    touch(ahead);
+    assert_eq!(
+        ids(&rig.collect()),
+        ["r1"],
+        "first sight: it may still be growing"
+    );
+    assert_eq!(
+        ids(&rig.collect()),
+        ["r2"],
+        "unchanged since the last read: it has settled"
+    );
+    // a file that changed since the last read is held again, whatever its time says
+    append(&file, &[line("s1", "r3", "2026-06-01T10:00:02Z", 1)]);
+    touch(ahead);
+    assert!(ids(&rig.collect()).is_empty(), "r3 is the new open message");
+    assert_eq!(
+        ids(&rig.collect()),
+        ["r3"],
+        "and it settles on the next read"
+    );
+}
+
+#[test]
 fn a_line_without_its_line_break_is_left_for_later() {
     let mut rig = Rig::new();
     let file = rig.path("p/s1.jsonl");

@@ -207,38 +207,55 @@ fn failure_messages_are_english_and_never_echo_unknown_input_verbatim_as_a_code_
 
 #[test]
 fn data_folder_precedence() {
-    let env = |pairs: &'static [(&'static str, &'static str)]| {
-        move |k: &str| {
-            pairs
-                .iter()
-                .find(|(n, _)| *n == k)
-                .map(|(_, v)| v.to_string())
-        }
+    let env = |pairs: &[(&str, &str)]| {
+        let map: std::collections::HashMap<String, String> = pairs
+            .iter()
+            .map(|(k, v)| (k.to_string(), v.to_string()))
+            .collect();
+        move |k: &str| map.get(k).cloned()
     };
+    // absolute on every platform (`/sb` has no drive letter on Windows)
+    let root = std::env::temp_dir();
+    let p = |name: &str| root.join(name).to_string_lossy().into_owned();
+    let (sb, xdg_dir, h, ad) = (p("sb"), p("xdg"), p("h"), p("ad"));
     let all = env(&[
-        ("SPENDBRANCH_HOME", "/sb"),
-        ("XDG_CONFIG_HOME", "/xdg"),
-        ("HOME", "/h"),
-        ("APPDATA", "/ad"),
+        ("SPENDBRANCH_HOME", &sb),
+        ("XDG_CONFIG_HOME", &xdg_dir),
+        ("HOME", &h),
+        ("APPDATA", &ad),
     ]);
-    assert_eq!(paths::data_dir(&all).unwrap(), Path::new("/sb"));
-    let xdg = env(&[("XDG_CONFIG_HOME", "/xdg"), ("HOME", "/h")]);
+    assert_eq!(paths::data_dir(&all).unwrap(), Path::new(&sb));
+    let xdg = env(&[("XDG_CONFIG_HOME", &xdg_dir), ("HOME", &h)]);
     assert_eq!(
         paths::data_dir(&xdg).unwrap(),
-        Path::new("/xdg/spendbranch")
+        Path::new(&xdg_dir).join("spendbranch")
     );
     let empty_is_unset = env(&[
         ("SPENDBRANCH_HOME", ""),
         ("XDG_CONFIG_HOME", ""),
-        ("HOME", "/h"),
-        ("APPDATA", "/ad"),
+        ("HOME", &h),
+        ("APPDATA", &ad),
     ]);
     let expected = if cfg!(windows) {
-        Path::new("/ad").join("spendbranch")
+        Path::new(&ad).join("spendbranch")
     } else {
-        Path::new("/h/.config/spendbranch").into()
+        Path::new(&h).join(".config/spendbranch")
     };
     assert_eq!(paths::data_dir(&empty_is_unset).unwrap(), expected);
+    // a relative SPENDBRANCH_HOME is refused; a relative XDG_CONFIG_HOME is ignored
+    let relative = env(&[
+        ("SPENDBRANCH_HOME", "state"),
+        ("HOME", &h),
+        ("APPDATA", &ad),
+    ]);
+    assert!(
+        paths::data_dir(&relative)
+            .unwrap_err()
+            .to_string()
+            .contains("absolute")
+    );
+    let relative_xdg = env(&[("XDG_CONFIG_HOME", "cfg"), ("HOME", &h), ("APPDATA", &ad)]);
+    assert_eq!(paths::data_dir(&relative_xdg).unwrap(), expected);
     assert!(paths::data_dir(&env(&[])).is_err());
 }
 
@@ -291,4 +308,49 @@ fn an_argument_that_is_not_text_is_a_usage_error_not_a_crash() {
             String::from_utf8_lossy(&out.stderr)
         );
     }
+}
+
+#[test]
+fn setup_takes_the_same_source_spellings_as_enable() {
+    for source in ["claude-code", "claude_code", "codex"] {
+        let (code, out) = run(&["setup", "--source", source]);
+        assert_eq!(
+            (code, out.as_str()),
+            (1, format!("{}\n", messages::NOT_AVAILABLE).as_str()),
+            "{source}"
+        );
+    }
+}
+
+/// `eprintln!` panics (exit 101) when stderr cannot be written; `/dev/full` fails every write.
+#[cfg(target_os = "linux")]
+#[test]
+fn an_unwritable_stderr_does_not_turn_an_error_into_a_panic() {
+    let dir = tempfile::tempdir().unwrap();
+    let blocker = dir.path().join("a-file");
+    std::fs::write(&blocker, "x").unwrap();
+    let full = std::fs::OpenOptions::new()
+        .write(true)
+        .open("/dev/full")
+        .unwrap();
+    let status = Command::new(env!("CARGO_BIN_EXE_spendbranch"))
+        .arg("status")
+        .env("SPENDBRANCH_HOME", &blocker)
+        .stderr(full)
+        .status()
+        .unwrap();
+    assert_eq!(status.code(), Some(1));
+}
+
+#[test]
+fn a_relative_data_folder_is_refused_with_a_clear_message() {
+    let out = Command::new(env!("CARGO_BIN_EXE_spendbranch"))
+        .arg("status")
+        .env("SPENDBRANCH_HOME", "state")
+        .output()
+        .unwrap();
+    assert_eq!(out.status.code(), Some(1));
+    assert!(
+        String::from_utf8_lossy(&out.stderr).contains("SPENDBRANCH_HOME must be an absolute path")
+    );
 }
