@@ -231,10 +231,13 @@ fn no_request_ever_carries_the_private_key() {
     let (server, key, id) = paired();
     let c = client(&server, SystemClock);
     status(&c, &key, &id).unwrap();
+    let batch = json!({"contractVersion": "ingest/v1", "observations": [],
+        "coverage": [{"source": "codex", "from": "2026-06-01T00:00:00.000Z",
+                      "to": "2026-06-01T01:00:00.000Z", "state": "observed"}]});
     let _: Value = c
-        .post(
+        .post_json_gzip(
             "/api/ingest/v1/events",
-            &json!({"observations": []}),
+            batch.to_string().as_bytes(),
             Some(&Signer {
                 device: &id,
                 key: &key,
@@ -265,10 +268,11 @@ fn a_changed_body_is_refused() {
     );
 
     raw.send_body = raw.sign_body.clone();
+    // past the signature checks: the route then refuses a body that is not gzip, which is another matter
     assert_eq!(
         raw.send(&server, &[("dev-1", &key)]).0,
-        200,
-        "the untouched body goes through"
+        415,
+        "the untouched body gets past authentication"
     );
 }
 

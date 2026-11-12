@@ -3,10 +3,11 @@
 //! answers. Commands that need the server end in `NOT_AVAILABLE` until their phase
 //! (login/status/logout F5, sync F6, hooks and setup F7, otel/relay F8).
 mod account;
+mod sync;
 
 use crate::cli::{args::Command, messages as m};
 use crate::env::Env;
-use crate::infra::{lock, paths, store::Store};
+use crate::infra::{paths, store::Store};
 use crate::sources::Source;
 use std::{
     error::Error,
@@ -37,7 +38,7 @@ pub fn run(command: Command, ctx: &mut Ctx) -> Result<i32> {
         Command::Login { server } => account::login(ctx, server),
         Command::Status => account::status(ctx),
         Command::Relay { .. } => require_connection(ctx),
-        Command::Sync => sync(ctx),
+        Command::Sync => sync::run(ctx),
         Command::Enable(s) => match s.as_deref().and_then(Source::parse) {
             Some(source) => account::enable(ctx, source),
             None => say(ctx, m::USAGE_ENABLE, 2),
@@ -96,12 +97,4 @@ fn otel(ctx: &mut Ctx, source: Option<String>) -> Result<i32> {
         Some("codex") => say(ctx, m::OTEL_CODEX_REFUSED, 2),
         _ => say(ctx, m::USAGE_OTEL, 2),
     }
-}
-
-fn sync(ctx: &mut Ctx) -> Result<i32> {
-    let dir = paths::data_dir(ctx.env)?;
-    let Some(_lock) = lock::try_acquire(&dir)? else {
-        return say(ctx, m::SYNC_RUNNING, 0);
-    };
-    require_connection(ctx)
 }

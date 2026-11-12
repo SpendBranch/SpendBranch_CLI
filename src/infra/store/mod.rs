@@ -2,6 +2,7 @@
 //! This file opens and migrates the database and keeps small facts (`meta`, sources);
 //! what readers leave behind (buffer, cursors, seen keys) is in `reads`.
 mod account;
+mod outbox;
 mod reads;
 
 use super::private_fs;
@@ -14,6 +15,7 @@ use std::{
     time::{Duration, Instant},
 };
 
+pub use outbox::{Batch, Change, Queued};
 pub use reads::{Commit, SpoolLimits};
 
 #[derive(Debug)]
@@ -77,7 +79,8 @@ impl From<serde_json::Error> for Error {
 }
 
 /// Index = schema version - 1. Never edit an applied entry: append a new one.
-const MIGRATIONS: &[&str] = &["
+const MIGRATIONS: &[&str] = &[
+    "
     CREATE TABLE meta(key TEXT PRIMARY KEY, value TEXT) WITHOUT ROWID;
     CREATE TABLE sync_state(key TEXT PRIMARY KEY, value TEXT) WITHOUT ROWID;
     CREATE TABLE rejected(code TEXT PRIMARY KEY, count INTEGER NOT NULL) WITHOUT ROWID;
@@ -91,7 +94,20 @@ const MIGRATIONS: &[&str] = &["
         PRIMARY KEY(source, key_hash)) WITHOUT ROWID;
     CREATE TABLE spool(id INTEGER PRIMARY KEY, payload TEXT NOT NULL);
     CREATE TABLE pending_coverage(id INTEGER PRIMARY KEY, payload TEXT NOT NULL);
-"];
+",
+    "
+    -- The age of a buffered item (unix ms of when it entered): the 24 h cap on CLOCK_SKEW.
+    -- What was already there counts as entering now.
+    -- AUTOINCREMENT: an id is never used twice, so an item put back lands after everything
+    -- this run found, even if the table was emptied first.
+    CREATE TABLE spool_new(id INTEGER PRIMARY KEY AUTOINCREMENT, payload TEXT NOT NULL,
+        queued_at INTEGER NOT NULL);
+    INSERT INTO spool_new(id, payload, queued_at)
+        SELECT id, payload, CAST(strftime('%s', 'now') AS INTEGER) * 1000 FROM spool;
+    DROP TABLE spool;
+    ALTER TABLE spool_new RENAME TO spool;
+",
+];
 
 #[derive(Debug)]
 pub struct Store {

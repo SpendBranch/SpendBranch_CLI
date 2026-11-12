@@ -88,9 +88,15 @@ impl Store {
     /// repeat), a crash after it finds the cursor already moved.
     pub fn commit_read(&mut self, outcome: &ReadOutcome, limits: SpoolLimits) -> Result<Commit> {
         let name = outcome.source.name();
-        let payloads = outcome
+        // An event more than a day ahead of this clock cannot be right (the server would hold it
+        // as CLOCK_SKEW for a day and then we would drop it): it never enters the buffer.
+        let latest = outcome.read_at.millis() + crate::sync::CLOCK_SKEW_CAP_MS;
+        let (usable, future): (Vec<_>, Vec<_>) = outcome
             .observations
             .iter()
+            .partition(|o| o.occurred_at.millis() <= latest);
+        let payloads = usable
+            .into_iter()
             .map(serde_json::to_string)
             .collect::<std::result::Result<Vec<_>, _>>()?;
         // Immediate: take the write lock now, waiting for it. A transaction that starts as a
@@ -112,9 +118,17 @@ impl Store {
             }
         }
         {
-            let mut insert = tx.prepare_cached("INSERT INTO spool(payload) VALUES(?1)")?;
+            let mut insert =
+                tx.prepare_cached("INSERT INTO spool(payload, queued_at) VALUES(?1, ?2)")?;
             for payload in &payloads {
-                insert.execute([payload])?;
+                insert.execute(params![payload, outcome.read_at.millis()])?;
+            }
+            if !future.is_empty() {
+                tx.execute(
+                    "INSERT INTO rejected(code, count) VALUES('INVALID_LOCAL', ?1)
+                     ON CONFLICT(code) DO UPDATE SET count = count + excluded.count",
+                    [future.len() as i64],
+                )?;
             }
             let mut insert =
                 tx.prepare_cached("INSERT INTO pending_coverage(payload) VALUES(?1)")?;

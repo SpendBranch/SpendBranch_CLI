@@ -82,9 +82,8 @@ pub const BAD_STATUS: &str = "The server's status answer was not valid.";
 pub const KEY_MISSING: &str = "The device key is missing or unreadable. Run `spendbranch login` to connect this device again.";
 pub const KEY_IN_FILE: &str = "No system keychain was found: the device key is kept in a file in the data folder (less safe).";
 pub const LOGIN_BAD_PAIRING: &str = "The server's pairing answer was not valid (for example, a verification address on another domain); sign-in was stopped.";
-pub const LOGIN_DENIED: &str =
-    "Sign-in was denied in the browser, or your role does not allow collection.";
-pub const LOGIN_EXPIRED: &str = "The code expired before approval. Run `spendbranch login` again.";
+pub const LOGIN_DENIED: &str = "Sign-in was denied in the browser, or your role does not allow collection, or the company has not authorized collection.";
+pub const LOGIN_EXPIRED: &str = "The code expired before approval. Run `spendbranch login` again. If the browser refused the approval, the company may not have authorized collection yet.";
 pub const LOGIN_CANCELLED: &str = "Cancelled. This device was not connected.";
 pub const LOGIN_LOCK_BUSY: &str = "The new access was approved, but another `spendbranch sync` kept running and it was not saved. Run `spendbranch login` again after the sync ends.";
 pub const OLD_DEVICE_NOT_REVOKED: &str = "The previous device could not be revoked on the server. Revoke it in \"My devices\" on the web.";
@@ -116,4 +115,26 @@ pub fn different_fields(agent: &str) -> String {
     format!(
         "The company authorized a different {agent} field list. Ask the owner to renew authorization."
     )
+}
+
+pub const NO_SOURCE_ON: &str =
+    "No source is turned on. Run `spendbranch enable claude-code` or `spendbranch enable codex`.";
+pub const SESSION_OWNED_STOP: &str = "A session in the buffer belongs to another member, so it was discarded and the upload stopped. If the server disconnected this device, `spendbranch status` will say so: run `spendbranch login` to connect again.";
+
+/// One line of the summary for a code and how many events it covers.
+pub fn rejected_line(code: &str, n: u64) -> String {
+    match code {
+        "CLOCK_SKEW_EXPIRED" => format!("{n} items dropped: their time was ahead of the server"),
+        "INVALID_LOCAL" => format!("{n} events dropped: they did not pass the local check"),
+        "VALIDATION_FAILED" => {
+            format!("{n} events dropped: the server said the batch was out of contract")
+        }
+        "BEFORE_COLLECTION_WINDOW" => format!(
+            "{n} events dropped: they are from before the month the company authorized collection"
+        ),
+        other => format!(
+            "{n} events rejected by the server: {}",
+            failure_message(other)
+        ),
+    }
 }

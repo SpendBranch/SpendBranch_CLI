@@ -3,106 +3,19 @@
 #[path = "common/fake_server.rs"]
 mod fake_server;
 
-use fake_server::FakeServer;
+#[path = "common/rig.rs"]
+mod rig;
+
+use rig::{Rig, authorize};
 use serde_json::{Value, json};
-use spendbranch::cli::{self, Io, messages};
+use spendbranch::cli::{self, messages};
 use spendbranch::contract::{Iso, Source};
 use spendbranch::infra::{
     keys::{KeyFiles, KeyStore, Slot},
     lock,
-    store::{SpoolLimits, Store},
+    store::SpoolLimits,
 };
-use spendbranch::sources::{claude_code, codex, outcome::ReadOutcome};
-use std::{cell::RefCell, collections::HashMap, io::Cursor};
-
-struct Out {
-    code: i32,
-    text: String,
-    /// Every pause the command asked for, in seconds.
-    sleeps: Vec<u64>,
-    opened: Vec<String>,
-}
-
-struct Rig {
-    dir: tempfile::TempDir,
-    server: FakeServer,
-}
-
-impl Rig {
-    fn new() -> Self {
-        let server = FakeServer::start();
-        server.configure(|s| s.script.approve_at_poll = Some(2));
-        Self {
-            dir: tempfile::tempdir().unwrap(),
-            server,
-        }
-    }
-
-    fn run_with(&self, args: &[&str], input: &str, tty: bool, extra: &[(&str, &str)]) -> Out {
-        let mut env: HashMap<String, String> = [
-            ("SPENDBRANCH_HOME", self.dir.path().to_str().unwrap()),
-            ("SPENDBRANCH_KEY_STORE", "file"),
-            ("SPENDBRANCH_SERVER", &self.server.base),
-            ("HOME", self.dir.path().to_str().unwrap()),
-        ]
-        .into_iter()
-        .map(|(k, v)| (k.to_owned(), v.to_owned()))
-        .collect();
-        env.extend(extra.iter().map(|(k, v)| (k.to_string(), v.to_string())));
-        let (sleeps, opened) = (RefCell::new(vec![]), RefCell::new(vec![]));
-        let args: Vec<String> = args.iter().map(|a| a.to_string()).collect();
-        let mut out = Vec::new();
-        let mut keyboard = Cursor::new(input.as_bytes().to_vec());
-        let code = cli::run_with(
-            &args,
-            &|k| env.get(k).cloned(),
-            &mut Io {
-                out: &mut out,
-                input: &mut keyboard,
-                sleep: &|d| sleeps.borrow_mut().push(d.as_secs()),
-                open_url: &|u| opened.borrow_mut().push(u.to_owned()),
-                interactive: tty,
-            },
-        );
-        Out {
-            code,
-            text: String::from_utf8(out).unwrap(),
-            sleeps: sleeps.into_inner(),
-            opened: opened.into_inner(),
-        }
-    }
-
-    fn run(&self, args: &[&str]) -> Out {
-        self.run_with(args, "y\n", false, &[])
-    }
-
-    fn store(&self) -> Store {
-        Store::open(self.dir.path()).unwrap()
-    }
-
-    fn key_file(&self, slot: Slot) -> bool {
-        KeyFiles::new(self.dir.path()).load(slot).unwrap().is_some()
-    }
-
-    fn paths_seen(&self) -> Vec<String> {
-        self.server.seen().into_iter().map(|s| s.path).collect()
-    }
-}
-
-fn authorize(rig: &Rig) {
-    let granted = |source: &str, parser: &str, fields: &[&str]| {
-        json!({"source": source, "state": "active", "parserVersion": parser,
-               "fields": fields, "windowStart": "2026-11-01T00:00:00Z"})
-    };
-    rig.server.configure(|s| {
-        s.sources = vec![
-            granted("claude_code", claude_code::PARSER, &claude_code::FIELDS),
-            granted("codex", codex::PARSER, &codex::FIELDS),
-        ];
-        s.collection = vec![json!({"source": "claude_code", "lastSeenAt": null,
-            "observedUntil": null, "openGaps": []})];
-    });
-}
+use spendbranch::sources::{claude_code, outcome::ReadOutcome};
 
 fn observation(id: &str) -> spendbranch::contract::UsageObservation {
     serde_json::from_value(json!({
@@ -118,7 +31,7 @@ fn observation(id: &str) -> spendbranch::contract::UsageObservation {
 /// One buffered item and one saved cursor for Codex.
 fn buffer_something(rig: &Rig) {
     let mut outcome =
-        ReadOutcome::empty(Source::Codex, Iso::from_millis(1_780_000_000_000).unwrap());
+        ReadOutcome::empty(Source::Codex, Iso::from_millis(1_790_000_000_000).unwrap());
     outcome.observations.push(observation("e1"));
     outcome.cursor_set.push(("file:/x".into(), "{}".into()));
     rig.store()
@@ -853,4 +766,19 @@ fn a_status_answer_with_a_malformed_fingerprint_is_refused() {
             out.text
         );
     }
+}
+
+#[test]
+fn an_approval_the_browser_refused_for_lack_of_authorization_ends_as_an_expired_code_with_a_hint() {
+    let rig = Rig::new();
+    rig.server.configure(|s| s.script.refuse_approval = true);
+    let out = rig.run(&["login"]);
+    assert_eq!(out.code, 1);
+    assert!(
+        out.text.contains("may not have authorized collection yet"),
+        "{}",
+        out.text
+    );
+    assert_eq!(out.sleeps.len(), 120, "it kept polling until the code died");
+    assert!(!rig.store().is_connected().unwrap());
 }

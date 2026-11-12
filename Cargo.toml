@@ -34,6 +34,8 @@ uuid = { version = "1.29.2", features = ["v4"] }
 zstd = "0.14.3"
 base64 = "0.22"
 zeroize = "1"
+# Batches go out gzipped (the API wants it). The pure-Rust backend: no C, no unsafe of ours.
+flate2 = { version = "1", default-features = false, features = ["rust_backend"] }
 ed25519-dalek = "3"
 getrandom = "0.4"
 keyring-core = "1"

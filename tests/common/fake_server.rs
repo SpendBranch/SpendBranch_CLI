@@ -7,9 +7,10 @@
 #![allow(dead_code)]
 use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD as B64};
 use ed25519_dalek::{Signature, VerifyingKey};
+use flate2::read::GzDecoder;
 use sha2::{Digest, Sha256};
 use std::{
-    collections::HashMap,
+    collections::{HashMap, HashSet, VecDeque},
     io::{Read, Write},
     net::{TcpListener, TcpStream},
     sync::{
@@ -58,6 +59,35 @@ pub struct State {
     pub organization_name: String,
     pub sources: Vec<serde_json::Value>,
     pub collection: Vec<serde_json::Value>,
+    /// How `POST /api/ingest/v1/events` behaves, and what it was given.
+    pub ingest: Ingest,
+    /// Every observation accepted, once per identity: what the API would have stored.
+    pub stored: Vec<serde_json::Value>,
+    pub stored_coverage: Vec<serde_json::Value>,
+    /// One entry per batch that was understood: (observations, coverage, bytes on the wire).
+    pub batches: Vec<(usize, usize, usize)>,
+    identities: HashSet<(String, String, String)>,
+    /// What the 9.4 `collection` is worked out from: for each source this device has sent.
+    seen_at: HashMap<String, i64>,
+    observed_until: HashMap<String, i64>,
+    /// `(source, from, to, reason)` in the order reported, and the observed ranges after them.
+    gaps: Vec<(String, i64, i64, String, usize)>,
+    observed: Vec<(String, i64, i64, usize)>,
+    reports: usize,
+}
+
+#[derive(Default)]
+pub struct Ingest {
+    /// Batch-level failures served first, one per request: (status, code, `Retry-After`).
+    pub fail_next: VecDeque<(u16, String, Option<u64>)>,
+    /// Per-item refusals by `externalEventId`.
+    pub reject: HashMap<String, String>,
+    /// An item from before this (ISO) is `BEFORE_COLLECTION_WINDOW`.
+    pub window_start: Option<String>,
+    /// Answer 200 with the wrong number of results.
+    pub short_results: bool,
+    /// Refuse bodies over this many bytes once decompressed (default 1 MiB).
+    pub max_plain: Option<usize>,
 }
 
 /// What the person does in the browser, and when the server says so.
@@ -70,6 +100,9 @@ pub struct Script {
     /// Answer `access_denied` / `expired_token` instead of approving.
     pub deny: bool,
     pub expire: bool,
+    /// The browser refused the approval (the organization has authorized no source): the code
+    /// stays valid and every poll says `authorization_pending`.
+    pub refuse_approval: bool,
     /// The `interval` handed out (default 5).
     pub interval: Option<u64>,
     pub organization_id: Option<String>,
@@ -272,7 +305,7 @@ fn route(s: &mut State, req: Seen) -> Reply {
             Err(reply) => reply,
         },
         ("POST", "/api/ingest/v1/events") => match authenticate(s, &req) {
-            Ok(_) => json(200, serde_json::json!({"results": []})),
+            Ok(id) => ingest(s, &req, &id),
             Err(reply) => reply,
         },
         ("GET", "/redirect") => (
@@ -352,6 +385,9 @@ fn poll(s: &mut State, body: &[u8]) -> Reply {
     if s.script.deny {
         return status("access_denied");
     }
+    if s.script.refuse_approval {
+        return status("authorization_pending");
+    }
     let approved = s.pairing.as_ref().is_some_and(|p| p.2);
     if !approved && s.polls <= s.script.slow_downs {
         return status("slow_down");
@@ -428,7 +464,7 @@ fn status(s: &State, id: &str) -> Reply {
                 "expiresAt": s.script.device_expires_at.clone().unwrap_or("2027-02-08T00:00:00Z".into())
             },
             "sources": s.sources,
-            "collection": s.collection
+            "collection": if s.collection.is_empty() { collection(s) } else { s.collection.clone() }
         }),
     )
 }
@@ -487,4 +523,212 @@ fn authenticate(s: &mut State, req: &Seen) -> Result<String, Reply> {
     }
     s.nonces.push(pair);
     Ok(id.to_owned())
+}
+
+/// `POST /api/ingest/v1/events` as the contract describes it: gzip, at most 1 MiB once
+/// decompressed, strict shape, one result per observation in order.
+fn ingest(s: &mut State, req: &Seen, device: &str) -> Reply {
+    if let Some((status, code, retry)) = s.ingest.fail_next.pop_front() {
+        let mut r = error(status, &code);
+        if let Some(secs) = retry {
+            r.1.push(("Retry-After".into(), secs.to_string()));
+        }
+        return r;
+    }
+    let header = |n: &str| req.headers.get(n).map(String::as_str);
+    if header("content-type") != Some("application/json")
+        || header("content-encoding") != Some("gzip")
+    {
+        return error(415, "UNSUPPORTED_MEDIA_TYPE");
+    }
+    let limit = s.ingest.max_plain.unwrap_or(1024 * 1024);
+    let mut plain = Vec::new();
+    let read = GzDecoder::new(&req.body[..])
+        .take(limit as u64 + 1)
+        .read_to_end(&mut plain);
+    if read.is_err() {
+        return error(400, "VALIDATION_FAILED");
+    }
+    // Over 1 MiB once decompressed, or more than 200 times what was sent (a bomb): the batch
+    // is too big, and a smaller one gets through.
+    if plain.len() > limit || plain.len() > req.body.len() * 200 {
+        return error(413, "PAYLOAD_TOO_LARGE");
+    }
+    let Ok(v) = serde_json::from_slice::<serde_json::Value>(&plain) else {
+        return error(400, "VALIDATION_FAILED");
+    };
+    let Some(map) = v.as_object() else {
+        return error(400, "VALIDATION_FAILED");
+    };
+    let known = [
+        "contractVersion",
+        "installationId",
+        "observations",
+        "coverage",
+    ];
+    let observations = map
+        .get("observations")
+        .and_then(|o| o.as_array())
+        .cloned()
+        .unwrap_or_default();
+    let coverage = map
+        .get("coverage")
+        .and_then(|c| c.as_array())
+        .cloned()
+        .unwrap_or_default();
+    let installation = s.devices[device].installation_id.clone();
+    let well_formed = map.keys().all(|k| known.contains(&k.as_str()))
+        && map.get("contractVersion").and_then(|c| c.as_str()) == Some("ingest/v1")
+        && (installation.is_empty()
+            || map.get("installationId").and_then(|i| i.as_str()) == Some(installation.as_str()))
+        && observations.len() <= 500
+        && coverage.len() <= 50
+        && observations.len() + coverage.len() > 0;
+    // A report ends after it starts, and carries a reason when (and only when) it is a gap.
+    let coverage_ok = coverage.iter().all(|c| {
+        let when = |k: &str| {
+            c[k].as_str()
+                .and_then(|t| t.parse::<jiff::Timestamp>().ok())
+        };
+        let ordered = when("from").zip(when("to")).is_some_and(|(a, b)| a < b);
+        let reason = match c["state"].as_str() {
+            Some("unavailable") => c["reason"].is_string(),
+            Some("observed") => c.get("reason").is_none(),
+            _ => false,
+        };
+        ordered && reason
+    });
+    if !well_formed || !coverage_ok {
+        return error(400, "VALIDATION_FAILED");
+    }
+    s.batches
+        .push((observations.len(), coverage.len(), req.body.len()));
+    let server_now = now_ms() + s.clock_offset_ms;
+    let when = |o: &serde_json::Value| {
+        o["occurredAt"]
+            .as_str()
+            .and_then(|t| t.parse::<jiff::Timestamp>().ok())
+            .map(|t| t.as_millisecond())
+    };
+    let window = s
+        .ingest
+        .window_start
+        .as_deref()
+        .and_then(|t| t.parse::<jiff::Timestamp>().ok())
+        .map(|t| t.as_millisecond());
+    let mut results = Vec::new();
+    for (i, o) in observations.iter().enumerate() {
+        let text = |k: &str| o[k].as_str().unwrap_or("").to_owned();
+        let identity = (
+            text("source"),
+            text("externalSessionId"),
+            text("externalEventId"),
+        );
+        // The order of the contract: authorization, fields, clock, window, then ownership, then
+        // the repeat. Scripted refusals stand in for the first two and for ownership.
+        let scripted = s.ingest.reject.get(&identity.2).cloned();
+        let owned = scripted.as_deref() == Some("SESSION_OWNED");
+        let refused = if scripted.is_some() && !owned {
+            scripted.clone()
+        } else if when(o).is_some_and(|t| t > server_now + WINDOW_MS) {
+            Some("CLOCK_SKEW".to_owned())
+        } else if window.zip(when(o)).is_some_and(|(w, t)| t < w) {
+            Some("BEFORE_COLLECTION_WINDOW".to_owned())
+        } else if owned {
+            scripted.clone()
+        } else {
+            None
+        };
+        results.push(match refused {
+            Some(code) => serde_json::json!({"index": i, "status": "rejected", "code": code}),
+            None if s.identities.contains(&identity) => {
+                serde_json::json!({"index": i, "status": "duplicate"})
+            }
+            None => {
+                s.identities.insert(identity);
+                s.stored.push(o.clone());
+                serde_json::json!({"index": i, "status": "accepted"})
+            }
+        });
+    }
+    // Coverage is kept only for the sources whose authorization is active; the rest is ignored
+    // without an error and without changing the results.
+    let active: Vec<String> = s
+        .sources
+        .iter()
+        .filter(|x| x["state"] == "active")
+        .filter_map(|x| x["source"].as_str().map(str::to_owned))
+        .collect();
+    let kept: Vec<serde_json::Value> = coverage
+        .into_iter()
+        .filter(|c| active.iter().any(|a| c["source"] == a.as_str()))
+        .collect();
+    // For `collection` in the status: the last batch that brought something from a source (an
+    // item accepted or repeated, or coverage of an active source); the furthest observed time,
+    // which never goes back; and the gaps, each told after the earlier ones.
+    let received = now_ms();
+    for (o, r) in observations.iter().zip(&results) {
+        if r["status"] != "rejected" {
+            s.seen_at
+                .insert(o["source"].as_str().unwrap_or("").to_owned(), received);
+        }
+    }
+    for c in &kept {
+        let ms = |k: &str| {
+            c[k].as_str()
+                .and_then(|t| t.parse::<jiff::Timestamp>().ok())
+                .map_or(0, |t| t.as_millisecond())
+        };
+        let source = c["source"].as_str().unwrap_or("").to_owned();
+        s.seen_at.insert(source.clone(), received);
+        s.reports += 1;
+        let seq = s.reports;
+        if c["state"] == "observed" {
+            let until = s.observed_until.entry(source.clone()).or_insert(0);
+            *until = (*until).max(ms("to"));
+            s.observed.push((source, ms("from"), ms("to"), seq));
+        } else {
+            let reason = c["reason"].as_str().unwrap_or("").to_owned();
+            s.gaps.push((source, ms("from"), ms("to"), reason, seq));
+        }
+    }
+    s.stored_coverage.extend(kept);
+    if s.ingest.short_results {
+        results.pop();
+    }
+    json(200, serde_json::json!({ "results": results }))
+}
+
+/// `collection` of the 9.4 contract: one entry per source this device has sent; the gaps are
+/// the `unavailable` reports that no `observed` range told afterwards covers whole; at most 20,
+/// those that start latest first.
+fn collection(s: &State) -> Vec<serde_json::Value> {
+    let iso = |ms: i64| jiff::Timestamp::from_millisecond(ms).unwrap().to_string();
+    let mut out = Vec::new();
+    for source in ["claude_code", "codex"] {
+        let Some(seen) = s.seen_at.get(source) else {
+            continue;
+        };
+        let mut open: Vec<_> =
+            s.gaps
+                .iter()
+                .filter(|(src, from, to, _, seq)| {
+                    src == source
+                        && !s.observed.iter().any(|(o, a, b, later)| {
+                            o == source && later > seq && a <= from && b >= to
+                        })
+                })
+                .collect();
+        open.sort_by_key(|g| std::cmp::Reverse(g.1));
+        out.push(serde_json::json!({
+            "source": source,
+            "lastSeenAt": iso(*seen),
+            "observedUntil": s.observed_until.get(source).map(|t| iso(*t)),
+            "openGaps": open.iter().take(20)
+                .map(|(_, from, to, reason, _)| serde_json::json!({
+                    "startsAt": iso(*from), "endsAt": iso(*to), "reason": reason}))
+                .collect::<Vec<_>>(),
+        }));
+    }
+    out
 }

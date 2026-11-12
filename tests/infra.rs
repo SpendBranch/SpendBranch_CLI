@@ -27,7 +27,7 @@ fn a_new_database_has_the_schema_wal_and_private_permissions() {
     let tmp = tempfile::tempdir().unwrap();
     let dir = tmp.path().join("data");
     let store = Store::open(&dir).unwrap();
-    assert_eq!(user_version(&dir), 1);
+    assert_eq!(user_version(&dir), 2);
     let conn = Connection::open(dir.join("state.db")).unwrap();
     for table in [
         "meta",
@@ -73,7 +73,7 @@ fn reopening_keeps_the_data_and_does_not_migrate_again() {
         Some("http://localhost:3000")
     );
     assert_eq!(again.meta_get("missing").unwrap(), None);
-    assert_eq!(user_version(dir.path()), 1);
+    assert_eq!(user_version(dir.path()), 2);
 }
 
 #[test]
@@ -244,7 +244,7 @@ fn many_processes_opening_a_new_database_at_once_all_succeed() {
                 .unwrap()
                 .unwrap_or_else(|e| panic!("round {round}: every opener must succeed: {e}"));
         }
-        assert_eq!(user_version(&path), 1);
+        assert_eq!(user_version(&path), 2);
     }
 }
 
@@ -258,7 +258,7 @@ fn a_newer_database_is_a_typed_error() {
         .unwrap();
     assert!(matches!(
         Store::open(dir.path()),
-        Err(spendbranch::infra::store::Error::NewerSchema { found: 7, known: 1 })
+        Err(spendbranch::infra::store::Error::NewerSchema { found: 7, known: 2 })
     ));
 }
 
@@ -421,4 +421,83 @@ fn seen_keys_are_kept_for_45_days_and_not_much_less() {
         3,
         "1, 2 stay (10d and 40d), 3 and 4 go, 5 comes"
     );
+}
+
+#[test]
+fn migration_2_keeps_what_was_buffered_and_dates_it_as_entering_now() {
+    let dir = tempfile::tempdir().unwrap();
+    // a database as the first version left it: schema 1, with an item in the buffer
+    {
+        let db = Connection::open(dir.path().join("state.db")).unwrap();
+        db.execute_batch(
+            "CREATE TABLE meta(key TEXT PRIMARY KEY, value TEXT) WITHOUT ROWID;
+             CREATE TABLE sync_state(key TEXT PRIMARY KEY, value TEXT) WITHOUT ROWID;
+             CREATE TABLE rejected(code TEXT PRIMARY KEY, count INTEGER NOT NULL) WITHOUT ROWID;
+             CREATE TABLE source(name TEXT PRIMARY KEY, enabled_since TEXT, observed_until TEXT,
+                last_read_at TEXT, untested_version TEXT) WITHOUT ROWID;
+             CREATE TABLE cursor(source TEXT, key TEXT, data TEXT, PRIMARY KEY(source, key)) WITHOUT ROWID;
+             CREATE TABLE unsupported_file(source TEXT, path TEXT, PRIMARY KEY(source, path)) WITHOUT ROWID;
+             CREATE TABLE seen(source TEXT, key_hash INTEGER, occurred_ms INTEGER NOT NULL,
+                PRIMARY KEY(source, key_hash)) WITHOUT ROWID;
+             CREATE TABLE spool(id INTEGER PRIMARY KEY, payload TEXT NOT NULL);
+             CREATE TABLE pending_coverage(id INTEGER PRIMARY KEY, payload TEXT NOT NULL);
+             INSERT INTO spool VALUES (7, '{\"source\":\"codex\"}');
+             PRAGMA user_version = 1;",
+        )
+        .unwrap();
+    }
+    let store = Store::open(dir.path()).unwrap();
+    assert_eq!(user_version(dir.path()), 2);
+    let items = store.queued(&["codex"], i64::MAX, 10).unwrap();
+    assert_eq!(items.len(), 1);
+    assert_eq!(items[0].id, 7, "the id is kept, so the order is");
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_millis() as i64;
+    assert!(
+        (now - items[0].queued_at).abs() < 60_000,
+        "it counts as entering now"
+    );
+}
+
+#[test]
+fn an_item_put_back_after_the_table_was_emptied_still_goes_after_everything_this_run_found() {
+    use spendbranch::infra::store::{Change, Queued};
+    let dir = tempfile::tempdir().unwrap();
+    let mut store = Store::open(dir.path()).unwrap();
+    store
+        .commit_read(
+            &outcome_of(&["a", "b", "c"]),
+            spendbranch::infra::store::SpoolLimits::default(),
+        )
+        .unwrap();
+    let end = store.queue_end().unwrap();
+    let all = store.queued(&["codex"], end, 10).unwrap();
+    assert_eq!(all.len(), 3);
+    // everything leaves except that the first goes back: the table is empty in between
+    store
+        .apply(&Change {
+            remove_items: vec![all[1].id, all[2].id],
+            requeue: vec![Queued { ..all[0].clone() }],
+            ..Change::default()
+        })
+        .unwrap();
+    assert!(
+        store.queued(&["codex"], end, 10).unwrap().is_empty(),
+        "not found again this run"
+    );
+    let back = store.queued(&["codex"], i64::MAX, 10).unwrap();
+    assert_eq!(back.len(), 1);
+    assert!(back[0].id > end);
+    assert_eq!(back[0].queued_at, all[0].queued_at, "its age is kept");
+}
+
+fn outcome_of(ids: &[&str]) -> spendbranch::sources::outcome::ReadOutcome {
+    let mut o = spendbranch::sources::outcome::ReadOutcome::empty(
+        spendbranch::contract::Source::Codex,
+        spendbranch::contract::Iso::from_millis(1_790_000_000_000).unwrap(),
+    );
+    o.observations = ids.iter().map(|i| observation(i)).collect();
+    o
 }

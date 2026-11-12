@@ -76,7 +76,7 @@ pub fn local_lines(local: &Local, now: Iso) -> Vec<String> {
             .iter()
             .map(|(c, n)| format!("{c}: {n}"))
             .collect();
-        out.push(format!("  Refused by the server: {}", list.join(", ")));
+        out.push(format!("  Refused or dropped: {}", list.join(", ")));
     }
     for s in &local.sources {
         let name = agent_name(s.source);
