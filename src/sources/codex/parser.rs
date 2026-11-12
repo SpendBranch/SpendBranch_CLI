@@ -102,22 +102,8 @@ impl<'a> Parser<'a> {
         }
         let entry = match serde_json::from_str::<Obj<Line>>(raw) {
             Ok(Obj(Some(entry))) => entry,
-            Ok(Obj(None)) => {
-                self.unsupported.push(UnsupportedLine {
-                    line: n,
-                    code: UnsupportedCode::NotAnObject,
-                });
-                self.broken_since_last_record = true;
-                return;
-            }
-            Err(_) => {
-                self.unsupported.push(UnsupportedLine {
-                    line: n,
-                    code: UnsupportedCode::InvalidJson,
-                });
-                self.broken_since_last_record = true;
-                return;
-            }
+            Ok(Obj(None)) => return self.broken(n, UnsupportedCode::NotAnObject),
+            Err(_) => return self.broken(n, UnsupportedCode::InvalidJson),
         };
         let payload = entry.payload.0.as_ref();
         let none = Payload::default();
@@ -127,57 +113,79 @@ impl<'a> Parser<'a> {
             self.last_ordinal = self.last_ordinal.max(o);
         }
         let kind = entry.kind.str();
-
-        let Some(meta) = self.meta.as_ref() else {
-            match (kind == Some("session_meta"))
-                .then(|| meta_of(p))
-                .flatten()
-                .filter(|_| payload.is_some())
-            {
-                Some(meta) => self.meta = Some(meta),
-                None => self.unknown_format = true,
-            }
-            return;
-        };
-        if kind == Some("session_meta") {
-            if p.id.str() != Some(meta.thread_id.as_str()) {
-                self.unknown_format = true;
-            }
-            return;
+        if self.meta.is_none() {
+            return self.first_line(kind, p, payload.is_some());
         }
-        if kind == Some("turn_context") {
-            if let Some(model) = text(&p.model, is_model) {
-                self.current_model = Some(model.to_owned());
-                if let Some(turn) = text(&p.turn_id, is_id) {
-                    self.turn_models.insert(turn.to_owned(), model.to_owned());
+        match kind {
+            Some("session_meta") => self.same_thread(p),
+            Some("turn_context") => self.turn_context(p),
+            Some("event_msg") => self.event_msg(p),
+            Some("token_usage_record") => self.usage_record(n, &entry, p, ordinal),
+            _ => {}
+        }
+    }
+
+    /// A line that cannot be understood: it is told apart as a gap, and the next record knows.
+    fn broken(&mut self, line: usize, code: UnsupportedCode) {
+        self.unsupported.push(UnsupportedLine { line, code });
+        self.broken_since_last_record = true;
+    }
+
+    /// The first line has to be the session meta; anything else is a format we do not know.
+    fn first_line(&mut self, kind: Option<&str>, p: &Payload, has_payload: bool) {
+        match (kind == Some("session_meta"))
+            .then(|| meta_of(p))
+            .flatten()
+            .filter(|_| has_payload)
+        {
+            Some(meta) => self.meta = Some(meta),
+            None => self.unknown_format = true,
+        }
+    }
+
+    /// A second session meta must name the same thread.
+    fn same_thread(&mut self, p: &Payload) {
+        if self.meta.as_ref().map(|m| m.thread_id.as_str()) != p.id.str() {
+            self.unknown_format = true;
+        }
+    }
+
+    fn turn_context(&mut self, p: &Payload) {
+        if let Some(model) = text(&p.model, is_model) {
+            self.current_model = Some(model.to_owned());
+            if let Some(turn) = text(&p.turn_id, is_id) {
+                self.turn_models.insert(turn.to_owned(), model.to_owned());
+            }
+        }
+    }
+
+    fn event_msg(&mut self, p: &Payload) {
+        match p.kind.str() {
+            Some("thread_settings_applied") => {
+                if let Some(model) = p
+                    .thread_settings
+                    .0
+                    .as_ref()
+                    .and_then(|t| text(&t.model, is_model))
+                {
+                    self.current_model = Some(model.to_owned());
                 }
             }
-            return;
-        }
-        if kind == Some("event_msg") && p.kind.str() == Some("thread_settings_applied") {
-            if let Some(model) = p
-                .thread_settings
-                .0
-                .as_ref()
-                .and_then(|t| text(&t.model, is_model))
-            {
-                self.current_model = Some(model.to_owned());
+            Some("token_count") => {
+                self.token_count_seen = true;
+                self.plan_seen |= p
+                    .rate_limits
+                    .0
+                    .as_ref()
+                    .is_some_and(|r| r.plan_type.is_present());
             }
-            return;
+            _ => {}
         }
-        if kind == Some("event_msg") && p.kind.str() == Some("token_count") {
-            self.token_count_seen = true;
-            self.plan_seen |= p
-                .rate_limits
-                .0
-                .as_ref()
-                .is_some_and(|r| r.plan_type.is_present());
-            return;
-        }
-        if kind != Some("token_usage_record") {
-            return;
-        }
-        if p.thread_id != Leaf::Missing && p.thread_id.str() != Some(meta.thread_id.as_str()) {
+    }
+
+    fn usage_record(&mut self, n: usize, entry: &Line, p: &Payload, ordinal: Option<i64>) {
+        let this_thread = self.meta.as_ref().map(|m| m.thread_id.as_str());
+        if p.thread_id != Leaf::Missing && p.thread_id.str() != this_thread {
             self.foreign += 1;
             return;
         }
@@ -188,28 +196,14 @@ impl<'a> Parser<'a> {
         let (Some(response_id), Some(turn_id), Some(usage), Some(at), Some(ordinal)) =
             (response_id, turn_id, usage, at, ordinal)
         else {
-            self.unsupported.push(UnsupportedLine {
-                line: n,
-                code: UnsupportedCode::MissingField,
-            });
-            self.broken_since_last_record = true;
-            return;
+            return self.broken(n, UnsupportedCode::MissingField);
         };
         if usage[1] + usage[2] > usage[0] {
-            self.unsupported.push(UnsupportedLine {
-                line: n,
-                code: UnsupportedCode::InconsistentCounters,
-            });
-            self.broken_since_last_record = true;
-            return;
+            return self.broken(n, UnsupportedCode::InconsistentCounters);
         }
         if let Some(known) = self.by_response.get(response_id) {
             if *known != usage {
-                self.unsupported.push(UnsupportedLine {
-                    line: n,
-                    code: UnsupportedCode::ConflictingResponse,
-                });
-                self.broken_since_last_record = true;
+                self.broken(n, UnsupportedCode::ConflictingResponse);
             }
             return;
         }

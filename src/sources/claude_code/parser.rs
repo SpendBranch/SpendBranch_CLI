@@ -50,15 +50,7 @@ impl<'a> Parser<'a> {
             return;
         };
         if line.kind.str() == Some("bridge-session") {
-            self.recognized += 1;
-            if let Some(owner) = line
-                .owner_organization_uuid
-                .str()
-                .filter(|o| AccountRef::new(o).is_some())
-            {
-                self.payer = Some(owner.to_owned());
-            }
-            return;
+            return self.bridge(&line);
         }
         let Some(session_id) = line.session_id.str().filter(|s| is_id(s)) else {
             return;
@@ -73,9 +65,25 @@ impl<'a> Parser<'a> {
         {
             self.untested = Some(v.to_owned());
         }
-        if line.kind.str() != Some("assistant") {
-            return;
+        if line.kind.str() == Some("assistant") {
+            self.assistant(n, &line, session_id, line_version);
         }
+    }
+
+    /// The line that says which organization pays for the session.
+    fn bridge(&mut self, line: &Line) {
+        self.recognized += 1;
+        if let Some(owner) = line
+            .owner_organization_uuid
+            .str()
+            .filter(|o| AccountRef::new(o).is_some())
+        {
+            self.payer = Some(owner.to_owned());
+        }
+    }
+
+    /// An answer of the assistant: the counters of one request (streamed copies merge later).
+    fn assistant(&mut self, n: usize, line: &Line, session_id: &str, line_version: Option<&str>) {
         let (Some(message), Some(usage)) = (
             line.message.0.as_ref(),
             line.message.0.as_ref().and_then(|m| m.usage.0.as_ref()),
@@ -100,45 +108,46 @@ impl<'a> Parser<'a> {
             self.unsupported.push(n);
             return;
         };
-        let at = at.millis();
-        let branch = line
-            .git_branch
-            .str()
-            .filter(|b| Branch::new(b).is_some())
-            .map(str::to_owned);
         let role = if self.options.subagent_file || line.is_sidechain == Leaf::Bool(true) {
             AgentRole::Subagent
         } else {
             AgentRole::Main
         };
-        let version = line_version.map(str::to_owned);
+        let pending = Pending {
+            session_id: session_id.to_owned(),
+            model: model.to_owned(),
+            at: at.millis(),
+            role,
+            counters,
+            version: line_version.map(str::to_owned),
+            branch: line
+                .git_branch
+                .str()
+                .filter(|b| Branch::new(b).is_some())
+                .map(str::to_owned),
+            broken: false,
+        };
+        self.merge(n, key, pending);
+    }
+
+    /// The first copy of a request is kept; later ones raise its counters to the larger value
+    /// (a streamed answer grows), unless they disagree about the model or the session.
+    fn merge(&mut self, n: usize, key: String, new: Pending) {
         match self.messages.get_mut(&key) {
             None => {
                 self.order.push(key.clone());
-                self.messages.insert(
-                    key,
-                    Pending {
-                        session_id: session_id.to_owned(),
-                        model: model.to_owned(),
-                        at,
-                        role,
-                        counters,
-                        version,
-                        branch,
-                        broken: false,
-                    },
-                );
+                self.messages.insert(key, new);
             }
-            Some(known) if known.model != model || known.session_id != session_id => {
+            Some(known) if known.model != new.model || known.session_id != new.session_id => {
                 known.broken = true;
                 self.unsupported.push(n);
             }
             Some(known) => {
-                known.at = known.at.min(at);
-                known.branch = known.branch.take().or(branch);
-                known.version = known.version.take().or(version);
-                for (slot, new) in known.counters.iter_mut().zip(counters) {
-                    *slot = max(*slot, new);
+                known.at = known.at.min(new.at);
+                known.branch = known.branch.take().or(new.branch);
+                known.version = known.version.take().or(new.version);
+                for (slot, add) in known.counters.iter_mut().zip(new.counters) {
+                    *slot = max(*slot, add);
                 }
             }
         }
