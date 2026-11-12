@@ -159,6 +159,32 @@ fn a_bad_pairing_answer_is_refused() {
     assert!(started(|p| p.verification_uri_complete.push_str("\n--flag")).is_none());
 }
 
+#[test]
+fn verification_links_cannot_carry_terminal_control_text() {
+    // The link is printed: an escape sequence in its path could rewrite the screen.
+    for tail in [
+        "\x1b[2J",
+        "\x1b]8;;http://evil\x07",
+        "\u{202e}gpj",
+        "\r",
+        "\u{85}",
+    ] {
+        assert!(
+            started(|p| p.verification_uri.push_str(tail)).is_none(),
+            "uri {tail:?}"
+        );
+        assert!(
+            started(|p| p.verification_uri_complete.push_str(tail)).is_none(),
+            "complete {tail:?}"
+        );
+    }
+    assert!(
+        started(|p| p.verification_uri_complete =
+            format!("https://app.example.com/{}", "a".repeat(3000)))
+        .is_none()
+    );
+}
+
 fn poll(json: &str) -> Option<Polled> {
     serde_json::from_str::<PollOutcome>(json).ok()?.checked()
 }

@@ -86,6 +86,18 @@ fn meta_set_overwrites() {
 }
 
 #[test]
+fn a_negative_schema_version_is_an_error_not_a_panic() {
+    let dir = tempfile::tempdir().unwrap();
+    Store::open(dir.path()).unwrap();
+    Connection::open(dir.path().join("state.db"))
+        .unwrap()
+        .pragma_update(None, "user_version", -1)
+        .unwrap();
+    assert!(Store::open(dir.path()).is_err());
+    assert_eq!(user_version(dir.path()), -1);
+}
+
+#[test]
 fn a_database_from_a_newer_build_is_refused_untouched() {
     let dir = tempfile::tempdir().unwrap();
     Store::open(dir.path()).unwrap();
@@ -376,5 +388,37 @@ fn several_writers_at_once_neither_fail_nor_lose_anything() {
             .seen_count(spendbranch::contract::Source::Codex)
             .unwrap(),
         WRITERS * ROUNDS * 5
+    );
+}
+
+#[test]
+fn seen_keys_are_kept_for_45_days_and_not_much_less() {
+    use spendbranch::contract::{Iso, Source};
+    use spendbranch::infra::store::SpoolLimits;
+    use spendbranch::sources::outcome::ReadOutcome;
+    let day = 24 * 60 * 60 * 1000;
+    let now = Iso::from_millis(1_800_000_000_000).unwrap();
+    let ago = |days: i64| Iso::from_millis(now.millis() - days * day).unwrap();
+    let dir = tempfile::tempdir().unwrap();
+    let mut store = Store::open(dir.path()).unwrap();
+    let mut out = ReadOutcome::empty(Source::Codex, now);
+    out.seen = vec![(1, now), (2, ago(30)), (3, ago(44)), (4, ago(46))];
+    store.commit_read(&out, SpoolLimits::default()).unwrap();
+    assert_eq!(
+        store.seen_count(Source::Codex).unwrap(),
+        3,
+        "only the 46-day-old one goes"
+    );
+    // and a later read forgets what has aged out meanwhile
+    let mut later = ReadOutcome::empty(
+        Source::Codex,
+        Iso::from_millis(now.millis() + 10 * day).unwrap(),
+    );
+    later.seen = vec![(5, later.read_at)];
+    store.commit_read(&later, SpoolLimits::default()).unwrap();
+    assert_eq!(
+        store.seen_count(Source::Codex).unwrap(),
+        3,
+        "1, 2 stay (10d and 40d), 3 and 4 go, 5 comes"
     );
 }

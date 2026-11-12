@@ -139,10 +139,49 @@ fn the_key_file_is_private_and_a_readable_one_is_refused() {
 }
 
 #[test]
+fn saving_both_slots_at_once_never_mixes_the_keys() {
+    let dir = tempfile::tempdir().unwrap();
+    for round in 0..200u8 {
+        let (a, b) = (key(round), key(round.wrapping_add(100)));
+        std::thread::scope(|s| {
+            s.spawn(|| KeyFiles::new(dir.path()).save(Slot::Active, &a).unwrap());
+            s.spawn(|| KeyFiles::new(dir.path()).save(Slot::Pending, &b).unwrap());
+        });
+        let files = KeyFiles::new(dir.path());
+        assert!(
+            same(&files.load(Slot::Active).unwrap(), &a),
+            "round {round}"
+        );
+        assert!(
+            same(&files.load(Slot::Pending).unwrap(), &b),
+            "round {round}"
+        );
+    }
+}
+
+#[test]
+fn a_failed_save_leaves_no_key_behind() {
+    let dir = tempfile::tempdir().unwrap();
+    // a folder where the key file should go makes the final rename fail
+    fs::create_dir(dir.path().join("device.key")).unwrap();
+    assert!(
+        KeyFiles::new(dir.path())
+            .save(Slot::Active, &key(1))
+            .is_err()
+    );
+    let left: Vec<_> = fs::read_dir(dir.path())
+        .unwrap()
+        .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+        .collect();
+    assert_eq!(left, ["device.key"], "no temporary copy of the key");
+}
+
+#[test]
 fn a_leftover_temporary_file_does_not_leak_into_a_newer_key() {
     let dir = tempfile::tempdir().unwrap();
     // a crash left a long temporary file behind
-    fs::write(dir.path().join("device.key.tmp"), "x".repeat(500)).unwrap();
+    let temp = format!("device.key.active.{}.tmp", std::process::id());
+    fs::write(dir.path().join(temp), "x".repeat(500)).unwrap();
     let files = KeyFiles::new(dir.path());
     files.save(Slot::Active, &key(4)).unwrap();
     assert!(same(&files.load(Slot::Active).unwrap(), &key(4)));

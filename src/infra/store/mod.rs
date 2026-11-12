@@ -25,6 +25,8 @@ pub enum Error {
         found: i64,
         known: usize,
     },
+    /// `user_version` is negative: the file was edited by hand.
+    BadSchemaVersion(i64),
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
@@ -39,6 +41,9 @@ impl fmt::Display for Error {
                 f,
                 "state.db is from a newer spendbranch (schema {found}, this build knows {known}); update the CLI"
             ),
+            Error::BadSchemaVersion(found) => {
+                write!(f, "state.db has an invalid schema version ({found})")
+            }
         }
     }
 }
@@ -49,7 +54,7 @@ impl std::error::Error for Error {
             Error::Io(e) => Some(e),
             Error::Sqlite(e) => Some(e),
             Error::Json(e) => Some(e),
-            Error::NewerSchema { .. } => None,
+            Error::NewerSchema { .. } | Error::BadSchemaVersion(_) => None,
         }
     }
 }
@@ -197,6 +202,9 @@ fn version(conn: &Connection) -> Result<i64> {
 fn migrate(conn: &mut Connection) -> Result<()> {
     let known = MIGRATIONS.len();
     let check = |found: i64| -> Result<bool> {
+        if found < 0 {
+            return Err(Error::BadSchemaVersion(found));
+        }
         if found > known as i64 {
             return Err(Error::NewerSchema { found, known });
         }
