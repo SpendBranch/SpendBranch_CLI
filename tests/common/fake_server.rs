@@ -542,7 +542,9 @@ fn ingest(s: &mut State, req: &Seen, device: &str) -> Reply {
     if read.is_err() {
         return error(400, "VALIDATION_FAILED");
     }
-    if plain.len() > limit {
+    // Over 1 MiB once decompressed, or more than 200 times what was sent (a bomb): the batch
+    // is too big, and a smaller one gets through.
+    if plain.len() > limit || plain.len() > req.body.len() * 200 {
         return error(413, "PAYLOAD_TOO_LARGE");
     }
     let Ok(v) = serde_json::from_slice::<serde_json::Value>(&plain) else {
@@ -575,7 +577,21 @@ fn ingest(s: &mut State, req: &Seen, device: &str) -> Reply {
         && observations.len() <= 500
         && coverage.len() <= 50
         && observations.len() + coverage.len() > 0;
-    if !well_formed {
+    // A report ends after it starts, and carries a reason when (and only when) it is a gap.
+    let coverage_ok = coverage.iter().all(|c| {
+        let when = |k: &str| {
+            c[k].as_str()
+                .and_then(|t| t.parse::<jiff::Timestamp>().ok())
+        };
+        let ordered = when("from").zip(when("to")).is_some_and(|(a, b)| a < b);
+        let reason = match c["state"].as_str() {
+            Some("unavailable") => c["reason"].is_string(),
+            Some("observed") => c.get("reason").is_none(),
+            _ => false,
+        };
+        ordered && reason
+    });
+    if !well_formed || !coverage_ok {
         return error(400, "VALIDATION_FAILED");
     }
     s.batches
@@ -601,12 +617,18 @@ fn ingest(s: &mut State, req: &Seen, device: &str) -> Reply {
             text("externalSessionId"),
             text("externalEventId"),
         );
-        let refused = if let Some(code) = s.ingest.reject.get(&identity.2).cloned() {
-            Some(code)
+        // The order of the contract: authorization, fields, clock, window, then ownership, then
+        // the repeat. Scripted refusals stand in for the first two and for ownership.
+        let scripted = s.ingest.reject.get(&identity.2).cloned();
+        let owned = scripted.as_deref() == Some("SESSION_OWNED");
+        let refused = if scripted.is_some() && !owned {
+            scripted.clone()
         } else if when(o).is_some_and(|t| t > server_now + WINDOW_MS) {
             Some("CLOCK_SKEW".to_owned())
         } else if window.zip(when(o)).is_some_and(|(w, t)| t < w) {
             Some("BEFORE_COLLECTION_WINDOW".to_owned())
+        } else if owned {
+            scripted.clone()
         } else {
             None
         };
@@ -622,7 +644,19 @@ fn ingest(s: &mut State, req: &Seen, device: &str) -> Reply {
             }
         });
     }
-    s.stored_coverage.extend(coverage);
+    // Coverage is kept only for the sources whose authorization is active; the rest is ignored
+    // without an error and without changing the results.
+    let active: Vec<String> = s
+        .sources
+        .iter()
+        .filter(|x| x["state"] == "active")
+        .filter_map(|x| x["source"].as_str().map(str::to_owned))
+        .collect();
+    s.stored_coverage.extend(
+        coverage
+            .into_iter()
+            .filter(|c| active.iter().any(|a| c["source"] == a.as_str())),
+    );
     if s.ingest.short_results {
         results.pop();
     }

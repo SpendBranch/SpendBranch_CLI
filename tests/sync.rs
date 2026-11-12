@@ -712,3 +712,31 @@ fn a_full_buffer_refuses_the_read_saves_nothing_and_records_a_gap() {
         )
     );
 }
+
+#[test]
+fn coverage_of_a_source_that_is_not_active_is_kept_here_and_not_sent() {
+    let rig = Rig::ready();
+    rig.server
+        .configure(|s| s.sources.retain(|x| x["source"] == "codex"));
+    let db = rusqlite::Connection::open(rig.dir.path().join("state.db")).unwrap();
+    for source in ["codex", "claude_code"] {
+        db.execute(
+            "INSERT INTO pending_coverage(payload) VALUES(?1)",
+            [json!({"source": source, "from": "2026-06-01T00:00:00.000Z",
+                    "to": "2026-06-01T01:00:00.000Z", "state": "observed"})
+            .to_string()],
+        )
+        .unwrap();
+    }
+    let out = rig.run(&["sync"]);
+    assert_eq!(out.code, 0, "{}", out.text);
+    let s = rig.server.state.lock().unwrap();
+    assert_eq!(s.stored_coverage.len(), 1);
+    assert_eq!(s.stored_coverage[0]["source"], "codex");
+    drop(s);
+    assert_eq!(
+        rig.store().pending_counts().unwrap(),
+        (0, 1),
+        "the other waits for its authorization"
+    );
+}
