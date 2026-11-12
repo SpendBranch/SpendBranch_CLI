@@ -276,7 +276,9 @@ impl Rig {
 
     /// The environment of this rig's home, plus `extra` variables.
     pub fn env_of(&self, extra: &[(&str, &str)]) -> HashMap<String, String> {
-        let mut env: HashMap<String, String> = [("HOME", self.dir.path().to_str().unwrap())]
+        // Both names of the home folder: which one is read depends on the machine, not the pretend system.
+        let home = self.dir.path().to_str().unwrap();
+        let mut env: HashMap<String, String> = [("HOME", home), ("USERPROFILE", home)]
             .map(|(k, v)| (k.into(), v.into()))
             .into();
         env.extend(extra.iter().map(|(k, v)| (k.to_string(), v.to_string())));
