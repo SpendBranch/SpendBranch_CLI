@@ -210,10 +210,10 @@ fn bytes_after_the_body_are_not_read_as_part_of_it() {
 }
 
 #[test]
-fn the_601st_batch_in_a_minute_is_refused() {
+fn the_61st_batch_in_a_minute_is_refused() {
     let relay = Relay::start(|_| Ok(0));
     let mut last = 0;
-    for _ in 0..601 {
+    for _ in 0..61 {
         last = relay.post("", "{}").0;
         if last == 429 {
             break;
