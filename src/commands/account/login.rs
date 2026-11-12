@@ -59,35 +59,58 @@ fn connect(
         device: approval.device_id.clone(),
         key: DeviceKey::from_text(&key.to_text()).ok_or("the new key cannot be read back")?,
     };
-    writeln!(ctx.out, "Organization: {}", approval.organization_name)?;
-    write!(
-        ctx.out,
-        "{}",
-        m::confirm_organization(&approval.organization_name)
-    )?;
-    ctx.out.flush()?;
-    let mut answer = String::new();
-    ctx.input.read_line(&mut answer)?;
-    if !matches!(answer.trim().to_ascii_lowercase().as_str(), "y" | "yes") {
+    if !confirmed(ctx, &approval.organization_name)? {
         let _ = revoke(&new); // the server already made the device: take it back
         return say(ctx, m::LOGIN_CANCELLED, 1);
     }
     // Saving changes the database the `sync` works on: wait for it to finish.
-    let mut held = None;
+    let Some(_lock) = wait_for_lock(ctx, &account.dir)? else {
+        let _ = revoke(&new);
+        return say(ctx, m::LOGIN_LOCK_BUSY, 1);
+    };
+    if leave_previous(ctx, account, &approval, server)? {
+        account.store.discard_buffer()?;
+        account.store.disable_all_sources()?;
+        say(ctx, m::BUFFER_DISCARDED, 0)?;
+    }
+    save(ctx, account, server, key, &approval)?;
+    show_status(ctx, account, server, &new)?;
+    Ok(0)
+}
+
+/// Phishing of the code (RFC 8628 5.4): the person says whether this is their organization.
+fn confirmed(ctx: &mut Ctx, organization: &str) -> Result<bool> {
+    writeln!(ctx.out, "Organization: {organization}")?;
+    write!(ctx.out, "{}", m::confirm_organization(organization))?;
+    ctx.out.flush()?;
+    let mut answer = String::new();
+    ctx.input.read_line(&mut answer)?;
+    Ok(matches!(
+        answer.trim().to_ascii_lowercase().as_str(),
+        "y" | "yes"
+    ))
+}
+
+fn wait_for_lock(ctx: &mut Ctx, dir: &std::path::Path) -> Result<Option<lock::SyncLock>> {
     for attempt in 0..LOCK_TRIES {
-        held = lock::try_acquire(&account.dir)?;
-        if held.is_some() {
-            break;
+        if let Some(held) = lock::try_acquire(dir)? {
+            return Ok(Some(held));
         }
         if attempt + 1 < LOCK_TRIES {
             (ctx.sleep)(Duration::from_secs(1));
         }
     }
-    let Some(_lock) = held else {
-        let _ = revoke(&new);
-        return say(ctx, m::LOGIN_LOCK_BUSY, 1);
-    };
+    Ok(None)
+}
 
+/// Takes the device this one replaces off the server. `true` when the account moved to another
+/// organization or server, so what is buffered must not go to the new one.
+fn leave_previous(
+    ctx: &mut Ctx,
+    account: &Account,
+    approval: &crate::api::Approval,
+    server: &ServerUrl,
+) -> Result<bool> {
     let (old_device, old_org, old_server) = (
         account.store.meta_get("device_id")?,
         account.store.meta_get("org_id")?,
@@ -114,13 +137,18 @@ fn connect(
         }
     }
     // Compared by the organization's id, never its name.
-    let other_org = old_org.is_some_and(|o| o != approval.organization_id)
-        || old_server.is_some_and(|s| s != server.base());
-    if other_org {
-        account.store.discard_buffer()?;
-        account.store.disable_all_sources()?;
-        say(ctx, m::BUFFER_DISCARDED, 0)?;
-    }
+    Ok(old_org.is_some_and(|o| o != approval.organization_id)
+        || old_server.is_some_and(|s| s != server.base()))
+}
+
+/// The key and the pairing, written down: from here on the device is connected.
+fn save(
+    ctx: &mut Ctx,
+    account: &mut Account,
+    server: &ServerUrl,
+    key: &DeviceKey,
+    approval: &crate::api::Approval,
+) -> Result<()> {
     account.keys.save(Slot::Active, key)?;
     let store = &account.store;
     store.meta_set("device_id", approval.device_id.as_str())?;
@@ -132,21 +160,37 @@ fn connect(
         say(ctx, m::KEY_IN_FILE, 0)?;
     }
     say(ctx, &m::ready(&approval.organization_name), 0)?;
-    // What the company authorized, as `status` shows it. A failure here does not undo the login.
-    if let Ok(view) = fetch_status(&new) {
-        let local = local_status(ctx, &account.store)?;
-        for line in render::remote_lines(
-            &view,
-            &server.base(),
-            &new.key.fingerprint(),
-            account.keys.backend() == Backend::File,
-            &local,
-            now(),
-        ) {
-            writeln!(ctx.out, "{line}")?;
-        }
+    Ok(())
+}
+
+/// What the company authorized, as `status` shows it. A failure here does not undo the login.
+fn show_status(
+    ctx: &mut Ctx,
+    account: &Account,
+    server: &ServerUrl,
+    new: &Connection,
+) -> Result<()> {
+    let Ok(view) = fetch_status(new) else {
+        return Ok(());
+    };
+    let local = local_status(ctx, &account.store)?;
+    for line in render::remote_lines(
+        &view,
+        &server.base(),
+        &new.key.fingerprint(),
+        account.keys.backend() == Backend::File,
+        &local,
+        now(),
+    ) {
+        writeln!(ctx.out, "{line}")?;
     }
-    Ok(0)
+    Ok(())
+}
+
+/// One answer to a poll: poll again, or the pairing is over.
+enum Step {
+    Again,
+    Done(Paired),
 }
 
 fn pair(
@@ -186,36 +230,48 @@ fn pair(
         }
         (ctx.sleep)(Duration::from_secs(interval));
         waited += interval;
-        let poll = PollToken {
-            device_code: &started.device_code,
-        };
-        match client.post::<_, PollOutcome>("/api/cli/v1/tokens", &poll, None) {
-            Ok(outcome) => {
-                trouble = 0;
-                match outcome.checked() {
-                    None => {
-                        return Ok(Paired::Stopped(failure(
-                            ctx,
-                            &ApiFailure::bad_response(200),
-                        )?));
-                    }
-                    Some(Polled::Pending) => {}
-                    Some(Polled::SlowDown) => interval = (interval + 5).min(MAX_INTERVAL_SECS),
-                    Some(Polled::Expired) => {
-                        return Ok(Paired::Stopped(say(ctx, m::LOGIN_EXPIRED, 1)?));
-                    }
-                    Some(Polled::Denied) => {
-                        return Ok(Paired::Stopped(say(ctx, m::LOGIN_DENIED, 1)?));
-                    }
-                    Some(Polled::Approved(approval)) => return Ok(Paired::Approved(approval)),
-                }
-            }
-            // The network or the server stumbled: that is not a reason to throw the pairing away.
-            Err(f) if (f.status == 0 || f.status >= 500) && trouble < POLL_RETRIES => trouble += 1,
-            Err(f) if f.code == "RATE_LIMITED" => {
-                interval = interval.max(f.retry_after_secs.unwrap_or(0).min(MAX_INTERVAL_SECS));
-            }
-            Err(f) => return Ok(Paired::Stopped(failure(ctx, &f)?)),
+        match poll(ctx, &client, &started, &mut interval, &mut trouble)? {
+            Step::Again => {}
+            Step::Done(paired) => return Ok(paired),
         }
+    }
+}
+
+fn poll(
+    ctx: &mut Ctx,
+    client: &Client,
+    started: &PairingStarted,
+    interval: &mut u64,
+    trouble: &mut u32,
+) -> Result<Step> {
+    let token = PollToken {
+        device_code: &started.device_code,
+    };
+    let stop = |code: i32| Ok(Step::Done(Paired::Stopped(code)));
+    match client.post::<_, PollOutcome>("/api/cli/v1/tokens", &token, None) {
+        Ok(outcome) => {
+            *trouble = 0;
+            match outcome.checked() {
+                None => stop(failure(ctx, &ApiFailure::bad_response(200))?),
+                Some(Polled::Pending) => Ok(Step::Again),
+                Some(Polled::SlowDown) => {
+                    *interval = (*interval + 5).min(MAX_INTERVAL_SECS);
+                    Ok(Step::Again)
+                }
+                Some(Polled::Expired) => stop(say(ctx, m::LOGIN_EXPIRED, 1)?),
+                Some(Polled::Denied) => stop(say(ctx, m::LOGIN_DENIED, 1)?),
+                Some(Polled::Approved(approval)) => Ok(Step::Done(Paired::Approved(approval))),
+            }
+        }
+        // The network or the server stumbled: that is not a reason to throw the pairing away.
+        Err(f) if (f.status == 0 || f.status >= 500) && *trouble < POLL_RETRIES => {
+            *trouble += 1;
+            Ok(Step::Again)
+        }
+        Err(f) if f.code == "RATE_LIMITED" => {
+            *interval = (*interval).max(f.retry_after_secs.unwrap_or(0).min(MAX_INTERVAL_SECS));
+            Ok(Step::Again)
+        }
+        Err(f) => stop(failure(ctx, &f)?),
     }
 }
