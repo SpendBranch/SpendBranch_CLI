@@ -259,6 +259,10 @@
       }
     }
   },
+  "anyOf": [
+    { "properties": { "observations": { "minItems": 1 } } },
+    { "required": ["coverage"], "properties": { "coverage": { "minItems": 1 } } }
+  ],
   "required": [
     "contractVersion",
     "installationId",

@@ -60,6 +60,10 @@ fn schema_accepts_a_minimal_batch_and_rejects_bad_ones() {
         "installationId": "123e4567-e89b-42d3-a456-426614174000", "observations": [o]})
     };
     assert!(v.is_valid(&batch(obs.clone())));
+    // at least one observation or one coverage report; an empty batch is refused
+    let empty = json!({"contractVersion": "ingest/v1",
+        "installationId": "123e4567-e89b-42d3-a456-426614174000", "observations": []});
+    assert!(!v.is_valid(&empty));
     let mut extra = obs.clone();
     extra["cwd"] = json!("/home/x"); // strict: unknown keys are refused
     assert!(!v.is_valid(&batch(extra)));

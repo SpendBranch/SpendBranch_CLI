@@ -15,30 +15,46 @@ const NONCE: [u8; 16] = [
 const BODY: &[u8] = br#"{"deviceCode":"abc"}"#;
 const PATH: &str = "/api/cli/v1/tokens";
 
-/// Computed by Python's `cryptography` (OpenSSL), not by this crate: if the signed text or
-/// the encoding drifts from the spec, this is what notices.
+/// `tests/vectors/sb-v1.json` was computed by Python's `cryptography` (OpenSSL), not by this
+/// crate, and the API copies the same file: if the signed text or the encoding drifts from
+/// the spec, this is what notices.
 #[test]
-fn signature_matches_an_independent_implementation() {
-    assert_eq!(
-        key().public_key(),
-        "A6EHv_POEL4dcN0Y50vAmWfk1jCbpQ1fHdyGZBJVMbg"
-    );
-    let h = sign_request(
-        &key(),
-        &device(),
-        "POST",
-        PATH,
-        1_760_000_000_000,
-        &NONCE,
-        BODY,
-    );
-    assert_eq!(h.nonce, "ZGVmZ2hpamtsbW5vcHFycw");
-    assert_eq!(
-        h.signature,
-        "bh_c-c-Rk41kEOSpfwlJpreiBxj0zsfi0xkgMsvPNSU_lPKubqB2UlFypUcxJVZHqf8k0IGTlzsSlhuciaiXAg"
-    );
-    assert_eq!(h.device, "dev_1");
-    assert_eq!(h.timestamp, "1760000000000");
+fn signature_matches_the_shared_vectors() {
+    use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD as B64};
+    use sha2::{Digest, Sha256};
+    let path = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/vectors/sb-v1.json");
+    let v: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(path).unwrap()).unwrap();
+    let text = |x: &serde_json::Value| x.as_str().unwrap().to_owned();
+    let seed: [u8; 32] = std::array::from_fn(|i| {
+        u8::from_str_radix(&text(&v["seedHex"])[2 * i..2 * i + 2], 16).unwrap()
+    });
+    let key = DeviceKey::from_seed(&seed);
+    assert_eq!(key.public_key(), text(&v["publicKey"]));
+    // the fingerprint rule: sha256 of the 32 raw bytes, not of the base64url text
+    let hex: String = Sha256::digest(B64.decode(key.public_key()).unwrap())
+        .iter()
+        .map(|b| format!("{b:02x}"))
+        .collect();
+    let fingerprint = (0..4)
+        .map(|i| &hex[4 * i..4 * i + 4])
+        .collect::<Vec<_>>()
+        .join("-");
+    assert_eq!(fingerprint, text(&v["keyFingerprint"]));
+    for c in v["cases"].as_array().unwrap() {
+        let nonce: [u8; 16] = B64.decode(text(&c["nonce"])).unwrap().try_into().unwrap();
+        let (method, path, body) = (text(&c["method"]), text(&c["path"]), text(&c["body"]));
+        let ts = c["timestampMs"].as_i64().unwrap();
+        let id = DeviceId::new(&text(&c["deviceId"])).unwrap();
+        let h = sign_request(&key, &id, &method, &path, ts, &nonce, body.as_bytes());
+        assert_eq!(h.signature, text(&c["signature"]), "{}", c["name"]);
+        assert_eq!(h.nonce, text(&c["nonce"]));
+        assert_eq!(h.timestamp, ts.to_string());
+        assert_eq!(
+            signing_string(&method, &path, ts, &h.nonce, body.as_bytes()),
+            text(&c["signedString"])
+        );
+    }
 }
 
 #[test]
