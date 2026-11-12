@@ -4,7 +4,7 @@ use super::clock::{Clock, SystemClock};
 use crate::api::{ApiFailure, ServerUrl};
 use crate::auth::{DeviceId, DeviceKey, sign_request};
 use serde::{Serialize, de::DeserializeOwned};
-use std::time::Duration;
+use std::{sync::Arc, time::Duration};
 use ureq::{
     Agent,
     config::Config,
@@ -19,6 +19,16 @@ const TIMEOUT: Duration = Duration::from_secs(15);
 pub struct Signer<'a> {
     pub device: &'a DeviceId,
     pub key: &'a DeviceKey,
+}
+
+/// The crypto provider with its TLS 1.2 suites taken out. With none left, rustls does not even
+/// offer 1.2 in the hello, so a server that speaks only 1.2 is refused while negotiating.
+fn tls13_only() -> Arc<rustls::crypto::CryptoProvider> {
+    let mut provider = rustls::crypto::ring::default_provider();
+    provider
+        .cipher_suites
+        .retain(|suite| matches!(suite, rustls::SupportedCipherSuite::Tls13(_)));
+    Arc::new(provider)
 }
 
 pub struct Client {
@@ -45,6 +55,8 @@ impl Client {
             .tls_config(
                 TlsConfig::builder()
                     .provider(TlsProvider::Rustls)
+                    // TLS 1.3 only: a provider with no older suites cannot negotiate an older version.
+                    .unversioned_rustls_crypto_provider(tls13_only())
                     // The system's trusted roots, so a company's own CA keeps working.
                     .root_certs(RootCerts::PlatformVerifier)
                     .build(),
