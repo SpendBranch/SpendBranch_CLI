@@ -11,8 +11,7 @@ use crate::infra::{
     clock::{Clock, SystemClock},
     http::{Client, Signer},
     keys::{self, Backend, KeyStore, Slot},
-    lock,
-    scheduler::{self, Platform},
+    lock, scheduler,
     store::Store,
 };
 use crate::readers::{claude_code, codex};
@@ -353,7 +352,7 @@ pub fn logout(ctx: &mut Ctx) -> Result<i32> {
         account.store.meta_delete(key)?;
     }
     say(ctx, m::LOGOUT_LOCAL_DELETED, 0)?;
-    match scheduler::remove(ctx.system, ctx.env, Platform::current()) {
+    match scheduler::remove(ctx.system, ctx.env, ctx.system.platform()) {
         Ok(true) => say(ctx, m::SCHEDULER_REMOVED, 0),
         Ok(false) => Ok(0),
         Err(why) => say(ctx, &m::scheduler_not_removed(&why), 0),
@@ -389,7 +388,7 @@ fn local_status(ctx: &Ctx, store: &Store) -> Result<render::Local> {
         last_error: store.sync_get("lastError")?,
         next_attempt: store.sync_get("nextAttemptAt")?,
         sources,
-        scheduled: scheduler::installed(ctx.system, ctx.env, Platform::current()),
+        scheduled: scheduler::installed(ctx.system, ctx.env, ctx.system.platform()),
     })
 }
 

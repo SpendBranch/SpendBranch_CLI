@@ -1,7 +1,7 @@
 //! `otel claude-code`: the environment that points Claude Code's OpenTelemetry at the relay.
 use super::{Ctx, Result, account, say};
 use crate::cli::messages as m;
-use crate::infra::{paths, private_fs};
+use crate::infra::{paths, private_fs, system::Platform};
 use crate::relay;
 
 /// The settings, one `(name, value)` per line. No secret: the relay signs with the device key,
@@ -38,7 +38,7 @@ pub(super) fn run(ctx: &mut Ctx) -> Result<i32> {
     if !account.store.is_connected()? {
         return say(ctx, m::NOT_CONNECTED, 1);
     }
-    let windows = cfg!(windows);
+    let windows = ctx.system.platform() == Platform::Windows;
     let dir = paths::data_dir(ctx.env)?;
     let file = dir.join(if windows {
         "otel-claude_code.ps1"

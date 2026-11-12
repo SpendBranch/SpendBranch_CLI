@@ -362,3 +362,15 @@ fn the_hook_exits_0_even_when_everything_fails() {
     assert_eq!((out.code, out.text.as_str()), (0, ""));
     assert_eq!(rig.run(&["hook", "gemini"]).code, 2);
 }
+
+#[test]
+fn on_windows_the_hook_line_is_quoted_for_windows_whatever_runs_the_test() {
+    let mut rig = Rig::new();
+    rig.system.platform = spendbranch::infra::system::Platform::Windows;
+    assert_eq!(rig.run(&["hooks", "install", "claude-code"]).code, 0);
+    let text = fs::read_to_string(claude_file(&rig)).unwrap();
+    assert!(
+        text.contains(r#"\"/opt/spend branch/spendbranch\" hook claude-code"#),
+        "{text}"
+    );
+}

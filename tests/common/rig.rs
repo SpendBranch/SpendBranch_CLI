@@ -8,7 +8,7 @@ use spendbranch::cli::{self, Io};
 use spendbranch::infra::{
     keys::{KeyFiles, KeyStore, Slot},
     store::Store,
-    system::{Ran, System},
+    system::{Platform, Ran, System},
 };
 use spendbranch::sources::{claude_code, codex};
 use std::{
@@ -43,6 +43,8 @@ pub struct FakeSystem {
     pub answers: RefCell<HashMap<String, (i32, String)>>,
     /// Programs that do not exist on this machine.
     pub missing: RefCell<HashSet<String>>,
+    /// The system this pretends to be; Linux unless a test says otherwise, whatever runs it.
+    pub platform: Platform,
 }
 
 impl FakeSystem {
@@ -55,6 +57,7 @@ impl FakeSystem {
             ran: RefCell::default(),
             answers: RefCell::default(),
             missing: RefCell::default(),
+            platform: Platform::Linux,
         }
     }
 
@@ -75,6 +78,9 @@ impl FakeSystem {
 }
 
 impl System for FakeSystem {
+    fn platform(&self) -> Platform {
+        self.platform
+    }
     fn exe(&self) -> io::Result<PathBuf> {
         Ok(self.exe.clone())
     }
@@ -270,7 +276,9 @@ impl Rig {
 
     /// The environment of this rig's home, plus `extra` variables.
     pub fn env_of(&self, extra: &[(&str, &str)]) -> HashMap<String, String> {
-        let mut env: HashMap<String, String> = [("HOME", self.dir.path().to_str().unwrap())]
+        // Both names of the home folder: which one is read depends on the machine, not the pretend system.
+        let home = self.dir.path().to_str().unwrap();
+        let mut env: HashMap<String, String> = [("HOME", home), ("USERPROFILE", home)]
             .map(|(k, v)| (k.into(), v.into()))
             .into();
         env.extend(extra.iter().map(|(k, v)| (k.to_string(), v.to_string())));

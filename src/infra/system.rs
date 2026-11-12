@@ -12,6 +12,27 @@ use std::{
 /// How long the hook waits for the agent's stdin.
 const STDIN_WAIT: Duration = Duration::from_millis(100);
 
+/// The operating system family: what the hook lines, the schedule and the `otel` file depend on.
+/// It comes from the `System`, so a test can be any of them on any machine.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Platform {
+    Linux,
+    MacOs,
+    Windows,
+}
+
+impl Platform {
+    pub fn current() -> Self {
+        if cfg!(windows) {
+            Self::Windows
+        } else if cfg!(target_os = "macos") {
+            Self::MacOs
+        } else {
+            Self::Linux
+        }
+    }
+}
+
 /// What a finished tool said.
 pub struct Ran {
     pub code: i32,
@@ -20,6 +41,8 @@ pub struct Ran {
 }
 
 pub trait System {
+    /// The system this runs on.
+    fn platform(&self) -> Platform;
     /// The absolute path of the running executable.
     fn exe(&self) -> io::Result<PathBuf>;
     /// Up to 64 KiB of stdin, if it arrives within 100 ms. Nothing for a terminal.
@@ -36,6 +59,10 @@ pub trait System {
 pub struct Real;
 
 impl System for Real {
+    fn platform(&self) -> Platform {
+        Platform::current()
+    }
+
     fn exe(&self) -> io::Result<PathBuf> {
         std::env::current_exe()
     }
@@ -110,6 +137,9 @@ impl System for Real {
 pub struct Inert;
 
 impl System for Inert {
+    fn platform(&self) -> Platform {
+        Platform::current()
+    }
     fn exe(&self) -> io::Result<PathBuf> {
         Err(io::Error::other("no executable path in this mode"))
     }

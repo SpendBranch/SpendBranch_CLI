@@ -64,7 +64,8 @@ jobs:
         run: rustup toolchain install stable --profile minimal --component rustfmt,clippy --no-self-update && rustup default stable
       - run: cargo fmt --check
       - run: cargo clippy --all-targets --locked -- -D warnings
-      - run: cargo test --locked
+      # A failure on one system should show every other failure of that system in the same run.
+      - run: cargo test --locked --no-fail-fast
       - run: cargo run --locked -q -- --version
       - name: Release binary stays under 10 MB
         if: matrix.name == 'linux-x64'
