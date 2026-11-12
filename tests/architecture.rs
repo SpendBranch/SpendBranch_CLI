@@ -10,7 +10,7 @@ const PURE: &[&str] = &[
     "src/cli/render.rs",
     "src/contract",
     "src/auth.rs",
-    "src/api.rs",
+    "src/api",
     "src/hooks",
     "src/relay.rs",
     "src/scheduler.rs",
@@ -43,9 +43,13 @@ fn pure_modules_do_not_depend_on_infra_or_the_outside_world() {
     let mut files = Vec::new();
     for p in PURE {
         let p = root.join(p);
-        if p.exists() {
-            rust_files(&p, &mut files);
-        }
+        // A path that moved must fail here, not silently stop being checked.
+        assert!(
+            p.exists(),
+            "{} is on the pure list but missing",
+            p.display()
+        );
+        rust_files(&p, &mut files);
     }
     assert!(files.len() >= 3, "the pure modules went missing: {files:?}");
     for file in files {
