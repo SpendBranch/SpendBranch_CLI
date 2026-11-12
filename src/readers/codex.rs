@@ -6,10 +6,10 @@
 use super::{
     cursor_json, discover, identity,
     lines::{Lines, MAX_LINE, Next},
-    mtime_ms, settle, tail_hash, user_home,
+    mtime_ms, settle, tail_hash,
 };
 use crate::contract::{GapReason, Iso, Source};
-use crate::env::Env;
+use crate::env::{Env, agent_dir};
 use crate::sources::{
     Format,
     codex::{Parser, ReadOptions, ReadResult, Resume},
@@ -36,12 +36,8 @@ pub struct Config {
 impl Config {
     /// `$CODEX_HOME` or `~/.codex`. `None` when no home folder can be found.
     pub fn from_env(env: Env) -> Option<Self> {
-        let root = match env("CODEX_HOME").filter(|d| !d.is_empty()) {
-            Some(dir) => PathBuf::from(dir),
-            None => user_home(env)?.join(".codex"),
-        };
         Some(Self {
-            root,
+            root: agent_dir(env, Source::Codex)?,
             max_line: MAX_LINE,
             max_archive_output: MAX_ARCHIVE_OUTPUT,
         })

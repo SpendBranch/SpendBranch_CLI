@@ -8,6 +8,7 @@ use super::{
 use crate::api::ServerUrl;
 use crate::cli::{messages as m, render};
 use crate::contract::Source;
+use crate::env::agent_dir;
 use crate::infra::scheduler::{self, Platform};
 
 const AGENTS: [Source; 2] = [Source::ClaudeCode, Source::Codex];
@@ -22,47 +23,46 @@ pub(super) fn run(
     if code != 0 {
         return Ok(code);
     }
-    // Detect: an agent is there when its configuration folder is.
+    let found = detect(ctx, only)?;
+    if found.is_empty() {
+        return say(ctx, m::SETUP_NO_AGENT, 1);
+    }
+    let (parts, all_on) = turn_on(ctx, &found)?;
+    let scheduled = hooks::exe_text(ctx)
+        .map_err(|e| e.to_string())
+        .and_then(|exe| scheduler::install(ctx.system, ctx.env, Platform::current(), &exe));
+    match &scheduled {
+        Ok(method) => say(ctx, &m::scheduler_installed(method.describe()), 0)?,
+        Err(why) => say(ctx, &m::scheduler_failed(why), 0)?,
+    };
+    say(ctx, &m::setup_summary(&parts), 0)?;
+    Ok(i32::from(!(all_on && scheduled.is_ok())))
+}
+
+/// An agent is there when its configuration folder is.
+fn detect(ctx: &mut Ctx, only: Option<Source>) -> Result<Vec<Source>> {
     let mut found = Vec::new();
     for source in AGENTS.into_iter().filter(|s| only.is_none_or(|o| o == *s)) {
-        let there = hooks::agent_dir(ctx, source).is_some_and(|d| d.is_dir());
+        let there = agent_dir(ctx.env, source).is_some_and(|d| d.is_dir());
         say(ctx, &m::agent_found(render::agent_name(source), there), 0)?;
         if there {
             found.push(source);
         }
     }
-    if found.is_empty() {
-        return say(ctx, m::SETUP_NO_AGENT, 1);
-    }
+    Ok(found)
+}
+
+/// Collection and hook for each agent found: the summary parts, and whether all are fully on.
+fn turn_on(ctx: &mut Ctx, found: &[Source]) -> Result<(Vec<String>, bool)> {
     let mut parts = Vec::new();
     let mut all_on = true;
-    for source in found {
-        let agent = render::agent_name(source);
+    for &source in found {
         let on = account::enable_with(ctx, source, false)? == 0;
         let hooked = on && hooks::install(ctx, source)? == 0;
         all_on &= hooked;
-        parts.push(format!(
-            "{agent}: {}",
-            match (on, hooked) {
-                (true, true) => "connected, with the hook",
-                (true, false) => "connected, without the hook",
-                _ => "not connected",
-            }
-        ));
+        parts.push(m::setup_part(render::agent_name(source), on, hooked));
     }
-    let scheduled = match ctx.system.exe().map_err(|e| e.to_string()).and_then(|p| {
-        let exe = p.to_str().map(str::to_owned);
-        exe.ok_or_else(|| "the path of this program is not valid text".to_owned())
-    }) {
-        Ok(exe) => scheduler::install(ctx.system, ctx.env, Platform::current(), &exe),
-        Err(why) => Err(why),
-    };
-    match &scheduled {
-        Ok(method) => say(ctx, &m::scheduler_installed(method.describe()), 0)?,
-        Err(why) => say(ctx, &m::scheduler_failed(why), 0)?,
-    };
-    say(ctx, &format!("Summary: {}.", parts.join("; ")), 0)?;
-    Ok(i32::from(!(all_on && scheduled.is_ok())))
+    Ok((parts, all_on))
 }
 
 /// The device ends up paired: already, or after a login.

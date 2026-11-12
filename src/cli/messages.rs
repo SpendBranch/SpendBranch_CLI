@@ -194,8 +194,25 @@ pub fn agent_found(agent: &str, found: bool) -> String {
     format!("{agent}: {}", if found { "found" } else { "not found" })
 }
 
+/// One agent's line of the `setup` summary.
+pub fn setup_part(agent: &str, on: bool, hooked: bool) -> String {
+    let how = match (on, hooked) {
+        (true, true) => "connected, with the hook",
+        (true, false) => "connected, without the hook",
+        _ => "not connected",
+    };
+    format!("{agent}: {how}")
+}
+
+pub fn setup_summary(parts: &[String]) -> String {
+    format!("Summary: {}.", parts.join("; "))
+}
+
 pub fn scheduler_installed(method: &str) -> String {
-    format!("Scheduled sync: every 30 minutes and at login ({method}).")
+    format!(
+        "Scheduled sync: every {} minutes and at login ({method}).",
+        crate::scheduler::INTERVAL_MIN
+    )
 }
 
 pub fn scheduler_failed(why: &str) -> String {
@@ -209,7 +226,6 @@ pub fn scheduler_not_removed(why: &str) -> String {
 // --- otel and relay -------------------------------------------------------------------
 
 pub const OTEL_WARNING: &str = "Do not turn on OTEL_LOG_USER_PROMPTS, OTEL_LOG_TOOL_DETAILS or OTEL_LOG_RAW_API_BODIES. OpenTelemetry carries no history: `spendbranch sync` stays the source of the final numbers.";
-pub const RELAY_DEFAULT_PORT: u16 = 4318;
 
 pub fn otel_written(file: &str, windows: bool) -> String {
     let load = if windows {
@@ -226,13 +242,14 @@ pub fn otel_written(file: &str, windows: bool) -> String {
 }
 
 pub fn relay_listening(port: u16, server: &str) -> String {
+    let default = crate::relay::DEFAULT_PORT;
     let mut text = format!(
         "Relay listening on http://127.0.0.1:{port}{} and forwarding to {server}. Press Ctrl+C to stop.",
         crate::relay::PATH
     );
-    if port != RELAY_DEFAULT_PORT {
+    if port != default {
         text.push_str(&format!(
-            "\n`spendbranch otel` writes port {RELAY_DEFAULT_PORT}: point the agent's OTEL_EXPORTER_OTLP_LOGS_ENDPOINT at this port."
+            "\n`spendbranch otel` writes port {default}: point the agent's OTEL_EXPORTER_OTLP_LOGS_ENDPOINT at this port."
         ));
     }
     text
@@ -240,6 +257,17 @@ pub fn relay_listening(port: u16, server: &str) -> String {
 
 pub fn relay_port_busy(port: u16, why: &str) -> String {
     format!("Cannot listen on 127.0.0.1:{port}: {why}. Pick another port with `--port`.")
+}
+
+/// Dropped batches are said on the first and then on every 50th, so a long outage stays readable.
+// `is_multiple_of` is Rust 1.90; the MSRV is 1.89.
+#[allow(clippy::manual_is_multiple_of)]
+pub fn report_drop(n: u64) -> bool {
+    n == 1 || n % 50 == 0
+}
+
+pub fn relay_stopped(why: &str) -> String {
+    format!("The relay stopped: {why}")
 }
 
 pub fn relay_dropped(n: u64, why: &str) -> String {

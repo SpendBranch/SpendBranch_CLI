@@ -1,5 +1,6 @@
-//! The impure edge: files, locks, SQLite. Nothing in `sources`, `sync` or `contract`
-//! may depend on this module (enforced by `tests/architecture.rs`).
+//! The impure edge: files, locks, SQLite, sockets, processes and system tools. Nothing in the
+//! pure modules (`sources`, `sync`, `contract`, `hooks`, `relay`, ...) may depend on it
+//! (enforced by `tests/architecture.rs`).
 pub mod agent_files;
 pub mod browser;
 pub mod clock;

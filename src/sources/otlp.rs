@@ -15,7 +15,7 @@ pub const MAX_TEXT: usize = 256;
 
 const EVENTS: [&str; 2] = ["api_request", "claude_code.api_request"];
 /// The declared attributes: the `otlp:` entries of `claude_code::FIELDS`.
-const KEYS: [&str; 12] = [
+pub const KEYS: [&str; 12] = [
     "event.name",
     "event.timestamp",
     "session.id",

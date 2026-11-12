@@ -1,6 +1,5 @@
-//! One function per command; they orchestrate, the business rules live elsewhere.
-//! F1 covers everything that needs no network: usage checks and the "not connected"
-//! answers.
+//! One function per command; they orchestrate, the business rules live elsewhere. Files,
+//! sockets, processes and SQLite are reached only through `infra`.
 mod account;
 mod hook;
 mod hooks;

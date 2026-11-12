@@ -6,7 +6,7 @@ use crate::relay::{self, Head, RateLimit};
 use serde_json::Value;
 use std::{
     io::{self, Read, Write},
-    net::{SocketAddr, TcpListener, TcpStream},
+    net::{Ipv4Addr, SocketAddr, TcpListener, TcpStream},
     sync::{
         Mutex, PoisonError,
         atomic::{AtomicBool, AtomicUsize, Ordering},
@@ -32,6 +32,16 @@ pub enum Event {
 
 /// Sends a filtered payload on. `Ok` carries how many records the server did not take.
 pub type Forward<'a> = &'a (dyn Fn(&Value) -> Result<u64, String> + Sync);
+
+/// Listens on this machine only: the address is fixed, never taken from the command line.
+pub fn bind(port: u16) -> io::Result<TcpListener> {
+    TcpListener::bind((Ipv4Addr::LOCALHOST, port))
+}
+
+/// Ends the wait of `serve` for the next connection, once `stop` is set.
+pub fn wake(port: u16) {
+    let _ = TcpStream::connect((Ipv4Addr::LOCALHOST, port));
+}
 
 /// Serves until `stop` is set; after setting it, connect to the listener once, so the wait for
 /// the next connection ends. Connections are handled on their own threads, at most 32 at once.
@@ -160,6 +170,40 @@ impl Request {
     }
 }
 
+/// `Err` for a `Content-Length` that is not plain digits; `Ok(None)` when there is none.
+fn content_length(request: &Request) -> Result<Option<u64>, ()> {
+    let Some(text) = request.get("content-length") else {
+        return Ok(None);
+    };
+    if text.is_empty() || !text.bytes().all(|b| b.is_ascii_digit()) {
+        return Err(());
+    }
+    text.parse().map(Some).map_err(|_| ())
+}
+
+/// The announced body: what came with the head, then the rest. `None` if the client is gone
+/// or too slow.
+fn read_body(
+    mut stream: &TcpStream,
+    mut body: Vec<u8>,
+    wanted: usize,
+    deadline: Instant,
+) -> Option<Vec<u8>> {
+    body.truncate(wanted); // bytes sent after the body (pipelining) are not ours
+    let mut chunk = [0u8; 8192];
+    while body.len() < wanted {
+        if Instant::now() > deadline {
+            return None;
+        }
+        let room = (wanted - body.len()).min(chunk.len());
+        match stream.read(&mut chunk[..room]) {
+            Ok(0) | Err(_) => return None,
+            Ok(n) => body.extend_from_slice(&chunk[..n]),
+        }
+    }
+    Some(body)
+}
+
 fn handle(
     stream: TcpStream,
     peer: SocketAddr,
@@ -170,7 +214,7 @@ fn handle(
     stream.set_read_timeout(Some(READ_WAIT))?;
     stream.set_write_timeout(Some(READ_WAIT))?;
     let deadline = Instant::now() + REQUEST_WAIT;
-    let (head, mut body) = match read_head(&stream, deadline) {
+    let (head, body) = match read_head(&stream, deadline) {
         Ok(h) => h,
         Err(0) => return Ok(()),
         Err(status) => return reply(&stream, status),
@@ -178,13 +222,9 @@ fn handle(
     let Some(request) = Request::parse(&head) else {
         return reply(&stream, 400);
     };
-    let length_text = request.get("content-length");
-    let content_length = length_text.and_then(|t| {
-        (!t.is_empty() && t.bytes().all(|b| b.is_ascii_digit())).then(|| t.parse::<u64>().ok())?
-    });
-    if length_text.is_some() && content_length.is_none() {
+    let Ok(content_length) = content_length(&request) else {
         return reply(&stream, 400);
-    }
+    };
     let checked = relay::check(&Head {
         peer_is_loopback: peer.ip().to_canonical().is_loopback(),
         method: &request.method,
@@ -207,18 +247,9 @@ fn handle(
     {
         return reply(&stream, 429);
     }
-    body.truncate(wanted); // bytes sent after the body (pipelining) are not ours
-    let mut chunk = [0u8; 8192];
-    while body.len() < wanted {
-        if Instant::now() > deadline {
-            return Ok(());
-        }
-        let room = (wanted - body.len()).min(chunk.len());
-        match (&stream).read(&mut chunk[..room]) {
-            Ok(0) | Err(_) => return Ok(()),
-            Ok(n) => body.extend_from_slice(&chunk[..n]),
-        }
-    }
+    let Some(body) = read_body(&stream, body, wanted, deadline) else {
+        return Ok(()); // gone or too slow: nothing to answer
+    };
     let prepared = match relay::prepare(&body) {
         Ok(p) => p,
         Err(status) => return reply(&stream, status),

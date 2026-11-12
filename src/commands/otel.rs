@@ -2,23 +2,26 @@
 use super::{Ctx, Result, account, say};
 use crate::cli::messages as m;
 use crate::infra::{paths, private_fs};
+use crate::relay;
 
 /// The settings, one `(name, value)` per line. No secret: the relay signs with the device key,
 /// which never leaves this program.
-const SETTINGS: [(&str, &str); 6] = [
-    ("CLAUDE_CODE_ENABLE_TELEMETRY", "1"),
-    ("OTEL_LOGS_EXPORTER", "otlp"),
-    ("OTEL_METRICS_EXPORTER", "none"),
-    ("OTEL_EXPORTER_OTLP_PROTOCOL", "http/json"),
-    ("OTEL_EXPORTER_OTLP_LOGS_PROTOCOL", "http/json"),
-    (
-        "OTEL_EXPORTER_OTLP_LOGS_ENDPOINT",
-        "http://127.0.0.1:4318/v1/logs",
-    ),
-];
+fn settings() -> [(&'static str, String); 6] {
+    [
+        ("CLAUDE_CODE_ENABLE_TELEMETRY", "1".into()),
+        ("OTEL_LOGS_EXPORTER", "otlp".into()),
+        ("OTEL_METRICS_EXPORTER", "none".into()),
+        ("OTEL_EXPORTER_OTLP_PROTOCOL", "http/json".into()),
+        ("OTEL_EXPORTER_OTLP_LOGS_PROTOCOL", "http/json".into()),
+        (
+            "OTEL_EXPORTER_OTLP_LOGS_ENDPOINT",
+            format!("http://127.0.0.1:{}{}", relay::DEFAULT_PORT, relay::PATH),
+        ),
+    ]
+}
 
 fn render(windows: bool) -> String {
-    SETTINGS
+    settings()
         .iter()
         .map(|(k, v)| {
             if windows {

@@ -48,7 +48,7 @@ pub struct FakeSystem {
 impl FakeSystem {
     pub fn new() -> Self {
         Self {
-            exe: PathBuf::from("/opt/spend branch/spendbranch"),
+            exe: PathBuf::from(EXE),
             stdin: RefCell::new(None),
             stdin_reads: Cell::new(0),
             spawned: RefCell::default(),
@@ -262,4 +262,68 @@ impl Rig {
     pub fn sync_state(&self, key: &str) -> Option<String> {
         self.store().sync_get(key).unwrap()
     }
+
+    /// Where the systemd units of this rig's home go.
+    pub fn unit_dir(&self) -> PathBuf {
+        self.dir.path().join(".config/systemd/user")
+    }
+
+    /// The environment of this rig's home, plus `extra` variables.
+    pub fn env_of(&self, extra: &[(&str, &str)]) -> HashMap<String, String> {
+        let mut env: HashMap<String, String> = [("HOME", self.dir.path().to_str().unwrap())]
+            .map(|(k, v)| (k.into(), v.into()))
+            .into();
+        env.extend(extra.iter().map(|(k, v)| (k.to_string(), v.to_string())));
+        env
+    }
+
+    /// The scheduler's install, with this rig's `HOME` (and `extra` variables) as the environment.
+    pub fn install_schedule(
+        &self,
+        platform: spendbranch::infra::scheduler::Platform,
+        extra: &[(&str, &str)],
+    ) -> Result<spendbranch::infra::scheduler::Method, String> {
+        let env = self.env_of(extra);
+        spendbranch::infra::scheduler::install(
+            &self.system,
+            &|k| env.get(k).cloned(),
+            platform,
+            EXE,
+        )
+    }
+
+    /// What Claude Code puts on the hook's stdin for `event`.
+    pub fn claude_event(&self, event: &str) {
+        *self.system.stdin.borrow_mut() = Some(
+            json!({
+                "hook_event_name": event, "session_id": "sess-1",
+                "transcript_path": "/home/me/PRIVATE-PATH.jsonl", "prompt": "PRIVATE-PROMPT",
+            })
+            .to_string()
+            .into_bytes(),
+        );
+    }
+}
+
+/// The executable the fake `System` reports.
+pub const EXE: &str = "/opt/spend branch/spendbranch";
+
+/// A port nothing listens on right now.
+pub fn free_port() -> u16 {
+    std::net::TcpListener::bind("127.0.0.1:0")
+        .unwrap()
+        .local_addr()
+        .unwrap()
+        .port()
+}
+
+/// One OTLP log record.
+pub fn record(name: &str, attributes: serde_json::Value) -> serde_json::Value {
+    json!({"eventName": name, "timeUnixNano": "1767261601000000000", "attributes": attributes})
+}
+
+/// An OTLP export with `records`, and the kind of resource attributes that must never leave.
+pub fn payload(records: Vec<serde_json::Value>) -> serde_json::Value {
+    json!({"resourceLogs": [{"resource": {"attributes": [{"key": "user.email", "value": {"stringValue": "a@b.c"}}]},
+                             "scopeLogs": [{"logRecords": records}]}]})
 }

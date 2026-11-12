@@ -373,7 +373,7 @@ fn dropped_batch(ctx: &mut Ctx, store: &Store) -> Result<()> {
         .unwrap_or(0)
         + 1;
     store.sync_set("droppedBatches", &n.to_string())?;
-    if n == 1 || n % 50 == 0 {
+    if m::report_drop(n) {
         writeln!(
             ctx.out,
             "Dropped {n} batch(es) so far: the server said they were out of contract."

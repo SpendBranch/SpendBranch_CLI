@@ -8,6 +8,8 @@ use crate::sources::otlp;
 use serde_json::Value;
 
 pub const PATH: &str = "/v1/logs";
+/// Where the agent's exporter is pointed (`otel` writes it) and where `relay` listens by default.
+pub const DEFAULT_PORT: u16 = 4318;
 pub const MAX_BODY: u64 = 1024 * 1024;
 pub const MAX_PER_MINUTE: u32 = 600;
 const WINDOW_MS: i64 = 60_000;
@@ -105,7 +107,7 @@ pub fn prepare(body: &[u8]) -> Result<Prepared, u16> {
     Ok(Prepared {
         payload: f.payload,
         kept: f.kept,
-        refused: (f.dropped + f.ignored) as u64,
+        refused: u64::try_from(f.dropped + f.ignored).unwrap_or(u64::MAX),
     })
 }
 

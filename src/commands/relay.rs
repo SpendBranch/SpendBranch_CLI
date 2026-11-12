@@ -13,8 +13,10 @@ use crate::infra::{
 use crate::relay;
 use serde_json::Value;
 use std::{
-    net::{Ipv4Addr, TcpListener, TcpStream},
-    sync::{atomic::AtomicBool, mpsc},
+    sync::{
+        atomic::{AtomicBool, Ordering},
+        mpsc,
+    },
     time::Duration,
 };
 
@@ -27,9 +29,8 @@ pub(super) fn run(ctx: &mut Ctx, port: Option<u16>) -> Result<i32> {
         Loaded::Broken(text) => return say(ctx, &text, 1),
         Loaded::Ready(c) => c,
     };
-    let port = port.unwrap_or(m::RELAY_DEFAULT_PORT);
-    // Only this machine: the address is fixed, never taken from the command line.
-    let listener = match TcpListener::bind((Ipv4Addr::LOCALHOST, port)) {
+    let port = port.unwrap_or(relay::DEFAULT_PORT);
+    let listener = match relay_server::bind(port) {
         Ok(l) => l,
         Err(e) => return say(ctx, &m::relay_port_busy(port, &e.kind().to_string()), 1),
     };
@@ -48,39 +49,52 @@ pub(super) fn run(ctx: &mut Ctx, port: Option<u16>) -> Result<i32> {
     };
     let (events, seen) = mpsc::channel();
     let stop = AtomicBool::new(false);
-    let mut dropped = 0u64;
-    let mut served = Ok(());
     let (listener_ref, stop_ref, forward_ref) = (&listener, &stop, &forward);
-    std::thread::scope(|scope| -> Result<()> {
+    let served = std::thread::scope(|scope| {
         let worker =
             scope.spawn(move || relay_server::serve(listener_ref, stop_ref, forward_ref, &events));
-        loop {
-            match seen.recv_timeout(Duration::from_millis(100)) {
-                Ok(Event::Forwarded) => {}
-                Ok(Event::Dropped(why)) => {
-                    dropped += 1;
-                    if dropped == 1 || matches!(dropped % 50, 0) {
-                        writeln!(ctx.out, "{}", m::relay_dropped(dropped, &why))?;
-                        ctx.out.flush()?;
-                    }
-                }
-                Err(mpsc::RecvTimeoutError::Timeout) => {
-                    if ctx.system.stopped() {
-                        stop.store(true, std::sync::atomic::Ordering::Relaxed);
-                        // Ends the wait for the next connection.
-                        let _ = TcpStream::connect((Ipv4Addr::LOCALHOST, port));
-                    }
-                }
-                Err(mpsc::RecvTimeoutError::Disconnected) => break,
-            }
+        let shown = show_events(ctx, &seen, &stop, port);
+        if shown.is_err() {
+            stop.store(true, Ordering::Relaxed); // the screen is gone: do not serve on
+            relay_server::wake(port);
         }
-        served = worker
+        let served = worker
             .join()
             .unwrap_or_else(|_| Err(std::io::Error::other("relay thread failed")));
-        Ok(())
+        shown.map(|()| served)
     })?;
     match served {
         Ok(()) => Ok(0),
-        Err(e) => say(ctx, &format!("The relay stopped: {e}"), 1),
+        Err(e) => say(ctx, &m::relay_stopped(&e.to_string()), 1),
+    }
+}
+
+/// Tells the screen about lost batches until the server ends; asks it to end when the system
+/// says so.
+fn show_events(
+    ctx: &mut Ctx,
+    seen: &mpsc::Receiver<Event>,
+    stop: &AtomicBool,
+    port: u16,
+) -> Result<()> {
+    let mut dropped = 0u64;
+    loop {
+        match seen.recv_timeout(Duration::from_millis(100)) {
+            Ok(Event::Forwarded) => {}
+            Ok(Event::Dropped(why)) => {
+                dropped += 1;
+                if m::report_drop(dropped) {
+                    writeln!(ctx.out, "{}", m::relay_dropped(dropped, &why))?;
+                    ctx.out.flush()?;
+                }
+            }
+            Err(mpsc::RecvTimeoutError::Timeout) => {
+                if ctx.system.stopped() {
+                    stop.store(true, Ordering::Relaxed);
+                    relay_server::wake(port);
+                }
+            }
+            Err(mpsc::RecvTimeoutError::Disconnected) => return Ok(()),
+        }
     }
 }

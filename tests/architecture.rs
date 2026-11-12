@@ -11,7 +11,7 @@ const PURE: &[&str] = &[
     "src/contract",
     "src/auth.rs",
     "src/api.rs",
-    "src/hooks.rs",
+    "src/hooks",
     "src/relay.rs",
     "src/scheduler.rs",
     "src/sync",
@@ -119,6 +119,35 @@ fn production_code_has_no_unsafe_and_no_panicking_shortcuts() {
             "unsafe ",
         ] {
             assert!(!text.contains(bad), "{} uses `{bad}`", file.display());
+        }
+    }
+}
+
+#[test]
+fn commands_reach_files_sockets_processes_and_sqlite_only_through_infra() {
+    // A command asks `infra` to do it; the folder layout, file names and sockets live there.
+    let mut files = Vec::new();
+    rust_files(
+        &Path::new(env!("CARGO_MANIFEST_DIR")).join("src/commands"),
+        &mut files,
+    );
+    assert!(files.len() >= 8, "the commands went missing: {files:?}");
+    for file in files {
+        // `private_fs::` is ours (infra); only the standard library's `fs` is forbidden.
+        let text = fs::read_to_string(&file).unwrap().replace("private_fs", "");
+        for bad in [
+            "std::fs",
+            "std::{fs",
+            "fs::",
+            "std::net",
+            "std::process",
+            "rusqlite",
+        ] {
+            assert!(
+                !text.contains(bad),
+                "{} must go through `infra` but mentions `{bad}`",
+                file.display()
+            );
         }
     }
 }

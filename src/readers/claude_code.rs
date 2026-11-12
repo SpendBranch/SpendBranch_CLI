@@ -5,13 +5,13 @@ use super::{
     hold::OpenMessage,
     identity,
     lines::{Lines, MAX_LINE, Next},
-    mtime_ms, settle, tail_hash, user_home,
+    mtime_ms, settle, tail_hash,
 };
 use crate::contract::{
     AccountRef, AgentRole, BillingMode, CoverageReport, CoverageState, GapReason, Iso,
     PayerEvidence, Repository, Source, UsageObservation,
 };
-use crate::env::Env;
+use crate::env::{Env, agent_dir, user_home};
 use crate::sources::{
     Format,
     claude_code::{Parser, ReadOptions},
@@ -41,19 +41,15 @@ impl Config {
     /// `$CLAUDE_CONFIG_DIR` or `~/.claude`. `None` when no home folder can be found.
     pub fn from_env(env: Env) -> Option<Self> {
         let home = user_home(env);
-        let (projects_dir, account_file) = match env("CLAUDE_CONFIG_DIR").filter(|d| !d.is_empty())
-        {
-            Some(dir) => {
-                let dir = PathBuf::from(dir);
-                (dir.join("projects"), dir.join(".claude.json"))
-            }
-            None => {
-                let h = home.clone()?;
-                (h.join(".claude").join("projects"), h.join(".claude.json"))
-            }
+        let dir = agent_dir(env, Source::ClaudeCode)?;
+        // With the folder chosen, the account file is inside it; by default it sits in `~`.
+        let account_file = if env("CLAUDE_CONFIG_DIR").is_some_and(|d| !d.is_empty()) {
+            dir.join(".claude.json")
+        } else {
+            home.clone()?.join(".claude.json")
         };
         Some(Self {
-            projects_dir,
+            projects_dir: dir.join("projects"),
             account_file,
             home,
             max_line: MAX_LINE,

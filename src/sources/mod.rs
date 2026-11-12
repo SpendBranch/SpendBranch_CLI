@@ -25,6 +25,14 @@ pub mod version;
 pub use crate::contract::Source;
 
 impl Source {
+    /// The spelling the agents' hook lines and our own messages use: `claude-code`, `codex`.
+    pub fn arg(self) -> &'static str {
+        match self {
+            Self::ClaudeCode => "claude-code",
+            Self::Codex => "codex",
+        }
+    }
+
     /// Accepts the CLI spellings: `claude-code`, `claude_code` and `codex`.
     pub fn parse(text: &str) -> Option<Self> {
         match text {

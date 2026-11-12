@@ -7,10 +7,12 @@ use crate::hooks;
 use crate::infra::{hook_log, paths, store::Store};
 
 pub(super) fn run(ctx: &mut Ctx, agent: Option<&str>, event: Option<&str>) -> Result<i32> {
-    let source = match agent {
-        Some("claude-code") => Source::ClaudeCode,
-        Some("codex") => Source::Codex,
-        _ => return Ok(2),
+    // Only the spellings the hook lines write: an agent never says `claude_code`.
+    let Some(source) = [Source::ClaudeCode, Source::Codex]
+        .into_iter()
+        .find(|s| agent == Some(s.arg()))
+    else {
+        return Ok(2);
     };
     let _ = fire(ctx, source, event, now());
     Ok(0)
@@ -37,7 +39,7 @@ fn fire(ctx: &Ctx, source: Source, argv_event: Option<&str>, at: Iso) -> Result<
     let label = event.clone().unwrap_or_else(|| "unknown".into());
     let _ = hook_log::append(&dir, &hooks::log_line(at, &label, session.as_deref()));
     // Nothing to send before the first login, and no reason to create the database here.
-    if !dir.join("state.db").exists() {
+    if !Store::exists(&dir) {
         return Ok(());
     }
     let store = Store::open(&dir)?;
@@ -50,7 +52,7 @@ fn fire(ctx: &Ctx, source: Source, argv_event: Option<&str>, at: Iso) -> Result<
         .map(|e| e.strip_prefix("codex:").unwrap_or(e));
     if hooks::due(bare, last, at) {
         ctx.system
-            .spawn_detached(&ctx.system.exe()?, &["sync"], &dir.join("hook.log"))?;
+            .spawn_detached(&ctx.system.exe()?, &["sync"], &hook_log::path(&dir))?;
     }
     Ok(())
 }

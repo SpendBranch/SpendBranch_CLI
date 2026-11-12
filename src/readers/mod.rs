@@ -9,14 +9,6 @@ pub mod git;
 pub mod hold;
 pub mod lines;
 
-use crate::env::Env;
-use std::path::PathBuf;
-
-pub fn user_home(env: Env) -> Option<PathBuf> {
-    let var = if cfg!(windows) { "USERPROFILE" } else { "HOME" };
-    env(var).filter(|v| !v.is_empty()).map(PathBuf::from)
-}
-
 /// FNV-1a over bytes. Stable on purpose: it is stored in the cursors.
 pub(crate) fn fnv(bytes: &[u8]) -> u64 {
     bytes.iter().fold(0xcbf2_9ce4_8422_2325, |h, &b| {

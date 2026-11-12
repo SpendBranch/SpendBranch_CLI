@@ -133,10 +133,7 @@ pub fn local_lines(local: &Local, now: Iso) -> Vec<String> {
 
 fn hook_lines(s: &LocalSource, now: Iso) -> Vec<String> {
     use crate::hooks::State;
-    let (name, arg) = match s.source {
-        Source::ClaudeCode => ("Claude Code", "claude-code"),
-        Source::Codex => ("Codex", "codex"),
-    };
+    let (name, arg) = (agent_name(s.source), s.source.arg());
     let mut out = vec![match s.hook.state {
         State::NotInstalled => {
             format!("  Hook: not installed (run `spendbranch hooks install {arg}`)")

@@ -109,17 +109,24 @@ const MIGRATIONS: &[&str] = &[
 ",
 ];
 
+const DB_FILE: &str = "state.db";
+
 #[derive(Debug)]
 pub struct Store {
     pub(super) conn: Connection,
 }
 
 impl Store {
+    /// Whether `<dir>/state.db` exists yet, without creating it.
+    pub fn exists(dir: &Path) -> bool {
+        dir.join(DB_FILE).exists()
+    }
+
     /// Opens (creating and migrating if needed) `<dir>/state.db`, owner-only, WAL.
     /// Safe to call from several processes at once (a hook and the scheduler, say).
     pub fn open(dir: &Path) -> Result<Self> {
         private_fs::create_dir(dir)?;
-        let path = dir.join("state.db");
+        let path = dir.join(DB_FILE);
         // Create it 0600 first: SQLite gives the -wal and -shm files the same mode.
         private_fs::open(&path, false)?;
         let mut conn = Connection::open(&path)?;

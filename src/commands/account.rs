@@ -494,8 +494,7 @@ pub(super) fn enable_with(ctx: &mut Ctx, source: Source, hint: bool) -> Result<i
         folder_of(source, ctx)
     )?;
     if hint && super::hooks::state(ctx, source) != crate::hooks::State::Installed {
-        let arg = super::hooks::arg_of(source);
-        writeln!(ctx.out, "{}", m::hook_hint(agent, arg))?;
+        writeln!(ctx.out, "{}", m::hook_hint(agent, source.arg()))?;
     }
     Ok(0)
 }

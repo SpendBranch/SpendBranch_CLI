@@ -1,7 +1,7 @@
 //! Installs and removes the system's periodic `sync`: a systemd user timer (or the crontab
 //! where there is no systemd), a LaunchAgent, or Task Scheduler tasks. Idempotent.
 use super::system::System;
-use crate::env::Env;
+use crate::env::{Env, user_home};
 use crate::scheduler::{self as text, Job};
 use std::{
     fs,
@@ -50,10 +50,7 @@ impl Method {
 type Result<T> = std::result::Result<T, String>;
 
 fn home(env: Env) -> Result<PathBuf> {
-    env("HOME")
-        .filter(|h| !h.is_empty())
-        .map(PathBuf::from)
-        .ok_or_else(|| "cannot locate the home folder".to_owned())
+    user_home(env).ok_or_else(|| "cannot locate the home folder".to_owned())
 }
 
 fn systemd_dir(env: Env) -> Result<PathBuf> {
@@ -118,102 +115,118 @@ pub fn install(sys: &dyn System, env: Env, platform: Platform, exe: &str) -> Res
         home: home_dir.as_deref(),
     };
     match platform {
-        Platform::Linux if systemd_usable(sys) => {
-            let dir = systemd_dir(env)?;
-            write(
-                &dir.join(format!("{}.service", text::SYSTEMD_UNIT)),
-                &text::systemd_service(&job),
-            )?;
-            write(
-                &dir.join(format!("{}.timer", text::SYSTEMD_UNIT)),
-                &text::systemd_timer(),
-            )?;
-            tool(sys, "systemctl", &["--user", "daemon-reload"], None)?;
-            let timer = format!("{}.timer", text::SYSTEMD_UNIT);
-            tool(
-                sys,
-                "systemctl",
-                &["--user", "enable", "--now", &timer],
-                None,
-            )?;
-            Ok(Method::Systemd)
-        }
-        Platform::Linux => {
-            let current = crontab(sys)
-                .ok_or("neither `systemctl --user` nor `crontab` is available on this system")?;
-            tool(
-                sys,
-                "crontab",
-                &["-"],
-                Some(&text::cron_merge(&current, &job)),
-            )?;
-            Ok(Method::Cron)
-        }
-        Platform::MacOs => {
-            let path = plist_path(env)?;
-            let file = path.to_string_lossy().into_owned();
-            write(&path, &text::launchd_plist(&job))?;
-            let _ = tool(sys, "launchctl", &["unload", &file], None); // not loaded yet is fine
-            tool(sys, "launchctl", &["load", "-w", &file], None)?;
-            Ok(Method::Launchd)
-        }
-        Platform::Windows => {
-            for args in text::schtasks_create(&job) {
-                let args: Vec<&str> = args.iter().map(String::as_str).collect();
-                tool(sys, "schtasks", &args, None)?;
-            }
-            Ok(Method::TaskScheduler)
-        }
+        Platform::Linux if systemd_usable(sys) => install_systemd(sys, env, &job),
+        Platform::Linux => install_cron(sys, &job),
+        Platform::MacOs => install_launchd(sys, env, &job),
+        Platform::Windows => install_tasks(sys, &job),
     }
+}
+
+fn install_systemd(sys: &dyn System, env: Env, job: &Job) -> Result<Method> {
+    let dir = systemd_dir(env)?;
+    let timer = format!("{}.timer", text::SYSTEMD_UNIT);
+    write(
+        &dir.join(format!("{}.service", text::SYSTEMD_UNIT)),
+        &text::systemd_service(job),
+    )?;
+    write(&dir.join(&timer), &text::systemd_timer())?;
+    tool(sys, "systemctl", &["--user", "daemon-reload"], None)?;
+    tool(
+        sys,
+        "systemctl",
+        &["--user", "enable", "--now", &timer],
+        None,
+    )?;
+    Ok(Method::Systemd)
+}
+
+fn install_cron(sys: &dyn System, job: &Job) -> Result<Method> {
+    let current = crontab(sys)
+        .ok_or("neither `systemctl --user` nor `crontab` is available on this system")?;
+    tool(
+        sys,
+        "crontab",
+        &["-"],
+        Some(&text::cron_merge(&current, job)),
+    )?;
+    Ok(Method::Cron)
+}
+
+fn install_launchd(sys: &dyn System, env: Env, job: &Job) -> Result<Method> {
+    let path = plist_path(env)?;
+    let file = path.to_string_lossy().into_owned();
+    write(&path, &text::launchd_plist(job))?;
+    let _ = tool(sys, "launchctl", &["unload", &file], None); // not loaded yet is fine
+    tool(sys, "launchctl", &["load", "-w", &file], None)?;
+    Ok(Method::Launchd)
+}
+
+fn install_tasks(sys: &dyn System, job: &Job) -> Result<Method> {
+    for args in text::schtasks_create(job) {
+        let args: Vec<&str> = args.iter().map(String::as_str).collect();
+        tool(sys, "schtasks", &args, None)?;
+    }
+    Ok(Method::TaskScheduler)
 }
 
 /// `Ok(true)` when something was installed and is now gone.
 pub fn remove(sys: &dyn System, env: Env, platform: Platform) -> Result<bool> {
-    let mut was = false;
     match platform {
         Platform::Linux => {
-            let dir = systemd_dir(env)?;
-            let timer = dir.join(format!("{}.timer", text::SYSTEMD_UNIT));
-            let service = dir.join(format!("{}.service", text::SYSTEMD_UNIT));
-            if timer.exists() || service.exists() {
-                was = true;
-                let name = format!("{}.timer", text::SYSTEMD_UNIT);
-                let _ = tool(
-                    sys,
-                    "systemctl",
-                    &["--user", "disable", "--now", &name],
-                    None,
-                );
-                for file in [&timer, &service] {
-                    match fs::remove_file(file) {
-                        Err(e) if e.kind() != std::io::ErrorKind::NotFound => {
-                            return Err(format!("{}: {e}", file.display()));
-                        }
-                        _ => {}
-                    }
-                }
-                let _ = tool(sys, "systemctl", &["--user", "daemon-reload"], None);
-            }
-            if let Some(current) = crontab(sys).filter(|c| text::has_cron(c)) {
-                was = true;
-                tool(sys, "crontab", &["-"], Some(&text::cron_remove(&current)))?;
-            }
+            let systemd = remove_systemd(sys, env)?;
+            Ok(remove_cron(sys)? | systemd)
         }
-        Platform::MacOs => {
-            let path = plist_path(env)?;
-            if path.exists() {
-                was = true;
-                let _ = tool(sys, "launchctl", &["unload", &path.to_string_lossy()], None);
-                fs::remove_file(&path).map_err(|e| format!("{}: {e}", path.display()))?;
+        Platform::MacOs => remove_launchd(sys, env),
+        Platform::Windows => Ok(text::WINDOWS_TASKS.iter().fold(false, |was, name| {
+            was | tool(sys, "schtasks", &["/Delete", "/TN", name, "/F"], None).is_ok()
+        })),
+    }
+}
+
+fn remove_systemd(sys: &dyn System, env: Env) -> Result<bool> {
+    let dir = systemd_dir(env)?;
+    let name = format!("{}.timer", text::SYSTEMD_UNIT);
+    let files = [
+        dir.join(&name),
+        dir.join(format!("{}.service", text::SYSTEMD_UNIT)),
+    ];
+    if !files.iter().any(|f| f.exists()) {
+        return Ok(false);
+    }
+    let _ = tool(
+        sys,
+        "systemctl",
+        &["--user", "disable", "--now", &name],
+        None,
+    );
+    for file in &files {
+        match fs::remove_file(file) {
+            Err(e) if e.kind() != std::io::ErrorKind::NotFound => {
+                return Err(format!("{}: {e}", file.display()));
             }
-        }
-        Platform::Windows => {
-            for name in text::WINDOWS_TASKS {
-                was |= tool(sys, "schtasks", &["/Delete", "/TN", name, "/F"], None).is_ok();
-            }
+            _ => {}
         }
     }
-    Ok(was)
+    let _ = tool(sys, "systemctl", &["--user", "daemon-reload"], None);
+    Ok(true)
+}
+
+fn remove_cron(sys: &dyn System) -> Result<bool> {
+    let Some(current) = crontab(sys).filter(|c| text::has_cron(c)) else {
+        return Ok(false);
+    };
+    tool(sys, "crontab", &["-"], Some(&text::cron_remove(&current)))?;
+    Ok(true)
+}
+
+fn remove_launchd(sys: &dyn System, env: Env) -> Result<bool> {
+    let path = plist_path(env)?;
+    if !path.exists() {
+        return Ok(false);
+    }
+    let _ = tool(sys, "launchctl", &["unload", &path.to_string_lossy()], None);
+    fs::remove_file(&path).map_err(|e| format!("{}: {e}", path.display()))?;
+    Ok(true)
 }
 
 pub fn installed(sys: &dyn System, env: Env, platform: Platform) -> bool {
