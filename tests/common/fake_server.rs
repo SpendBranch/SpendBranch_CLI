@@ -7,9 +7,10 @@
 #![allow(dead_code)]
 use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD as B64};
 use ed25519_dalek::{Signature, VerifyingKey};
+use flate2::read::GzDecoder;
 use sha2::{Digest, Sha256};
 use std::{
-    collections::HashMap,
+    collections::{HashMap, HashSet, VecDeque},
     io::{Read, Write},
     net::{TcpListener, TcpStream},
     sync::{
@@ -58,6 +59,28 @@ pub struct State {
     pub organization_name: String,
     pub sources: Vec<serde_json::Value>,
     pub collection: Vec<serde_json::Value>,
+    /// How `POST /api/ingest/v1/events` behaves, and what it was given.
+    pub ingest: Ingest,
+    /// Every observation accepted, once per identity: what the API would have stored.
+    pub stored: Vec<serde_json::Value>,
+    pub stored_coverage: Vec<serde_json::Value>,
+    /// One entry per batch that was understood: (observations, coverage, bytes on the wire).
+    pub batches: Vec<(usize, usize, usize)>,
+    identities: HashSet<(String, String, String)>,
+}
+
+#[derive(Default)]
+pub struct Ingest {
+    /// Batch-level failures served first, one per request: (status, code, `Retry-After`).
+    pub fail_next: VecDeque<(u16, String, Option<u64>)>,
+    /// Per-item refusals by `externalEventId`.
+    pub reject: HashMap<String, String>,
+    /// An item from before this (ISO) is `BEFORE_COLLECTION_WINDOW`.
+    pub window_start: Option<String>,
+    /// Answer 200 with the wrong number of results.
+    pub short_results: bool,
+    /// Refuse bodies over this many bytes once decompressed (default 1 MiB).
+    pub max_plain: Option<usize>,
 }
 
 /// What the person does in the browser, and when the server says so.
@@ -275,7 +298,7 @@ fn route(s: &mut State, req: Seen) -> Reply {
             Err(reply) => reply,
         },
         ("POST", "/api/ingest/v1/events") => match authenticate(s, &req) {
-            Ok(_) => json(200, serde_json::json!({"results": []})),
+            Ok(id) => ingest(s, &req, &id),
             Err(reply) => reply,
         },
         ("GET", "/redirect") => (
@@ -493,4 +516,115 @@ fn authenticate(s: &mut State, req: &Seen) -> Result<String, Reply> {
     }
     s.nonces.push(pair);
     Ok(id.to_owned())
+}
+
+/// `POST /api/ingest/v1/events` as the contract describes it: gzip, at most 1 MiB once
+/// decompressed, strict shape, one result per observation in order.
+fn ingest(s: &mut State, req: &Seen, device: &str) -> Reply {
+    if let Some((status, code, retry)) = s.ingest.fail_next.pop_front() {
+        let mut r = error(status, &code);
+        if let Some(secs) = retry {
+            r.1.push(("Retry-After".into(), secs.to_string()));
+        }
+        return r;
+    }
+    let header = |n: &str| req.headers.get(n).map(String::as_str);
+    if header("content-type") != Some("application/json")
+        || header("content-encoding") != Some("gzip")
+    {
+        return error(415, "UNSUPPORTED_MEDIA_TYPE");
+    }
+    let limit = s.ingest.max_plain.unwrap_or(1024 * 1024);
+    let mut plain = Vec::new();
+    let read = GzDecoder::new(&req.body[..])
+        .take(limit as u64 + 1)
+        .read_to_end(&mut plain);
+    if read.is_err() {
+        return error(400, "VALIDATION_FAILED");
+    }
+    if plain.len() > limit {
+        return error(413, "PAYLOAD_TOO_LARGE");
+    }
+    let Ok(v) = serde_json::from_slice::<serde_json::Value>(&plain) else {
+        return error(400, "VALIDATION_FAILED");
+    };
+    let Some(map) = v.as_object() else {
+        return error(400, "VALIDATION_FAILED");
+    };
+    let known = [
+        "contractVersion",
+        "installationId",
+        "observations",
+        "coverage",
+    ];
+    let observations = map
+        .get("observations")
+        .and_then(|o| o.as_array())
+        .cloned()
+        .unwrap_or_default();
+    let coverage = map
+        .get("coverage")
+        .and_then(|c| c.as_array())
+        .cloned()
+        .unwrap_or_default();
+    let installation = s.devices[device].installation_id.clone();
+    let well_formed = map.keys().all(|k| known.contains(&k.as_str()))
+        && map.get("contractVersion").and_then(|c| c.as_str()) == Some("ingest/v1")
+        && (installation.is_empty()
+            || map.get("installationId").and_then(|i| i.as_str()) == Some(installation.as_str()))
+        && observations.len() <= 500
+        && coverage.len() <= 50
+        && observations.len() + coverage.len() > 0;
+    if !well_formed {
+        return error(400, "VALIDATION_FAILED");
+    }
+    s.batches
+        .push((observations.len(), coverage.len(), req.body.len()));
+    let server_now = now_ms() + s.clock_offset_ms;
+    let when = |o: &serde_json::Value| {
+        o["occurredAt"]
+            .as_str()
+            .and_then(|t| t.parse::<jiff::Timestamp>().ok())
+            .map(|t| t.as_millisecond())
+    };
+    let window = s
+        .ingest
+        .window_start
+        .as_deref()
+        .and_then(|t| t.parse::<jiff::Timestamp>().ok())
+        .map(|t| t.as_millisecond());
+    let mut results = Vec::new();
+    for (i, o) in observations.iter().enumerate() {
+        let text = |k: &str| o[k].as_str().unwrap_or("").to_owned();
+        let identity = (
+            text("source"),
+            text("externalSessionId"),
+            text("externalEventId"),
+        );
+        let refused = if let Some(code) = s.ingest.reject.get(&identity.2).cloned() {
+            Some(code)
+        } else if when(o).is_some_and(|t| t > server_now + WINDOW_MS) {
+            Some("CLOCK_SKEW".to_owned())
+        } else if window.zip(when(o)).is_some_and(|(w, t)| t < w) {
+            Some("BEFORE_COLLECTION_WINDOW".to_owned())
+        } else {
+            None
+        };
+        results.push(match refused {
+            Some(code) => serde_json::json!({"index": i, "status": "rejected", "code": code}),
+            None if s.identities.contains(&identity) => {
+                serde_json::json!({"index": i, "status": "duplicate"})
+            }
+            None => {
+                s.identities.insert(identity);
+                s.stored.push(o.clone());
+                serde_json::json!({"index": i, "status": "accepted"})
+            }
+        });
+    }
+    s.stored_coverage.extend(coverage);
+    if s.ingest.short_results {
+        results.pop();
+    }
+    json(200, serde_json::json!({ "results": results }))
 }

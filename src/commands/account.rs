@@ -26,18 +26,18 @@ const MAX_INTERVAL_SECS: u64 = 120;
 const POLL_RETRIES: u32 = 3;
 const LOCK_TRIES: u32 = 60;
 
-fn now() -> Iso {
+pub(super) fn now() -> Iso {
     Iso::from_millis(SystemClock.now_ms()).unwrap_or(Iso::EPOCH)
 }
 
 /// The data folder, the database and the key store, opened.
-struct Account {
-    dir: PathBuf,
-    store: Store,
-    keys: Box<dyn KeyStore>,
+pub(super) struct Account {
+    pub(super) dir: PathBuf,
+    pub(super) store: Store,
+    pub(super) keys: Box<dyn KeyStore>,
 }
 
-fn open(ctx: &Ctx) -> Result<Account> {
+pub(super) fn open(ctx: &Ctx) -> Result<Account> {
     let dir = crate::infra::paths::data_dir(ctx.env)?;
     let store = Store::open(&dir)?;
     // `SPENDBRANCH_KEY_STORE=file` keeps the key in a file even where a keychain exists:
@@ -51,20 +51,20 @@ fn open(ctx: &Ctx) -> Result<Account> {
 }
 
 /// A paired device: where it lives, who it is and the key that signs for it.
-struct Connection {
-    server: ServerUrl,
-    device: DeviceId,
-    key: DeviceKey,
+pub(super) struct Connection {
+    pub(super) server: ServerUrl,
+    pub(super) device: DeviceId,
+    pub(super) key: DeviceKey,
 }
 
-enum Loaded {
+pub(super) enum Loaded {
     Ready(Box<Connection>),
     NotConnected,
     /// Paired, but what was saved cannot be used: the text says what to do.
     Broken(String),
 }
 
-fn load(account: &Account) -> Result<Loaded> {
+pub(super) fn load(account: &Account) -> Result<Loaded> {
     let Some(device) = account.store.meta_get("device_id")? else {
         return Ok(Loaded::NotConnected);
     };
@@ -94,16 +94,25 @@ fn failure(ctx: &mut Ctx, f: &ApiFailure) -> Result<i32> {
     say(ctx, &m::failure_text(f, SystemClock.now_ms()), 1)
 }
 
-fn fetch_status(c: &Connection) -> std::result::Result<StatusView, String> {
+pub(super) fn status_of(c: &Connection) -> std::result::Result<StatusView, ApiFailure> {
     let signer = Signer {
         device: &c.device,
         key: &c.key,
     };
     Client::new(c.server.clone(), VERSION)
-        .get::<CliStatus>(STATUS, Some(&signer))
-        .map_err(|f| m::failure_text(&f, SystemClock.now_ms()))?
+        .get::<CliStatus>(STATUS, Some(&signer))?
         .checked()
-        .ok_or_else(|| m::BAD_STATUS.to_owned())
+        .ok_or_else(|| ApiFailure::bad_response(200))
+}
+
+fn fetch_status(c: &Connection) -> std::result::Result<StatusView, String> {
+    status_of(c).map_err(|f| {
+        if f.code == "BAD_RESPONSE" {
+            m::BAD_STATUS.to_owned()
+        } else {
+            m::failure_text(&f, SystemClock.now_ms())
+        }
+    })
 }
 
 fn revoke(c: &Connection) -> std::result::Result<(), ApiFailure> {

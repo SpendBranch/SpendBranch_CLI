@@ -116,3 +116,25 @@ pub fn different_fields(agent: &str) -> String {
         "The company authorized a different {agent} field list. Ask the owner to renew authorization."
     )
 }
+
+pub const NO_SOURCE_ON: &str =
+    "No source is turned on. Run `spendbranch enable claude-code` or `spendbranch enable codex`.";
+pub const SESSION_OWNED_STOP: &str = "A session in the buffer belongs to another member, so it was discarded and the upload stopped. If the server disconnected this device, `spendbranch status` will say so: run `spendbranch login` to connect again.";
+
+/// One line of the summary for a code and how many events it covers.
+pub fn rejected_line(code: &str, n: u64) -> String {
+    match code {
+        "CLOCK_SKEW_EXPIRED" => format!("{n} items dropped: their time was ahead of the server"),
+        "INVALID_LOCAL" => format!("{n} events dropped: they did not pass the local check"),
+        "VALIDATION_FAILED" => {
+            format!("{n} events dropped: the server said the batch was out of contract")
+        }
+        "BEFORE_COLLECTION_WINDOW" => format!(
+            "{n} events dropped: they are from before the month the company authorized collection"
+        ),
+        other => format!(
+            "{n} events rejected by the server: {}",
+            failure_message(other)
+        ),
+    }
+}

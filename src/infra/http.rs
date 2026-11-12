@@ -3,8 +3,9 @@
 use super::clock::{Clock, SystemClock};
 use crate::api::{ApiFailure, ServerUrl};
 use crate::auth::{DeviceId, DeviceKey, sign_request};
+use flate2::{Compression, write::GzEncoder};
 use serde::{Serialize, de::DeserializeOwned};
-use std::{sync::Arc, time::Duration};
+use std::{io::Write, sync::Arc, time::Duration};
 use ureq::{
     Agent,
     config::Config,
@@ -97,6 +98,22 @@ impl Client {
         self.json(self.send("GET", path, None, signer)?)
     }
 
+    /// `POST` of JSON that is sent gzipped. The signature covers the compressed bytes, the
+    /// ones that go on the wire.
+    pub fn post_json_gzip<R: DeserializeOwned>(
+        &self,
+        path: &str,
+        json: &[u8],
+        signer: Option<&Signer>,
+    ) -> Result<R, ApiFailure> {
+        let mut gz = GzEncoder::new(Vec::new(), Compression::default());
+        let compressed = gz
+            .write_all(json)
+            .and_then(|()| gz.finish())
+            .map_err(|_| ApiFailure::plain(0, "INTERNAL"))?;
+        self.json(self.send_with("POST", path, Some(compressed), signer, true)?)
+    }
+
     /// `POST` with no body, answered `204`.
     pub fn post_empty(&self, path: &str, signer: Option<&Signer>) -> Result<(), ApiFailure> {
         self.send("POST", path, None, signer).map(|_| ())
@@ -114,12 +131,26 @@ impl Client {
         body: Option<Vec<u8>>,
         signer: Option<&Signer>,
     ) -> Result<(u16, Vec<u8>), ApiFailure> {
+        self.send_with(method, path, body, signer, false)
+    }
+
+    fn send_with(
+        &self,
+        method: &str,
+        path: &str,
+        body: Option<Vec<u8>>,
+        signer: Option<&Signer>,
+        gzip: bool,
+    ) -> Result<(u16, Vec<u8>), ApiFailure> {
         let mut request = ureq::http::Request::builder()
             .method(method)
             .uri(format!("{}{path}", self.server.base()));
         let bytes = body.unwrap_or_default();
         if !bytes.is_empty() {
             request = request.header("content-type", "application/json");
+        }
+        if gzip {
+            request = request.header("content-encoding", "gzip");
         }
         if let Some(s) = signer {
             let mut nonce = [0u8; 16];
