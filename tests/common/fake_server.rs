@@ -70,6 +70,9 @@ pub struct Script {
     /// Answer `access_denied` / `expired_token` instead of approving.
     pub deny: bool,
     pub expire: bool,
+    /// The browser refused the approval (the organization has authorized no source): the code
+    /// stays valid and every poll says `authorization_pending`.
+    pub refuse_approval: bool,
     /// The `interval` handed out (default 5).
     pub interval: Option<u64>,
     pub organization_id: Option<String>,
@@ -351,6 +354,9 @@ fn poll(s: &mut State, body: &[u8]) -> Reply {
     s.polls += 1;
     if s.script.deny {
         return status("access_denied");
+    }
+    if s.script.refuse_approval {
+        return status("authorization_pending");
     }
     let approved = s.pairing.as_ref().is_some_and(|p| p.2);
     if !approved && s.polls <= s.script.slow_downs {

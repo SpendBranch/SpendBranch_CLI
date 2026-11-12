@@ -854,3 +854,18 @@ fn a_status_answer_with_a_malformed_fingerprint_is_refused() {
         );
     }
 }
+
+#[test]
+fn an_approval_the_browser_refused_for_lack_of_authorization_ends_as_an_expired_code_with_a_hint() {
+    let rig = Rig::new();
+    rig.server.configure(|s| s.script.refuse_approval = true);
+    let out = rig.run(&["login"]);
+    assert_eq!(out.code, 1);
+    assert!(
+        out.text.contains("may not have authorized collection yet"),
+        "{}",
+        out.text
+    );
+    assert_eq!(out.sleeps.len(), 120, "it kept polling until the code died");
+    assert!(!rig.store().is_connected().unwrap());
+}
