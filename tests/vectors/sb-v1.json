@@ -1,0 +1,32 @@
+{
+  "_comment": "Synthetic test vectors for the sb-v1 request signature. Generated with Python cryptography (OpenSSL), not with this crate. Shared with the API.",
+  "algorithm": "ed25519",
+  "seedHex": "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f",
+  "publicKey": "A6EHv_POEL4dcN0Y50vAmWfk1jCbpQ1fHdyGZBJVMbg",
+  "keyFingerprint": "5647-5aa7-5463-474c",
+  "keyFingerprintRule": "first 16 lowercase hex chars of sha256(32 raw public key bytes), in groups of 4",
+  "cases": [
+    {
+      "name": "post-with-body",
+      "deviceId": "dev_1",
+      "method": "POST",
+      "path": "/api/cli/v1/tokens",
+      "timestampMs": 1760000000000,
+      "nonce": "ZGVmZ2hpamtsbW5vcHFycw",
+      "body": "{\"deviceCode\":\"abc\"}",
+      "signedString": "sb-v1\nPOST\n/api/cli/v1/tokens\n1760000000000\nZGVmZ2hpamtsbW5vcHFycw\n4e13d569d24b2aa0c7841b24af20a4841cdc118605865ae5e7e039f1b4ec83c5",
+      "signature": "bh_c-c-Rk41kEOSpfwlJpreiBxj0zsfi0xkgMsvPNSU_lPKubqB2UlFypUcxJVZHqf8k0IGTlzsSlhuciaiXAg"
+    },
+    {
+      "name": "get-empty-body",
+      "deviceId": "dev_1",
+      "method": "GET",
+      "path": "/api/cli/v1/status",
+      "timestampMs": 1760000000001,
+      "nonce": "AAECAwQFBgcICQoLDA0ODw",
+      "body": "",
+      "signedString": "sb-v1\nGET\n/api/cli/v1/status\n1760000000001\nAAECAwQFBgcICQoLDA0ODw\ne3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "signature": "a0LfQeMSJKysvz1W3I8WkRu5YoEc77e3FFwJ-wHUZpQXYn2yqWA3dA4INaFAUD6XNgE8sHxLitBB1Vm88mLzCA"
+    }
+  ]
+}
