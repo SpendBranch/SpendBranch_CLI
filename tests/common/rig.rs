@@ -96,8 +96,6 @@ pub fn authorize(rig: &Rig) {
             granted("claude_code", claude_code::PARSER, &claude_code::FIELDS),
             granted("codex", codex::PARSER, &codex::FIELDS),
         ];
-        s.collection = vec![json!({"source": "claude_code", "lastSeenAt": null,
-            "observedUntil": null, "openGaps": []})];
     });
 }
 

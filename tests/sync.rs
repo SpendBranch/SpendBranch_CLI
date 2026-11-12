@@ -740,3 +740,123 @@ fn coverage_of_a_source_that_is_not_active_is_kept_here_and_not_sent() {
         "the other waits for its authorization"
     );
 }
+
+fn coverage(
+    db: &rusqlite::Connection,
+    source: &str,
+    from: &str,
+    to: &str,
+    state: &str,
+    reason: Option<&str>,
+) {
+    let mut v = json!({"source": source, "from": from, "to": to, "state": state});
+    if let Some(r) = reason {
+        v["reason"] = json!(r);
+    }
+    db.execute(
+        "INSERT INTO pending_coverage(payload) VALUES(?1)",
+        [v.to_string()],
+    )
+    .unwrap();
+}
+
+#[test]
+fn the_status_shows_what_the_server_has_seen_and_the_gaps_still_open() {
+    let rig = Rig::ready();
+    // nothing sent yet: the list is empty
+    assert!(
+        !rig.run(&["status"])
+            .text
+            .contains("Collection (what the server has received)")
+    );
+    rig.buffer(now_ms(), events(2));
+    let db = rusqlite::Connection::open(rig.dir.path().join("state.db")).unwrap();
+    coverage(
+        &db,
+        "codex",
+        "2026-11-10T10:00:00.000Z",
+        "2026-11-10T11:00:00.000Z",
+        "unavailable",
+        Some("adapter_error"),
+    );
+    coverage(
+        &db,
+        "codex",
+        "2026-11-11T10:00:00.000Z",
+        "2026-11-11T11:00:00.000Z",
+        "unavailable",
+        Some("buffer_full"),
+    );
+    coverage(
+        &db,
+        "codex",
+        "2026-11-12T08:00:00.000Z",
+        "2026-11-12T09:00:00.000Z",
+        "observed",
+        None,
+    );
+    assert_eq!(rig.run(&["sync"]).code, 0);
+    let text = rig.run(&["status"]).text;
+    assert!(
+        text.contains("Collection (what the server has received):"),
+        "{text}"
+    );
+    assert!(
+        text.contains(
+            "Codex: last contact less than an hour ago, observed until 2026-11-12T09:00:00"
+        ),
+        "{text}"
+    );
+    assert!(
+        text.contains("open gap 2026-11-11T10:00:00")
+            && text.contains("(buffer_full): this is not zero spending"),
+        "{text}"
+    );
+    assert!(
+        text.contains("open gap 2026-11-10T10:00:00") && text.contains("(adapter_error)"),
+        "{text}"
+    );
+    assert!(
+        text.find("2026-11-11T10").unwrap() < text.find("2026-11-10T10").unwrap(),
+        "the gap that starts latest comes first"
+    );
+    // an `observed` told later that covers a gap whole closes it; one that covers part does not
+    coverage(
+        &db,
+        "codex",
+        "2026-11-11T09:00:00.000Z",
+        "2026-11-11T12:00:00.000Z",
+        "observed",
+        None,
+    );
+    coverage(
+        &db,
+        "codex",
+        "2026-11-10T10:00:00.000Z",
+        "2026-11-10T10:30:00.000Z",
+        "observed",
+        None,
+    );
+    assert_eq!(rig.run(&["sync"]).code, 0);
+    let text = rig.run(&["status"]).text;
+    assert!(!text.contains("(buffer_full)"), "closed: {text}");
+    assert!(
+        text.contains("(adapter_error)"),
+        "half covered stays open: {text}"
+    );
+    // an older `observed` does not take the furthest time back
+    coverage(
+        &db,
+        "codex",
+        "2026-11-01T00:00:00.000Z",
+        "2026-11-02T00:00:00.000Z",
+        "observed",
+        None,
+    );
+    assert_eq!(rig.run(&["sync"]).code, 0);
+    assert!(
+        rig.run(&["status"])
+            .text
+            .contains("observed until 2026-11-12T09:00:00")
+    );
+}

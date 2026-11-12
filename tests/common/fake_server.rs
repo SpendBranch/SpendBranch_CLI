@@ -67,6 +67,13 @@ pub struct State {
     /// One entry per batch that was understood: (observations, coverage, bytes on the wire).
     pub batches: Vec<(usize, usize, usize)>,
     identities: HashSet<(String, String, String)>,
+    /// What the 9.4 `collection` is worked out from: for each source this device has sent.
+    seen_at: HashMap<String, i64>,
+    observed_until: HashMap<String, i64>,
+    /// `(source, from, to, reason)` in the order reported, and the observed ranges after them.
+    gaps: Vec<(String, i64, i64, String, usize)>,
+    observed: Vec<(String, i64, i64, usize)>,
+    reports: usize,
 }
 
 #[derive(Default)]
@@ -457,7 +464,7 @@ fn status(s: &State, id: &str) -> Reply {
                 "expiresAt": s.script.device_expires_at.clone().unwrap_or("2027-02-08T00:00:00Z".into())
             },
             "sources": s.sources,
-            "collection": s.collection
+            "collection": if s.collection.is_empty() { collection(s) } else { s.collection.clone() }
         }),
     )
 }
@@ -652,13 +659,76 @@ fn ingest(s: &mut State, req: &Seen, device: &str) -> Reply {
         .filter(|x| x["state"] == "active")
         .filter_map(|x| x["source"].as_str().map(str::to_owned))
         .collect();
-    s.stored_coverage.extend(
-        coverage
-            .into_iter()
-            .filter(|c| active.iter().any(|a| c["source"] == a.as_str())),
-    );
+    let kept: Vec<serde_json::Value> = coverage
+        .into_iter()
+        .filter(|c| active.iter().any(|a| c["source"] == a.as_str()))
+        .collect();
+    // For `collection` in the status: the last batch that brought something from a source (an
+    // item accepted or repeated, or coverage of an active source); the furthest observed time,
+    // which never goes back; and the gaps, each told after the earlier ones.
+    let received = now_ms();
+    for (o, r) in observations.iter().zip(&results) {
+        if r["status"] != "rejected" {
+            s.seen_at
+                .insert(o["source"].as_str().unwrap_or("").to_owned(), received);
+        }
+    }
+    for c in &kept {
+        let ms = |k: &str| {
+            c[k].as_str()
+                .and_then(|t| t.parse::<jiff::Timestamp>().ok())
+                .map_or(0, |t| t.as_millisecond())
+        };
+        let source = c["source"].as_str().unwrap_or("").to_owned();
+        s.seen_at.insert(source.clone(), received);
+        s.reports += 1;
+        let seq = s.reports;
+        if c["state"] == "observed" {
+            let until = s.observed_until.entry(source.clone()).or_insert(0);
+            *until = (*until).max(ms("to"));
+            s.observed.push((source, ms("from"), ms("to"), seq));
+        } else {
+            let reason = c["reason"].as_str().unwrap_or("").to_owned();
+            s.gaps.push((source, ms("from"), ms("to"), reason, seq));
+        }
+    }
+    s.stored_coverage.extend(kept);
     if s.ingest.short_results {
         results.pop();
     }
     json(200, serde_json::json!({ "results": results }))
+}
+
+/// `collection` of the 9.4 contract: one entry per source this device has sent; the gaps are
+/// the `unavailable` reports that no `observed` range told afterwards covers whole; at most 20,
+/// those that start latest first.
+fn collection(s: &State) -> Vec<serde_json::Value> {
+    let iso = |ms: i64| jiff::Timestamp::from_millisecond(ms).unwrap().to_string();
+    let mut out = Vec::new();
+    for source in ["claude_code", "codex"] {
+        let Some(seen) = s.seen_at.get(source) else {
+            continue;
+        };
+        let mut open: Vec<_> =
+            s.gaps
+                .iter()
+                .filter(|(src, from, to, _, seq)| {
+                    src == source
+                        && !s.observed.iter().any(|(o, a, b, later)| {
+                            o == source && later > seq && a <= from && b >= to
+                        })
+                })
+                .collect();
+        open.sort_by_key(|g| std::cmp::Reverse(g.1));
+        out.push(serde_json::json!({
+            "source": source,
+            "lastSeenAt": iso(*seen),
+            "observedUntil": s.observed_until.get(source).map(|t| iso(*t)),
+            "openGaps": open.iter().take(20)
+                .map(|(_, from, to, reason, _)| serde_json::json!({
+                    "startsAt": iso(*from), "endsAt": iso(*to), "reason": reason}))
+                .collect::<Vec<_>>(),
+        }));
+    }
+    out
 }
