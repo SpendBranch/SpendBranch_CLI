@@ -99,6 +99,56 @@ fn cwd_of(line: &str) -> Option<String> {
     None
 }
 
+/// What the file looks like now.
+struct Stat {
+    dev: u64,
+    ino: u64,
+    size: u64,
+    mtime_ms: i64,
+}
+
+impl Stat {
+    fn cursor(&self, offset: u64, tail: u64) -> FileCursor {
+        FileCursor {
+            dev: self.dev,
+            ino: self.ino,
+            size: self.size,
+            mtime_ms: self.mtime_ms,
+            offset,
+            tail,
+        }
+    }
+
+    /// Nothing new to read: the cursor only learns the file's present size and time.
+    fn quiet(&self, offset: u64, tail: u64) -> FileRead {
+        FileRead {
+            cursor: self.cursor(offset, tail),
+            fed: 0,
+            non_empty: 0,
+            result: None,
+            cwd: None,
+        }
+    }
+}
+
+/// Where to start reading: at the saved offset if this is the same file and still holds the
+/// bytes read last time, else at the beginning (it shrank or was rewritten in place).
+fn start_of(file: &mut File, known: Option<&FileCursor>, same_file: bool, size: u64) -> u64 {
+    let start = known.filter(|_| same_file).map_or(0, |k| k.offset);
+    let lost = size < start
+        || (start > 0 && known.is_none_or(|k| tail_hash(file, start).ok() != Some(k.tail)));
+    if lost { 0 } else { start }
+}
+
+/// How a read goes on once there is something new.
+struct Pass<'a> {
+    role: AgentRole,
+    seen: &'a dyn Fn(u64) -> bool,
+    /// The last message may still be growing: it is held back.
+    recent: bool,
+    max_line: usize,
+}
+
 fn read_file(
     path: &std::path::Path,
     known: Option<&FileCursor>,
@@ -111,52 +161,54 @@ fn read_file(
         return Ok(None);
     }; // vanished: drop its cursor
     let (dev, ino) = identity(&meta);
-    let (size, mtime) = (meta.len(), mtime_ms(&meta));
-    let same_file = known.is_some_and(|k| k.dev == dev && k.ino == ino);
-    let unchanged = |offset: u64, tail: u64| FileRead {
-        cursor: FileCursor {
-            dev,
-            ino,
-            size,
-            mtime_ms: mtime,
-            offset,
-            tail,
-        },
-        fed: 0,
-        non_empty: 0,
-        result: None,
-        cwd: None,
+    let stat = Stat {
+        dev,
+        ino,
+        size: meta.len(),
+        mtime_ms: mtime_ms(&meta),
     };
+    let same_file = known.is_some_and(|k| k.dev == dev && k.ino == ino);
     if let Some(k) = known.filter(|_| same_file)
-        && k.size == size
-        && k.mtime_ms == mtime
-        && k.offset == size
+        && k.size == stat.size
+        && k.mtime_ms == stat.mtime_ms
+        && k.offset == stat.size
     {
-        return Ok(Some(unchanged(k.offset, k.tail)));
+        return Ok(Some(stat.quiet(k.offset, k.tail)));
     }
-
     let mut file = File::open(path)?;
-    let mut start = known.filter(|_| same_file).map_or(0, |k| k.offset);
-    if size < start
-        || (start > 0 && known.is_none_or(|k| tail_hash(&mut file, start).ok() != Some(k.tail)))
-    {
-        start = 0; // shrunk or rewritten in place
+    let start = start_of(&mut file, known, same_file, stat.size);
+    if stat.size == start {
+        let tail = if start == 0 {
+            0
+        } else {
+            known.map_or(0, |k| k.tail)
+        };
+        return Ok(Some(stat.quiet(start, tail)));
     }
-    if size == start {
-        return Ok(Some(unchanged(
-            start,
-            if start == 0 {
-                0
-            } else {
-                known.map_or(0, |k| k.tail)
-            },
-        )));
-    }
+    // A modification time well ahead of the clock (the clock was set back, a file was copied)
+    // says nothing about the age. Then only a file that changed since the last read is still
+    // growing: one that did not change has settled, and its last message is sent.
+    let changed =
+        known.is_none_or(|k| !same_file || k.size != stat.size || k.mtime_ms != stat.mtime_ms);
+    let recent = match now.millis() - stat.mtime_ms {
+        age if age < -OPEN_MESSAGE_MS => changed,
+        age => age < OPEN_MESSAGE_MS,
+    };
+    let pass = Pass {
+        role,
+        seen,
+        recent,
+        max_line,
+    };
+    stream_new(file, start, &stat, &pass).map(Some)
+}
 
+/// Feeds the new lines to the parser, holding back a message that may still be growing.
+fn stream_new(mut file: File, start: u64, stat: &Stat, pass: &Pass) -> io::Result<FileRead> {
     file.seek(SeekFrom::Start(start))?;
     let options = ReadOptions {
-        subagent_file: role == AgentRole::Subagent,
-        seen: Some(seen),
+        subagent_file: pass.role == AgentRole::Subagent,
+        seen: Some(pass.seen),
     };
     let mut parser = Parser::new(&options);
     let (mut fed, mut non_empty, mut cwd) = (0usize, 0usize, None::<String>);
@@ -174,8 +226,11 @@ fn read_file(
         }
         parser.push_line(&line);
     };
-
-    let mut reader = Lines::new(BufReader::with_capacity(64 * 1024, file), start, max_line);
+    let mut reader = Lines::new(
+        BufReader::with_capacity(64 * 1024, file),
+        start,
+        pass.max_line,
+    );
     let mut open_message = OpenMessage::default();
     let mut buf = Vec::new();
     loop {
@@ -187,16 +242,8 @@ fn read_file(
         let key = if too_long { None } else { request_key(&text) };
         open_message.push(&buf, too_long, line_start, key, &mut feed);
     }
-    // A modification time well ahead of the clock (the clock was set back, a file was copied)
-    // says nothing about the age. Then only a file that changed since the last read is still
-    // growing: one that did not change has settled, and its last message is sent.
-    let changed = known.is_none_or(|k| !same_file || k.size != size || k.mtime_ms != mtime);
-    let recent = match now.millis() - mtime {
-        age if age < -OPEN_MESSAGE_MS => changed,
-        age => age < OPEN_MESSAGE_MS,
-    };
     let end = open_message
-        .finish(recent, &mut feed)
+        .finish(pass.recent, &mut feed)
         .unwrap_or(reader.complete_end);
     let mut file = reader.into_inner().into_inner();
     let tail = if end == 0 {
@@ -204,112 +251,156 @@ fn read_file(
     } else {
         tail_hash(&mut file, end)?
     };
-    Ok(Some(FileRead {
-        cursor: FileCursor {
-            dev,
-            ino,
-            size,
-            mtime_ms: mtime,
-            offset: end,
-            tail,
-        },
+    Ok(FileRead {
+        cursor: stat.cursor(end, tail),
         fed,
         non_empty,
         result: Some(parser.finish()),
         cwd,
-    }))
+    })
 }
 
-/// Everything new in the transcripts since `state`, ready for `Store::commit_read`.
-pub fn read(config: &Config, state: &ReaderState, now: Iso) -> ReadOutcome {
-    let mut out = ReadOutcome::empty(Source::ClaudeCode, now);
-    // Events found in this very read: a forked session copies history into other files.
-    let mut fresh: HashSet<u64> = HashSet::new();
-    let local = account::read_local_account(&config.account_file);
-    let mut repos = RepoResolver::new(config.home.clone());
-    let listed = discover::claude_transcripts(&config.projects_dir);
-    let mut cursors: HashMap<String, String> = HashMap::new();
-    let (mut unsupported, mut reread) = (Vec::<String>::new(), HashSet::<String>::new());
-    let mut untested = None;
+/// One pass over the transcripts: the cursors being rebuilt, and what was found.
+struct Scan<'a> {
+    config: &'a Config,
+    state: &'a ReaderState<'a>,
+    now: Iso,
+    out: ReadOutcome,
+    /// Events found in this very read: a forked session copies history into other files.
+    fresh: HashSet<u64>,
+    local: Option<account::LocalAccount>,
+    repos: RepoResolver,
+    cursors: HashMap<String, String>,
+    unsupported: Vec<String>,
+    reread: HashSet<String>,
+    untested: Option<String>,
+}
 
-    for (path, role) in &listed {
+impl<'a> Scan<'a> {
+    fn new(config: &'a Config, state: &'a ReaderState<'a>, now: Iso) -> Self {
+        Self {
+            config,
+            state,
+            now,
+            out: ReadOutcome::empty(Source::ClaudeCode, now),
+            fresh: HashSet::new(),
+            local: account::read_local_account(&config.account_file),
+            repos: RepoResolver::new(config.home.clone()),
+            cursors: HashMap::new(),
+            unsupported: Vec::new(),
+            reread: HashSet::new(),
+            untested: None,
+        }
+    }
+
+    fn transcript(&mut self, path: &std::path::Path, role: AgentRole) {
         let key = path.to_string_lossy().into_owned();
-        let known: Option<FileCursor> = state
+        let known: Option<FileCursor> = self
+            .state
             .cursors
             .get(&key)
             .and_then(|j| serde_json::from_str(j).ok());
+        let (fresh, state) = (&self.fresh, self.state);
         let is_seen = |hash: u64| fresh.contains(&hash) || state.is_seen(hash);
-        let file = match read_file(path, known.as_ref(), *role, &is_seen, now, config.max_line) {
+        let file = match read_file(
+            path,
+            known.as_ref(),
+            role,
+            &is_seen,
+            self.now,
+            self.config.max_line,
+        ) {
             Ok(Some(f)) => f,
-            Ok(None) => continue,
+            Ok(None) => return,
             Err(_) => {
-                if !state.unsupported_files.contains(&key) {
-                    out.coverage.push(failure_now(
+                if !self.state.unsupported_files.contains(&key) {
+                    self.out.coverage.push(failure_now(
                         Source::ClaudeCode,
-                        now,
+                        self.now,
                         GapReason::AdapterError,
                     ));
                 }
-                unsupported.push(key);
-                continue;
+                self.unsupported.push(key);
+                return;
             }
         };
-        cursors.insert(key.clone(), cursor_json(&file.cursor));
+        self.cursors.insert(key.clone(), cursor_json(&file.cursor));
         let Some(result) = file.result.filter(|_| file.fed > 0) else {
-            continue;
+            return;
         };
-        reread.insert(key.clone());
-        untested = result.untested_version.clone().or(untested);
-        let mut times: Vec<Iso> = result.observations.iter().map(|o| o.occurred_at).collect();
-        times.sort();
+        self.reread.insert(key.clone());
+        self.untested = result.untested_version.clone().or(self.untested.take());
         if result.format == Format::UnsupportedFormat
             || too_many_unsupported(result.unsupported_lines.len(), file.non_empty)
         {
-            unsupported.push(key.clone());
-            let second_ago = Iso::from_millis((now.millis() - 1000).max(0)).unwrap_or(now);
-            let from = times.first().copied().unwrap_or(second_ago);
-            let to = times
-                .last()
-                .copied()
-                .filter(|t| Some(t) > times.first())
-                .unwrap_or(now);
-            let gap = CoverageState::Unavailable {
-                reason: GapReason::UnsupportedFormat,
-            };
-            out.coverage.push(
-                CoverageReport::new(Source::ClaudeCode, from, to, gap).unwrap_or_else(|| {
-                    failure_now(Source::ClaudeCode, now, GapReason::UnsupportedFormat)
-                }),
-            );
+            self.unsupported.push(key);
+            self.gap(&result.observations);
         }
         let repository = file
             .cwd
             .as_deref()
-            .and_then(|cwd| repos.resolve(cwd))
+            .and_then(|cwd| self.repos.resolve(cwd))
             .and_then(|r| Repository::new(&r));
         for mut observation in result.observations {
             let hash = key_hash(observation.external_event_id.as_str());
-            fresh.insert(hash);
-            out.seen.push((hash, observation.occurred_at));
+            self.fresh.insert(hash);
+            self.out.seen.push((hash, observation.occurred_at));
             observation.repository = repository.clone();
-            with_account(&mut observation, local.as_ref());
-            out.observations.push(observation);
+            with_account(&mut observation, self.local.as_ref());
+            self.out.observations.push(observation);
         }
     }
 
-    let present: HashSet<String> = listed
-        .iter()
-        .map(|(p, _)| p.to_string_lossy().into_owned())
-        .collect();
-    for path in &state.unsupported_files {
-        if present.contains(path) && !reread.contains(path) && !unsupported.contains(path) {
-            unsupported.push(path.clone());
-        }
+    /// A file that could not be understood: the period it covers is unavailable, not zero.
+    fn gap(&mut self, observations: &[UsageObservation]) {
+        let mut times: Vec<Iso> = observations.iter().map(|o| o.occurred_at).collect();
+        times.sort();
+        let second_ago = Iso::from_millis((self.now.millis() - 1000).max(0)).unwrap_or(self.now);
+        let from = times.first().copied().unwrap_or(second_ago);
+        let to = times
+            .last()
+            .copied()
+            .filter(|t| Some(t) > times.first())
+            .unwrap_or(self.now);
+        let gap = CoverageState::Unavailable {
+            reason: GapReason::UnsupportedFormat,
+        };
+        self.out.coverage.push(
+            CoverageReport::new(Source::ClaudeCode, from, to, gap).unwrap_or_else(|| {
+                failure_now(Source::ClaudeCode, self.now, GapReason::UnsupportedFormat)
+            }),
+        );
     }
-    settle(&mut out, &state.cursors, cursors);
-    out.unsupported_files = unsupported;
-    out.untested_version = untested;
-    out
+
+    /// A gap already reported for a file that is still there and was not read again stays.
+    fn finish(mut self, listed: &[(std::path::PathBuf, AgentRole)]) -> ReadOutcome {
+        let present: HashSet<String> = listed
+            .iter()
+            .map(|(p, _)| p.to_string_lossy().into_owned())
+            .collect();
+        for path in &self.state.unsupported_files {
+            if present.contains(path)
+                && !self.reread.contains(path)
+                && !self.unsupported.contains(path)
+            {
+                self.unsupported.push(path.clone());
+            }
+        }
+        settle(&mut self.out, &self.state.cursors, self.cursors);
+        self.out.unsupported_files = self.unsupported;
+        self.out.untested_version = self.untested;
+        self.out
+    }
+}
+
+/// Everything new in the transcripts since `state`, ready for `Store::commit_read`.
+pub fn read(config: &Config, state: &ReaderState, now: Iso) -> ReadOutcome {
+    let mut scan = Scan::new(config, state, now);
+    let listed = discover::claude_transcripts(&config.projects_dir);
+    for (path, role) in &listed {
+        scan.transcript(path, *role);
+    }
+    scan.finish(&listed)
 }
 
 /// A payer found in the transcript wins; otherwise the device's own account is used.
