@@ -2,6 +2,7 @@
 use super::raw::{Line, Payload, Record, Usage, is_id, is_model, text, usage_of};
 use super::{Meta, ReadOptions, ReadResult, Resume, UnsupportedCode, UnsupportedLine, empty};
 use crate::contract::Iso;
+use crate::contract::UsageObservation;
 use crate::sources::{
     Format,
     json::{Leaf, Obj},
@@ -224,36 +225,73 @@ impl<'a> Parser<'a> {
 
     /// The observations, and where to continue from (`None` when this read could not
     /// understand the rollout, so the caller must not advance).
-    pub fn finish(self) -> (ReadResult, Option<Resume>) {
+    pub fn finish(mut self) -> (ReadResult, Option<Resume>) {
         if self.unknown_format {
             return (empty(Format::UnsupportedFormat, vec![]), None);
         }
         let Some(meta) = self.meta.clone() else {
             return (empty(Format::Ok, self.unsupported), None);
         };
-        let records = &self.records;
-        if self.token_count_seen && records.is_empty() && !self.had_record {
+        if (self.token_count_seen && self.records.is_empty() && !self.had_record)
+            || !self.totals_agree()
+        {
             return (empty(Format::UnsupportedFormat, self.unsupported), None);
         }
-        // Between two consecutive records with no broken line in between, the step of the
-        // running total must equal the record's own usage. It is only a local check.
+        let mut unsupported = std::mem::take(&mut self.unsupported);
+        let (observations, new_keys) = self.observations(&meta, &mut unsupported);
+        unsupported.sort_by_key(|u| u.line);
+
+        let resume = Resume {
+            meta: meta.clone(),
+            current_model: self.current_model,
+            turn_models: self.turn_models.into_pairs(),
+            plan_seen: self.plan_seen,
+            had_record: self.had_record || !self.records.is_empty(),
+            last_ordinal: self.last_ordinal,
+            prev_thread: self.records.last().map_or(self.prev_thread, |r| r.thread),
+            broken_since_last_record: self.broken_since_last_record,
+        };
+        let result = ReadResult {
+            thread_id: Some(meta.thread_id.clone()),
+            session_id: Some(meta.session_id.clone()),
+            observations,
+            new_keys,
+            last_ordinal: self.last_ordinal,
+            foreign_records: self.foreign,
+            unsupported_lines: unsupported,
+            untested_version: meta
+                .cli_version
+                .filter(|v| !version::in_range(v, &version::CODEX_TESTED)),
+            format: Format::Ok,
+        };
+        (result, Some(resume))
+    }
+
+    /// Between two consecutive records with no broken line in between, the step of the running
+    /// total must equal the record's own usage. It is only a local check.
+    fn totals_agree(&self) -> bool {
         let mut before = self.prev_thread;
-        for now in records {
+        for now in &self.records {
             if let (Some(a), Some(b)) = (before, now.thread)
                 && !now.after_broken_line
                 && (0..6).any(|i| i128::from(b[i]) - i128::from(a[i]) != i128::from(now.usage[i]))
             {
-                return (empty(Format::UnsupportedFormat, self.unsupported), None);
+                return false;
             }
             before = now.thread;
         }
+        true
+    }
 
-        let after = self.after_ordinal;
-        let mut unsupported = self.unsupported;
-        let mut observations = Vec::new();
-        let mut new_keys = Vec::new();
-        for record in records {
-            if record.ordinal <= after
+    /// The new records as observations (and their keys); the ones that cannot be become gaps.
+    fn observations(
+        &self,
+        meta: &Meta,
+        unsupported: &mut Vec<UnsupportedLine>,
+    ) -> (Vec<UsageObservation>, Vec<String>) {
+        let (mut observations, mut new_keys) = (Vec::new(), Vec::new());
+        for record in &self.records {
+            if record.ordinal <= self.after_ordinal
                 || self
                     .options
                     .seen
@@ -273,7 +311,7 @@ impl<'a> Parser<'a> {
                 });
                 continue;
             };
-            match observation_of(&meta, record, model, self.plan_seen) {
+            match observation_of(meta, record, model, self.plan_seen) {
                 Some(o) => {
                     observations.push(o);
                     new_keys.push(record.response_id.clone());
@@ -284,31 +322,6 @@ impl<'a> Parser<'a> {
                 }),
             }
         }
-        unsupported.sort_by_key(|u| u.line);
-
-        let resume = Resume {
-            meta: meta.clone(),
-            current_model: self.current_model,
-            turn_models: self.turn_models.into_pairs(),
-            plan_seen: self.plan_seen,
-            had_record: self.had_record || !records.is_empty(),
-            last_ordinal: self.last_ordinal,
-            prev_thread: records.last().map_or(self.prev_thread, |r| r.thread),
-            broken_since_last_record: self.broken_since_last_record,
-        };
-        let result = ReadResult {
-            thread_id: Some(meta.thread_id.clone()),
-            session_id: Some(meta.session_id.clone()),
-            observations,
-            new_keys,
-            last_ordinal: self.last_ordinal,
-            foreign_records: self.foreign,
-            unsupported_lines: unsupported,
-            untested_version: meta
-                .cli_version
-                .filter(|v| !version::in_range(v, &version::CODEX_TESTED)),
-            format: Format::Ok,
-        };
-        (result, Some(resume))
+        (observations, new_keys)
     }
 }
