@@ -741,6 +741,28 @@ fn coverage_of_a_source_that_is_not_active_is_kept_here_and_not_sent() {
     );
 }
 
+#[test]
+fn coverage_that_ends_past_the_server_clock_window_is_sent_and_ignored_like_the_api_does() {
+    let rig = Rig::ready();
+    let db = rusqlite::Connection::open(rig.dir.path().join("state.db")).unwrap();
+    coverage(
+        &db,
+        "claude_code",
+        "2026-06-01T00:00:00.000Z",
+        "2099-01-01T00:00:00.000Z",
+        "observed",
+        None,
+    );
+    let out = rig.run(&["sync"]);
+    assert_eq!(out.code, 0, "{}", out.text);
+    assert!(rig.server.state.lock().unwrap().stored_coverage.is_empty());
+    assert_eq!(
+        rig.store().pending_counts().unwrap(),
+        (0, 0),
+        "the server answered 200, so nothing waits here"
+    );
+}
+
 fn coverage(
     db: &rusqlite::Connection,
     source: &str,

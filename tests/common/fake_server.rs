@@ -741,8 +741,9 @@ fn ingest(s: &mut State, req: &Seen, device: &str) -> Reply {
             }
         });
     }
-    // Coverage is kept only for the sources whose authorization is active; the rest is ignored
-    // without an error and without changing the results.
+    // Coverage is kept only for the sources whose authorization is active and only when it ends
+    // within the clock window (API 9.11: a `to` in the future would pin `observedUntil`); the rest
+    // is ignored without an error and without changing the results.
     let active: Vec<String> = s
         .sources
         .iter()
@@ -752,6 +753,12 @@ fn ingest(s: &mut State, req: &Seen, device: &str) -> Reply {
     let kept: Vec<serde_json::Value> = coverage
         .into_iter()
         .filter(|c| active.iter().any(|a| c["source"] == a.as_str()))
+        .filter(|c| {
+            c["to"]
+                .as_str()
+                .and_then(|t| t.parse::<jiff::Timestamp>().ok())
+                .is_some_and(|t| t.as_millisecond() <= server_now + WINDOW_MS)
+        })
         .collect();
     // For `collection` in the status: the last batch that brought something from a source (an
     // item accepted or repeated, or coverage of an active source); the furthest observed time,
