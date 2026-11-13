@@ -2,6 +2,7 @@
 use super::raw::{Line, Payload, Record, Usage, is_id, is_model, text, usage_of};
 use super::{Meta, ReadOptions, ReadResult, Resume, UnsupportedCode, UnsupportedLine, empty};
 use crate::contract::Iso;
+use crate::contract::UsageObservation;
 use crate::sources::{
     Format,
     json::{Leaf, Obj},
@@ -102,22 +103,8 @@ impl<'a> Parser<'a> {
         }
         let entry = match serde_json::from_str::<Obj<Line>>(raw) {
             Ok(Obj(Some(entry))) => entry,
-            Ok(Obj(None)) => {
-                self.unsupported.push(UnsupportedLine {
-                    line: n,
-                    code: UnsupportedCode::NotAnObject,
-                });
-                self.broken_since_last_record = true;
-                return;
-            }
-            Err(_) => {
-                self.unsupported.push(UnsupportedLine {
-                    line: n,
-                    code: UnsupportedCode::InvalidJson,
-                });
-                self.broken_since_last_record = true;
-                return;
-            }
+            Ok(Obj(None)) => return self.broken(n, UnsupportedCode::NotAnObject),
+            Err(_) => return self.broken(n, UnsupportedCode::InvalidJson),
         };
         let payload = entry.payload.0.as_ref();
         let none = Payload::default();
@@ -127,57 +114,79 @@ impl<'a> Parser<'a> {
             self.last_ordinal = self.last_ordinal.max(o);
         }
         let kind = entry.kind.str();
-
-        let Some(meta) = self.meta.as_ref() else {
-            match (kind == Some("session_meta"))
-                .then(|| meta_of(p))
-                .flatten()
-                .filter(|_| payload.is_some())
-            {
-                Some(meta) => self.meta = Some(meta),
-                None => self.unknown_format = true,
-            }
-            return;
-        };
-        if kind == Some("session_meta") {
-            if p.id.str() != Some(meta.thread_id.as_str()) {
-                self.unknown_format = true;
-            }
-            return;
+        if self.meta.is_none() {
+            return self.first_line(kind, p, payload.is_some());
         }
-        if kind == Some("turn_context") {
-            if let Some(model) = text(&p.model, is_model) {
-                self.current_model = Some(model.to_owned());
-                if let Some(turn) = text(&p.turn_id, is_id) {
-                    self.turn_models.insert(turn.to_owned(), model.to_owned());
+        match kind {
+            Some("session_meta") => self.same_thread(p),
+            Some("turn_context") => self.turn_context(p),
+            Some("event_msg") => self.event_msg(p),
+            Some("token_usage_record") => self.usage_record(n, &entry, p, ordinal),
+            _ => {}
+        }
+    }
+
+    /// A line that cannot be understood: it is told apart as a gap, and the next record knows.
+    fn broken(&mut self, line: usize, code: UnsupportedCode) {
+        self.unsupported.push(UnsupportedLine { line, code });
+        self.broken_since_last_record = true;
+    }
+
+    /// The first line has to be the session meta; anything else is a format we do not know.
+    fn first_line(&mut self, kind: Option<&str>, p: &Payload, has_payload: bool) {
+        match (kind == Some("session_meta"))
+            .then(|| meta_of(p))
+            .flatten()
+            .filter(|_| has_payload)
+        {
+            Some(meta) => self.meta = Some(meta),
+            None => self.unknown_format = true,
+        }
+    }
+
+    /// A second session meta must name the same thread.
+    fn same_thread(&mut self, p: &Payload) {
+        if self.meta.as_ref().map(|m| m.thread_id.as_str()) != p.id.str() {
+            self.unknown_format = true;
+        }
+    }
+
+    fn turn_context(&mut self, p: &Payload) {
+        if let Some(model) = text(&p.model, is_model) {
+            self.current_model = Some(model.to_owned());
+            if let Some(turn) = text(&p.turn_id, is_id) {
+                self.turn_models.insert(turn.to_owned(), model.to_owned());
+            }
+        }
+    }
+
+    fn event_msg(&mut self, p: &Payload) {
+        match p.kind.str() {
+            Some("thread_settings_applied") => {
+                if let Some(model) = p
+                    .thread_settings
+                    .0
+                    .as_ref()
+                    .and_then(|t| text(&t.model, is_model))
+                {
+                    self.current_model = Some(model.to_owned());
                 }
             }
-            return;
-        }
-        if kind == Some("event_msg") && p.kind.str() == Some("thread_settings_applied") {
-            if let Some(model) = p
-                .thread_settings
-                .0
-                .as_ref()
-                .and_then(|t| text(&t.model, is_model))
-            {
-                self.current_model = Some(model.to_owned());
+            Some("token_count") => {
+                self.token_count_seen = true;
+                self.plan_seen |= p
+                    .rate_limits
+                    .0
+                    .as_ref()
+                    .is_some_and(|r| r.plan_type.is_present());
             }
-            return;
+            _ => {}
         }
-        if kind == Some("event_msg") && p.kind.str() == Some("token_count") {
-            self.token_count_seen = true;
-            self.plan_seen |= p
-                .rate_limits
-                .0
-                .as_ref()
-                .is_some_and(|r| r.plan_type.is_present());
-            return;
-        }
-        if kind != Some("token_usage_record") {
-            return;
-        }
-        if p.thread_id != Leaf::Missing && p.thread_id.str() != Some(meta.thread_id.as_str()) {
+    }
+
+    fn usage_record(&mut self, n: usize, entry: &Line, p: &Payload, ordinal: Option<i64>) {
+        let this_thread = self.meta.as_ref().map(|m| m.thread_id.as_str());
+        if p.thread_id != Leaf::Missing && p.thread_id.str() != this_thread {
             self.foreign += 1;
             return;
         }
@@ -188,28 +197,14 @@ impl<'a> Parser<'a> {
         let (Some(response_id), Some(turn_id), Some(usage), Some(at), Some(ordinal)) =
             (response_id, turn_id, usage, at, ordinal)
         else {
-            self.unsupported.push(UnsupportedLine {
-                line: n,
-                code: UnsupportedCode::MissingField,
-            });
-            self.broken_since_last_record = true;
-            return;
+            return self.broken(n, UnsupportedCode::MissingField);
         };
         if usage[1] + usage[2] > usage[0] {
-            self.unsupported.push(UnsupportedLine {
-                line: n,
-                code: UnsupportedCode::InconsistentCounters,
-            });
-            self.broken_since_last_record = true;
-            return;
+            return self.broken(n, UnsupportedCode::InconsistentCounters);
         }
         if let Some(known) = self.by_response.get(response_id) {
             if *known != usage {
-                self.unsupported.push(UnsupportedLine {
-                    line: n,
-                    code: UnsupportedCode::ConflictingResponse,
-                });
-                self.broken_since_last_record = true;
+                self.broken(n, UnsupportedCode::ConflictingResponse);
             }
             return;
         }
@@ -230,36 +225,73 @@ impl<'a> Parser<'a> {
 
     /// The observations, and where to continue from (`None` when this read could not
     /// understand the rollout, so the caller must not advance).
-    pub fn finish(self) -> (ReadResult, Option<Resume>) {
+    pub fn finish(mut self) -> (ReadResult, Option<Resume>) {
         if self.unknown_format {
             return (empty(Format::UnsupportedFormat, vec![]), None);
         }
         let Some(meta) = self.meta.clone() else {
             return (empty(Format::Ok, self.unsupported), None);
         };
-        let records = &self.records;
-        if self.token_count_seen && records.is_empty() && !self.had_record {
+        if (self.token_count_seen && self.records.is_empty() && !self.had_record)
+            || !self.totals_agree()
+        {
             return (empty(Format::UnsupportedFormat, self.unsupported), None);
         }
-        // Between two consecutive records with no broken line in between, the step of the
-        // running total must equal the record's own usage. It is only a local check.
+        let mut unsupported = std::mem::take(&mut self.unsupported);
+        let (observations, new_keys) = self.observations(&meta, &mut unsupported);
+        unsupported.sort_by_key(|u| u.line);
+
+        let resume = Resume {
+            meta: meta.clone(),
+            current_model: self.current_model,
+            turn_models: self.turn_models.into_pairs(),
+            plan_seen: self.plan_seen,
+            had_record: self.had_record || !self.records.is_empty(),
+            last_ordinal: self.last_ordinal,
+            prev_thread: self.records.last().map_or(self.prev_thread, |r| r.thread),
+            broken_since_last_record: self.broken_since_last_record,
+        };
+        let result = ReadResult {
+            thread_id: Some(meta.thread_id.clone()),
+            session_id: Some(meta.session_id.clone()),
+            observations,
+            new_keys,
+            last_ordinal: self.last_ordinal,
+            foreign_records: self.foreign,
+            unsupported_lines: unsupported,
+            untested_version: meta
+                .cli_version
+                .filter(|v| !version::in_range(v, &version::CODEX_TESTED)),
+            format: Format::Ok,
+        };
+        (result, Some(resume))
+    }
+
+    /// Between two consecutive records with no broken line in between, the step of the running
+    /// total must equal the record's own usage. It is only a local check.
+    fn totals_agree(&self) -> bool {
         let mut before = self.prev_thread;
-        for now in records {
+        for now in &self.records {
             if let (Some(a), Some(b)) = (before, now.thread)
                 && !now.after_broken_line
                 && (0..6).any(|i| i128::from(b[i]) - i128::from(a[i]) != i128::from(now.usage[i]))
             {
-                return (empty(Format::UnsupportedFormat, self.unsupported), None);
+                return false;
             }
             before = now.thread;
         }
+        true
+    }
 
-        let after = self.after_ordinal;
-        let mut unsupported = self.unsupported;
-        let mut observations = Vec::new();
-        let mut new_keys = Vec::new();
-        for record in records {
-            if record.ordinal <= after
+    /// The new records as observations (and their keys); the ones that cannot be become gaps.
+    fn observations(
+        &self,
+        meta: &Meta,
+        unsupported: &mut Vec<UnsupportedLine>,
+    ) -> (Vec<UsageObservation>, Vec<String>) {
+        let (mut observations, mut new_keys) = (Vec::new(), Vec::new());
+        for record in &self.records {
+            if record.ordinal <= self.after_ordinal
                 || self
                     .options
                     .seen
@@ -279,7 +311,7 @@ impl<'a> Parser<'a> {
                 });
                 continue;
             };
-            match observation_of(&meta, record, model, self.plan_seen) {
+            match observation_of(meta, record, model, self.plan_seen) {
                 Some(o) => {
                     observations.push(o);
                     new_keys.push(record.response_id.clone());
@@ -290,31 +322,6 @@ impl<'a> Parser<'a> {
                 }),
             }
         }
-        unsupported.sort_by_key(|u| u.line);
-
-        let resume = Resume {
-            meta: meta.clone(),
-            current_model: self.current_model,
-            turn_models: self.turn_models.into_pairs(),
-            plan_seen: self.plan_seen,
-            had_record: self.had_record || !records.is_empty(),
-            last_ordinal: self.last_ordinal,
-            prev_thread: records.last().map_or(self.prev_thread, |r| r.thread),
-            broken_since_last_record: self.broken_since_last_record,
-        };
-        let result = ReadResult {
-            thread_id: Some(meta.thread_id.clone()),
-            session_id: Some(meta.session_id.clone()),
-            observations,
-            new_keys,
-            last_ordinal: self.last_ordinal,
-            foreign_records: self.foreign,
-            unsupported_lines: unsupported,
-            untested_version: meta
-                .cli_version
-                .filter(|v| !version::in_range(v, &version::CODEX_TESTED)),
-            format: Format::Ok,
-        };
-        (result, Some(resume))
+        (observations, new_keys)
     }
 }

@@ -222,21 +222,7 @@ fn handle(
     let Some(request) = Request::parse(&head) else {
         return reply(&stream, 400);
     };
-    let Ok(content_length) = content_length(&request) else {
-        return reply(&stream, 400);
-    };
-    let checked = relay::check(&Head {
-        peer_is_loopback: peer.ip().to_canonical().is_loopback(),
-        method: &request.method,
-        path: &request.path,
-        host: request.get("host"),
-        origin: request.get("origin"),
-        content_type: request.get("content-type"),
-        content_encoding: request.get("content-encoding"),
-        transfer_encoding: request.get("transfer-encoding"),
-        content_length,
-    });
-    let wanted = match checked {
+    let wanted = match screen(&request, peer) {
         Ok(n) => n,
         Err(status) => return reply(&stream, status),
     };
@@ -268,4 +254,21 @@ fn handle(
             reply(&stream, 502)
         }
     }
+}
+
+/// The request's head against the relay's table of answers: the length of the body to read, or
+/// the status to answer with.
+fn screen(request: &Request, peer: SocketAddr) -> Result<usize, u16> {
+    let content_length = content_length(request).map_err(|()| 400u16)?;
+    relay::check(&Head {
+        peer_is_loopback: peer.ip().to_canonical().is_loopback(),
+        method: &request.method,
+        path: &request.path,
+        host: request.get("host"),
+        origin: request.get("origin"),
+        content_type: request.get("content-type"),
+        content_encoding: request.get("content-encoding"),
+        transfer_encoding: request.get("transfer-encoding"),
+        content_length,
+    })
 }

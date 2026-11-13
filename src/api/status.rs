@@ -135,66 +135,80 @@ fn source_of(name: &str) -> Option<crate::contract::Source> {
     }
 }
 
+/// `None` if the device is malformed.
+fn device_view(d: RawDevice) -> Option<DeviceView> {
+    if !is_fingerprint(&d.key_fingerprint) || !printable(&d.label, 200) {
+        return None;
+    }
+    Some(DeviceView {
+        label: d.label,
+        key_fingerprint: d.key_fingerprint,
+        created_at: Iso::parse(&d.created_at)?,
+        expires_at: Iso::parse(&d.expires_at)?,
+    })
+}
+
+/// Outer `None`: malformed. Inner `None`: a source this build does not know, left out.
+fn source_view(s: RawSource) -> Option<Option<SourceView>> {
+    let Some(source) = source_of(&s.source) else {
+        return Some(None);
+    };
+    if s.fields.len() > MAX_FIELDS || !s.fields.iter().all(|f| printable(f, 200)) {
+        return None;
+    }
+    Some(Some(SourceView {
+        source,
+        state: match s.state.as_str() {
+            "active" => SourceState::Active,
+            "expired" => SourceState::Expired,
+            "revoked" => SourceState::Revoked,
+            _ => SourceState::Other,
+        },
+        parser_version: crate::contract::ParserVersion::new(&s.parser_version)?,
+        fields: s.fields,
+        window_start: optional_time(s.window_start.as_deref())?,
+    }))
+}
+
+/// Outer `None`: malformed. Inner `None`: a source this build does not know, left out.
+fn collection_view(c: RawCollection) -> Option<Option<CollectionView>> {
+    let Some(source) = source_of(&c.source) else {
+        return Some(None);
+    };
+    let mut open_gaps = Vec::new();
+    for g in c.open_gaps.into_iter().take(MAX_GAPS) {
+        open_gaps.push(GapView {
+            starts_at: Iso::parse(&g.starts_at)?,
+            ends_at: Iso::parse(&g.ends_at)?,
+            reason: if is_plain_reason(&g.reason) {
+                g.reason
+            } else {
+                "unknown".into()
+            },
+        });
+    }
+    Some(Some(CollectionView {
+        source,
+        last_seen_at: optional_time(c.last_seen_at.as_deref())?,
+        observed_until: optional_time(c.observed_until.as_deref())?,
+        open_gaps,
+    }))
+}
+
 impl CliStatus {
     /// `None` if any field is malformed. Sources this build does not know are left out.
     pub fn checked(self) -> Option<StatusView> {
         if self.sources.len() > MAX_LISTED || self.collection.len() > MAX_LISTED {
             return None;
         }
-        let d = self.device;
-        if !is_fingerprint(&d.key_fingerprint) || !printable(&d.label, 200) {
-            return None;
-        }
-        let device = DeviceView {
-            label: d.label,
-            key_fingerprint: d.key_fingerprint,
-            created_at: Iso::parse(&d.created_at)?,
-            expires_at: Iso::parse(&d.expires_at)?,
-        };
+        let device = device_view(self.device)?;
         let mut sources = Vec::new();
         for s in self.sources {
-            let Some(source) = source_of(&s.source) else {
-                continue;
-            };
-            if s.fields.len() > MAX_FIELDS || !s.fields.iter().all(|f| printable(f, 200)) {
-                return None;
-            }
-            sources.push(SourceView {
-                source,
-                state: match s.state.as_str() {
-                    "active" => SourceState::Active,
-                    "expired" => SourceState::Expired,
-                    "revoked" => SourceState::Revoked,
-                    _ => SourceState::Other,
-                },
-                parser_version: crate::contract::ParserVersion::new(&s.parser_version)?,
-                fields: s.fields,
-                window_start: optional_time(s.window_start.as_deref())?,
-            });
+            sources.extend(source_view(s)?);
         }
         let mut collection = Vec::new();
         for c in self.collection {
-            let Some(source) = source_of(&c.source) else {
-                continue;
-            };
-            let mut open_gaps = Vec::new();
-            for g in c.open_gaps.into_iter().take(MAX_GAPS) {
-                open_gaps.push(GapView {
-                    starts_at: Iso::parse(&g.starts_at)?,
-                    ends_at: Iso::parse(&g.ends_at)?,
-                    reason: if is_plain_reason(&g.reason) {
-                        g.reason
-                    } else {
-                        "unknown".into()
-                    },
-                });
-            }
-            collection.push(CollectionView {
-                source,
-                last_seen_at: optional_time(c.last_seen_at.as_deref())?,
-                observed_until: optional_time(c.observed_until.as_deref())?,
-                open_gaps,
-            });
+            collection.extend(collection_view(c)?);
         }
         let member_name = match self.member_name {
             Some(name) if printable(&name, 200) => Some(name),

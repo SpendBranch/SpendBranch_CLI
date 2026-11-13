@@ -55,12 +55,25 @@ pub struct Local {
 
 /// The part that needs no network.
 pub fn local_lines(local: &Local, now: Iso) -> Vec<String> {
-    let mut out = Vec::new();
+    let mut out = buffer_lines(local);
+    for s in &local.sources {
+        out.extend(source_lines(s, now));
+    }
+    out.push(if local.scheduled {
+        "Scheduled sync: installed".into()
+    } else {
+        "Scheduled sync: not installed (run `spendbranch setup`)".into()
+    });
+    out
+}
+
+/// The buffer, when it was last sent, and what has gone wrong.
+fn buffer_lines(local: &Local) -> Vec<String> {
     let mut buffer = format!("Local buffer: {} items awaiting upload", local.items);
     if local.coverage > 0 {
         buffer.push_str(&format!(" and {} coverage reports", local.coverage));
     }
-    out.push(buffer);
+    let mut out = vec![buffer];
     for (label, value) in [
         ("Last sent", &local.last_sent),
         ("Next attempt", &local.next_attempt),
@@ -87,47 +100,46 @@ pub fn local_lines(local: &Local, now: Iso) -> Vec<String> {
             .collect();
         out.push(format!("  Refused or dropped: {}", list.join(", ")));
     }
-    for s in &local.sources {
-        let name = agent_name(s.source);
-        match s.facts.enabled_since.as_deref().and_then(Iso::parse) {
-            Some(since) => out.push(format!(
-                "{name}: collection on since {} (reading {}, {} files tracked)",
-                day(since),
-                s.folder,
-                s.facts.tracked_files
-            )),
-            None => out.push(format!("{name}: collection off here")),
-        }
-        out.extend(hook_lines(s, now));
-        if s.facts.unreadable_files > 0 {
-            out.push(format!(
-                "  unread files (unrecognized format or no permission): {} (become gaps, not zero spending)",
-                s.facts.unreadable_files
-            ));
-        }
-        if let Some(v) = s
-            .facts
-            .untested_version
-            .as_deref()
-            .filter(|v| v.len() <= 32)
-        {
-            out.push(format!("  {name} version outside the tested range: {v}"));
-        }
-        let stale = s
-            .facts
-            .last_read_at
-            .as_deref()
-            .and_then(Iso::parse)
-            .is_none_or(|at| now.millis() - at.millis() > DAY_MS);
-        if s.facts.enabled_since.is_some() && stale {
-            out.push("  last read was more than 24 hours ago: run `spendbranch sync`".into());
-        }
+    out
+}
+
+/// One agent: whether collection is on, its hook, and what it could not read.
+fn source_lines(s: &LocalSource, now: Iso) -> Vec<String> {
+    let name = agent_name(s.source);
+    let mut out = Vec::new();
+    match s.facts.enabled_since.as_deref().and_then(Iso::parse) {
+        Some(since) => out.push(format!(
+            "{name}: collection on since {} (reading {}, {} files tracked)",
+            day(since),
+            s.folder,
+            s.facts.tracked_files
+        )),
+        None => out.push(format!("{name}: collection off here")),
     }
-    out.push(if local.scheduled {
-        "Scheduled sync: installed".into()
-    } else {
-        "Scheduled sync: not installed (run `spendbranch setup`)".into()
-    });
+    out.extend(hook_lines(s, now));
+    if s.facts.unreadable_files > 0 {
+        out.push(format!(
+            "  unread files (unrecognized format or no permission): {} (become gaps, not zero spending)",
+            s.facts.unreadable_files
+        ));
+    }
+    if let Some(v) = s
+        .facts
+        .untested_version
+        .as_deref()
+        .filter(|v| v.len() <= 32)
+    {
+        out.push(format!("  {name} version outside the tested range: {v}"));
+    }
+    let stale = s
+        .facts
+        .last_read_at
+        .as_deref()
+        .and_then(Iso::parse)
+        .is_none_or(|at| now.millis() - at.millis() > DAY_MS);
+    if s.facts.enabled_since.is_some() && stale {
+        out.push("  last read was more than 24 hours ago: run `spendbranch sync`".into());
+    }
     out
 }
 
@@ -196,7 +208,14 @@ pub fn remote_lines(
         valid.push_str(" (expires soon: run `spendbranch login` to renew)");
     }
     out.push(valid);
-    out.push("Authorized sources:".into());
+    out.extend(authorized_lines(view, local));
+    out.extend(collection_lines(view, now));
+    out
+}
+
+/// What the company authorized, and a warning for each source that is on here without it.
+fn authorized_lines(view: &StatusView, local: &Local) -> Vec<String> {
+    let mut out = vec!["Authorized sources:".to_owned()];
     for s in &view.sources {
         let name = agent_name(s.source);
         out.push(match (s.state, s.window_start) {
@@ -228,6 +247,12 @@ pub fn remote_lines(
             ));
         }
     }
+    out
+}
+
+/// What the server has received from this device, and the gaps it has open.
+fn collection_lines(view: &StatusView, now: Iso) -> Vec<String> {
+    let mut out = Vec::new();
     if !view.collection.is_empty() {
         out.push("Collection (what the server has received):".into());
     }

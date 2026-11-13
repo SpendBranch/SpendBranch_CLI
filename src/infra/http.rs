@@ -142,10 +142,10 @@ impl Client {
         signer: Option<&Signer>,
         gzip: bool,
     ) -> Result<(u16, Vec<u8>), ApiFailure> {
+        let bytes = body.unwrap_or_default();
         let mut request = ureq::http::Request::builder()
             .method(method)
             .uri(format!("{}{path}", self.server.base()));
-        let bytes = body.unwrap_or_default();
         if !bytes.is_empty() {
             request = request.header("content-type", "application/json");
         }
@@ -153,47 +153,62 @@ impl Client {
             request = request.header("content-encoding", "gzip");
         }
         if let Some(s) = signer {
-            let mut nonce = [0u8; 16];
-            getrandom::fill(&mut nonce).map_err(|_| ApiFailure::plain(0, "NO_ENTROPY"))?;
-            let headers = sign_request(
-                s.key,
-                s.device,
-                method,
-                path,
-                self.clock.now_ms(),
-                &nonce,
-                &bytes,
-            );
-            for (name, value) in headers.pairs() {
+            for (name, value) in self.signature(s, method, path, &bytes)?.pairs() {
                 request = request.header(name, value);
             }
         }
         let request = request.body(bytes).map_err(|_| ApiFailure::network())?;
         let response = self.agent.run(request).map_err(|_| ApiFailure::network())?;
-        let status = response.status().as_u16();
-        let header = |name: &str| {
-            response
-                .headers()
-                .get(name)
-                .and_then(|v| v.to_str().ok())
-                .map(str::to_owned)
-        };
-        let (retry_after, server_time) = (header("retry-after"), header("x-sb-server-time"));
-        let body = response
-            .into_body()
-            .with_config()
-            .limit(MAX_RESPONSE)
-            .read_to_vec()
-            .map_err(|_| ApiFailure::network())?;
-        if (200..300).contains(&status) {
-            Ok((status, body))
-        } else {
-            Err(ApiFailure::from_response(
-                status,
-                &body,
-                retry_after.as_deref(),
-                server_time.as_deref(),
-            ))
-        }
+        answer(response)
+    }
+
+    /// The `X-SB-*` headers for this request: a new time and a new nonce every time.
+    fn signature(
+        &self,
+        signer: &Signer,
+        method: &str,
+        path: &str,
+        body: &[u8],
+    ) -> Result<crate::auth::SignedHeaders, ApiFailure> {
+        let mut nonce = [0u8; 16];
+        getrandom::fill(&mut nonce).map_err(|_| ApiFailure::plain(0, "NO_ENTROPY"))?;
+        Ok(sign_request(
+            signer.key,
+            signer.device,
+            method,
+            path,
+            self.clock.now_ms(),
+            &nonce,
+            body,
+        ))
+    }
+}
+
+/// The status and body of a response (bounded), or the failure it stands for.
+fn answer(response: ureq::http::Response<ureq::Body>) -> Result<(u16, Vec<u8>), ApiFailure> {
+    let status = response.status().as_u16();
+    let header = |name: &str| {
+        response
+            .headers()
+            .get(name)
+            .and_then(|v| v.to_str().ok())
+            .map(str::to_owned)
+    };
+    let (retry_after, server_time) = (header("retry-after"), header("x-sb-server-time"));
+    let body = response
+        .into_body()
+        .with_config()
+        .limit(MAX_RESPONSE)
+        .read_to_vec()
+        .map_err(|_| ApiFailure::network())?;
+    if (200..300).contains(&status) {
+        Ok((status, body))
+    } else {
+        Err(ApiFailure::from_response(
+            status,
+            &body,
+            retry_after.as_deref(),
+            server_time.as_deref(),
+        ))
     }
 }

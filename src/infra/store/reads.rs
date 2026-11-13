@@ -3,7 +3,7 @@
 use super::{Result, Store};
 use crate::contract::{CoverageReport, Source};
 use crate::sources::outcome::{ReadOutcome, ReaderState};
-use rusqlite::{OptionalExtension, TransactionBehavior, params};
+use rusqlite::{OptionalExtension, Transaction, TransactionBehavior, params};
 
 /// How long an event key is remembered.
 const SEEN_KEEP_MS: i64 = 45 * 24 * 60 * 60 * 1000;
@@ -87,7 +87,6 @@ impl Store {
     /// is saved or none: a crash before the commit repeats the read (the server drops the
     /// repeat), a crash after it finds the cursor already moved.
     pub fn commit_read(&mut self, outcome: &ReadOutcome, limits: SpoolLimits) -> Result<Commit> {
-        let name = outcome.source.name();
         // An event more than a day ahead of this clock cannot be right (the server would hold it
         // as CLOCK_SKEW for a day and then we would drop it): it never enters the buffer.
         let latest = outcome.read_at.millis() + crate::sync::CLOCK_SKEW_CAP_MS;
@@ -104,76 +103,14 @@ impl Store {
         let tx = self
             .conn
             .transaction_with_behavior(TransactionBehavior::Immediate)?;
-        if !payloads.is_empty() {
-            let (items, bytes): (i64, i64) = tx.query_row(
-                "SELECT COUNT(*), COALESCE(SUM(LENGTH(payload) + 1), 0) FROM spool",
-                [],
-                |r| Ok((r.get(0)?, r.get(1)?)),
-            )?;
-            let added: u64 = payloads.iter().map(|p| p.len() as u64 + 1).sum();
-            if items as u64 + payloads.len() as u64 > limits.items
-                || bytes as u64 + added > limits.bytes
-            {
-                return Ok(Commit::Full); // the transaction is dropped: nothing is written
-            }
+        if !fits(&tx, &payloads, limits)? {
+            return Ok(Commit::Full); // the transaction is dropped: nothing is written
         }
-        {
-            let mut insert =
-                tx.prepare_cached("INSERT INTO spool(payload, queued_at) VALUES(?1, ?2)")?;
-            for payload in &payloads {
-                insert.execute(params![payload, outcome.read_at.millis()])?;
-            }
-            if !future.is_empty() {
-                tx.execute(
-                    "INSERT INTO rejected(code, count) VALUES('INVALID_LOCAL', ?1)
-                     ON CONFLICT(code) DO UPDATE SET count = count + excluded.count",
-                    [future.len() as i64],
-                )?;
-            }
-            let mut insert =
-                tx.prepare_cached("INSERT INTO pending_coverage(payload) VALUES(?1)")?;
-            for report in &outcome.coverage {
-                insert.execute([serde_json::to_string(report)?])?;
-            }
-        }
-        // Keys older than the window are not worth keeping: skip them instead of inserting
-        // and deleting.
-        let cutoff = (outcome.read_at.millis() - SEEN_KEEP_MS).max(0);
-        {
-            let mut insert = tx.prepare_cached(
-                "INSERT OR IGNORE INTO seen(source, key_hash, occurred_ms) VALUES(?1, ?2, ?3)",
-            )?;
-            for (hash, at) in outcome.seen.iter().filter(|(_, at)| at.millis() >= cutoff) {
-                insert.execute(params![name, *hash as i64, at.millis()])?;
-            }
-        }
-        tx.execute(
-            "DELETE FROM seen WHERE source = ?1 AND occurred_ms < ?2",
-            params![name, cutoff],
-        )?;
-        {
-            let mut delete =
-                tx.prepare_cached("DELETE FROM cursor WHERE source = ?1 AND key = ?2")?;
-            for key in &outcome.cursor_remove {
-                delete.execute(params![name, key])?;
-            }
-            let mut upsert = tx.prepare_cached(
-                "INSERT INTO cursor(source, key, data) VALUES(?1, ?2, ?3)
-                 ON CONFLICT(source, key) DO UPDATE SET data = excluded.data",
-            )?;
-            for (key, data) in &outcome.cursor_set {
-                upsert.execute(params![name, key, data])?;
-            }
-        }
-        tx.execute("DELETE FROM unsupported_file WHERE source = ?1", [name])?;
-        {
-            let mut insert = tx.prepare_cached(
-                "INSERT OR IGNORE INTO unsupported_file(source, path) VALUES(?1, ?2)",
-            )?;
-            for path in &outcome.unsupported_files {
-                insert.execute(params![name, path])?;
-            }
-        }
+        let name = outcome.source.name();
+        write_buffer(&tx, outcome, &payloads, future.len())?;
+        write_seen(&tx, name, outcome)?;
+        write_cursors(&tx, name, outcome)?;
+        write_unsupported(&tx, name, outcome)?;
         tx.execute(
             "INSERT INTO source(name, last_read_at, untested_version) VALUES(?1, ?2, ?3)
              ON CONFLICT(name) DO UPDATE SET last_read_at = excluded.last_read_at,
@@ -210,4 +147,89 @@ impl Store {
             one("SELECT COUNT(*) FROM pending_coverage")?,
         ))
     }
+}
+
+/// Whether the new payloads fit in the buffer, by count and by size.
+fn fits(tx: &Transaction, payloads: &[String], limits: SpoolLimits) -> Result<bool> {
+    if payloads.is_empty() {
+        return Ok(true);
+    }
+    let (items, bytes): (i64, i64) = tx.query_row(
+        "SELECT COUNT(*), COALESCE(SUM(LENGTH(payload) + 1), 0) FROM spool",
+        [],
+        |r| Ok((r.get(0)?, r.get(1)?)),
+    )?;
+    let added: u64 = payloads.iter().map(|p| p.len() as u64 + 1).sum();
+    Ok(
+        items as u64 + payloads.len() as u64 <= limits.items
+            && bytes as u64 + added <= limits.bytes,
+    )
+}
+
+/// The observations and the coverage reports, and the count of events turned away for being in
+/// the future.
+fn write_buffer(
+    tx: &Transaction,
+    outcome: &ReadOutcome,
+    payloads: &[String],
+    future: usize,
+) -> Result<()> {
+    let mut insert = tx.prepare_cached("INSERT INTO spool(payload, queued_at) VALUES(?1, ?2)")?;
+    for payload in payloads {
+        insert.execute(params![payload, outcome.read_at.millis()])?;
+    }
+    if future > 0 {
+        tx.execute(
+            "INSERT INTO rejected(code, count) VALUES('INVALID_LOCAL', ?1)
+             ON CONFLICT(code) DO UPDATE SET count = count + excluded.count",
+            [future as i64],
+        )?;
+    }
+    let mut insert = tx.prepare_cached("INSERT INTO pending_coverage(payload) VALUES(?1)")?;
+    for report in &outcome.coverage {
+        insert.execute([serde_json::to_string(report)?])?;
+    }
+    Ok(())
+}
+
+/// Keys older than the window are not worth keeping: they are skipped instead of inserted and
+/// deleted.
+fn write_seen(tx: &Transaction, name: &str, outcome: &ReadOutcome) -> Result<()> {
+    let cutoff = (outcome.read_at.millis() - SEEN_KEEP_MS).max(0);
+    let mut insert = tx.prepare_cached(
+        "INSERT OR IGNORE INTO seen(source, key_hash, occurred_ms) VALUES(?1, ?2, ?3)",
+    )?;
+    for (hash, at) in outcome.seen.iter().filter(|(_, at)| at.millis() >= cutoff) {
+        insert.execute(params![name, *hash as i64, at.millis()])?;
+    }
+    tx.execute(
+        "DELETE FROM seen WHERE source = ?1 AND occurred_ms < ?2",
+        params![name, cutoff],
+    )?;
+    Ok(())
+}
+
+fn write_cursors(tx: &Transaction, name: &str, outcome: &ReadOutcome) -> Result<()> {
+    let mut delete = tx.prepare_cached("DELETE FROM cursor WHERE source = ?1 AND key = ?2")?;
+    for key in &outcome.cursor_remove {
+        delete.execute(params![name, key])?;
+    }
+    let mut upsert = tx.prepare_cached(
+        "INSERT INTO cursor(source, key, data) VALUES(?1, ?2, ?3)
+         ON CONFLICT(source, key) DO UPDATE SET data = excluded.data",
+    )?;
+    for (key, data) in &outcome.cursor_set {
+        upsert.execute(params![name, key, data])?;
+    }
+    Ok(())
+}
+
+fn write_unsupported(tx: &Transaction, name: &str, outcome: &ReadOutcome) -> Result<()> {
+    tx.execute("DELETE FROM unsupported_file WHERE source = ?1", [name])?;
+    let mut insert =
+        tx.prepare_cached("INSERT OR IGNORE INTO unsupported_file(source, path) VALUES(?1, ?2)")?;
+    for path in &outcome.unsupported_files {
+        insert.execute(params![name, path])?;
+    }
+    Ok(())
 }
