@@ -135,28 +135,52 @@ fn read_file(
     known: Option<&FileCursor>,
     threads: &HashMap<String, ThreadCursor>,
 ) -> io::Result<FileRead> {
-    let options = ReadOptions::default();
     let key = path.to_string_lossy();
-    let mut file = File::open(path)?;
+    let file = File::open(path)?;
     if archived {
-        let decoder = zstd::stream::read::Decoder::new(file)?;
-        let limited = decoder.take(config.max_archive_output + 1);
-        let (read, limited) = stream(
-            limited,
-            0,
-            config.max_line,
-            Parser::new(&options),
-            &key,
-            threads,
-            stat.size,
-        )?;
-        if limited.limit() == 0 {
-            return Err(io::Error::other("archive expands beyond the limit"));
-        }
-        return Ok(read);
+        read_archive(config, file, stat, &key, threads)
+    } else {
+        read_plain(config, file, stat, known, &key, threads)
     }
-    // Continue from the saved offset only if this is the same file, still holding the bytes
-    // we read last time, and we kept the thread's context.
+}
+
+/// A `.zst` is read once, in full, and refused if it expands past the limit.
+fn read_archive(
+    config: &Config,
+    file: File,
+    stat: &Stat,
+    key: &str,
+    threads: &HashMap<String, ThreadCursor>,
+) -> io::Result<FileRead> {
+    let options = ReadOptions::default();
+    let decoder = zstd::stream::read::Decoder::new(file)?;
+    let limited = decoder.take(config.max_archive_output + 1);
+    let (read, limited) = stream(
+        limited,
+        0,
+        config.max_line,
+        Parser::new(&options),
+        key,
+        threads,
+        stat.size,
+    )?;
+    if limited.limit() == 0 {
+        return Err(io::Error::other("archive expands beyond the limit"));
+    }
+    Ok(read)
+}
+
+/// A `.jsonl` continues from the saved offset only if this is the same file, still holding the
+/// bytes read last time, and the thread's context was kept; otherwise it starts over.
+fn read_plain(
+    config: &Config,
+    mut file: File,
+    stat: &Stat,
+    known: Option<&FileCursor>,
+    key: &str,
+    threads: &HashMap<String, ThreadCursor>,
+) -> io::Result<FileRead> {
+    let options = ReadOptions::default();
     let same = known.filter(|k| k.dev == stat.dev && k.ino == stat.ino && k.size <= stat.size);
     let resume = same
         .filter(|k| k.offset > 0 && k.offset <= stat.size)
@@ -172,7 +196,7 @@ fn read_file(
         start,
         config.max_line,
         parser,
-        &key,
+        key,
         threads,
         stat.size,
     )?;
