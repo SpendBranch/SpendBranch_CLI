@@ -133,21 +133,8 @@ fn next_batch(
         remove_coverage: bad_coverage,
         ..Change::default()
     };
-    let (mut broken, mut early) = (invalid.len() as u64, 0u64);
-    items.retain(|item| {
-        let name = item.observation.source.name();
-        if granted
-            .window
-            .get(name)
-            .is_some_and(|w| rules::before_window(item, *w))
-        {
-            local.remove_items.push(item.id);
-            early += 1;
-            false
-        } else {
-            true
-        }
-    });
+    let mut broken = invalid.len() as u64;
+    let early = drop_before_window(&mut items, granted, &mut local);
     let packed = rules::pack(installation, &items, &reports, max_items);
     if packed.is_none() && !items.is_empty() {
         // One observation alone is over the size limit: it can never be sent.
@@ -173,6 +160,25 @@ fn next_batch(
         packed,
         removed,
     })
+}
+
+/// What is from before its source's collection window is never sent: it is taken out of the
+/// batch and queued for removal. Returns how many.
+fn drop_before_window(items: &mut Vec<rules::Item>, granted: &Granted, local: &mut Change) -> u64 {
+    let mut early = 0;
+    items.retain(|item| {
+        let name = item.observation.source.name();
+        let before = granted
+            .window
+            .get(name)
+            .is_some_and(|w| rules::before_window(item, *w));
+        if before {
+            local.remove_items.push(item.id);
+            early += 1;
+        }
+        !before
+    });
+    early
 }
 
 /// What was in the batch that went out.
@@ -266,22 +272,46 @@ fn record(
     Ok(())
 }
 
+/// What one upload run holds on to while it goes batch by batch.
+struct Run<'a> {
+    granted: Granted,
+    installation: uuid::Uuid,
+    signer: Signer<'a>,
+    client: Client,
+    /// Rows put back during this run are past this and wait for the next one.
+    end: i64,
+}
+
+/// How a batch went.
+enum Pass {
+    Next,
+    Done(Option<i32>),
+}
+
+/// `true` (after saying so) while `nextAttemptAt` is still in the future.
+fn deferred(ctx: &mut Ctx, store: &Store) -> Result<bool> {
+    let Some(next) = store
+        .sync_get("nextAttemptAt")?
+        .and_then(|t| Iso::parse(&t))
+        .filter(|t| t.millis() > ms())
+    else {
+        return Ok(false);
+    };
+    let (waiting, _) = store.pending_counts()?;
+    writeln!(
+        ctx.out,
+        "Upload deferred until {next}. {waiting} items remain buffered."
+    )?;
+    Ok(true)
+}
+
 pub(super) fn upload(
     ctx: &mut Ctx,
     store: &mut Store,
     c: &Connection,
     tally: &mut Tally,
 ) -> Result<Option<i32>> {
-    if let Some(next) = store
-        .sync_get("nextAttemptAt")?
-        .and_then(|t| Iso::parse(&t))
-        .filter(|t| t.millis() > ms())
-    {
-        let (waiting, _) = store.pending_counts()?;
-        writeln!(
-            ctx.out,
-            "Upload deferred until {next}. {waiting} items remain buffered."
-        )?;
+    if deferred(ctx, store)? {
         return Ok(Some(0));
     }
     let (waiting, coverage) = store.pending_counts()?;
@@ -294,56 +324,87 @@ pub(super) fn upload(
         Err(Final::Deferred) => return Ok(Some(1)),
         Err(Final::Failure(f)) => return stop(ctx, store, &f),
     };
-    let granted = granted(store, &view, tally)?;
-    let installation = uuid::Uuid::parse_str(&store.installation_id()?)?;
-    let signer = Signer {
-        device: &c.device,
-        key: &c.key,
+    let run = Run {
+        granted: granted(store, &view, tally)?,
+        installation: uuid::Uuid::parse_str(&store.installation_id()?)?,
+        signer: Signer {
+            device: &c.device,
+            key: &c.key,
+        },
+        client: Client::new(c.server.clone(), VERSION),
+        end: store.queue_end()?,
     };
-    let client = Client::new(c.server.clone(), VERSION);
-    let end = store.queue_end()?;
     let mut max_items = crate::contract::MAX_BATCH_OBSERVATIONS;
     // Every pass removes or sends something, so this is never reached; it is a stop for a
     // process that holds the lock if that ever stops being true.
     for _ in 0..MAX_PASSES {
-        let next = next_batch(store, &granted, installation, end, max_items, tally)?;
-        let Some(packed) = next.packed else {
-            if next.removed {
-                continue; // what was behind the removed rows is next
-            }
-            return Ok(None);
-        };
-        let sent = || Sent {
-            items: &next.items[..packed.items],
-            coverage: next.reports[..packed.coverage]
-                .iter()
-                .map(|(id, _)| *id)
-                .collect(),
-        };
-        let answer = with_retries(ctx, store, || {
-            client.post_json_gzip::<IngestResults>(INGEST, &packed.json, Some(&signer))
-        })?;
-        let raw = match answer {
-            Ok(raw) => raw,
-            Err(Final::Deferred) => return Ok(Some(1)),
-            Err(Final::Failure(f)) => {
-                match refused(ctx, store, tally, &f, sent(), &mut max_items)? {
-                    Flow::Again => continue,
-                    Flow::Stop(code) => return Ok(code),
-                }
-            }
-        };
-        let Some(outcomes) = raw.checked(packed.items) else {
-            // Not the answer the contract promises: the buffer stays, nothing is guessed.
-            return stop(ctx, store, &ApiFailure::bad_response(200));
-        };
-        let applied = rules::apply_results(sent().items, &outcomes, ms());
-        record(store, tally, sent(), &applied)?;
-        if applied.session_owned.is_some() {
-            // A session that is not this member's: its buffer is gone, and the run stops here.
-            summary(ctx, tally)?;
-            return say(ctx, m::SESSION_OWNED_STOP, 1).map(Some);
+        match pass(ctx, store, tally, &run, &mut max_items)? {
+            Pass::Next => {}
+            Pass::Done(code) => return Ok(code),
         }
     }
     Ok(None)
+}
+
+/// One batch: pack it, send it, and apply what the server said.
+fn pass(
+    ctx: &mut Ctx,
+    store: &mut Store,
+    tally: &mut Tally,
+    run: &Run,
+    max_items: &mut usize,
+) -> Result<Pass> {
+    let next = next_batch(
+        store,
+        &run.granted,
+        run.installation,
+        run.end,
+        *max_items,
+        tally,
+    )?;
+    let Some(packed) = next.packed else {
+        // What was behind the removed rows is next; with nothing removed, nothing is left.
+        return Ok(if next.removed {
+            Pass::Next
+        } else {
+            Pass::Done(None)
+        });
+    };
+    let sent = || Sent {
+        items: &next.items[..packed.items],
+        coverage: next.reports[..packed.coverage]
+            .iter()
+            .map(|(id, _)| *id)
+            .collect(),
+    };
+    let answer = with_retries(ctx, store, || {
+        run.client
+            .post_json_gzip::<IngestResults>(INGEST, &packed.json, Some(&run.signer))
+    })?;
+    let raw = match answer {
+        Ok(raw) => raw,
+        Err(Final::Deferred) => return Ok(Pass::Done(Some(1))),
+        Err(Final::Failure(f)) => {
+            return Ok(match refused(ctx, store, tally, &f, sent(), max_items)? {
+                Flow::Again => Pass::Next,
+                Flow::Stop(code) => Pass::Done(code),
+            });
+        }
+    };
+    let Some(outcomes) = raw.checked(packed.items) else {
+        // Not the answer the contract promises: the buffer stays, nothing is guessed.
+        return Ok(Pass::Done(stop(
+            ctx,
+            store,
+            &ApiFailure::bad_response(200),
+        )?));
+    };
+    let applied = rules::apply_results(sent().items, &outcomes, ms());
+    record(store, tally, sent(), &applied)?;
+    if applied.session_owned.is_some() {
+        // A session that is not this member's: its buffer is gone, and the run stops here.
+        summary(ctx, tally)?;
+        return Ok(Pass::Done(say(ctx, m::SESSION_OWNED_STOP, 1).map(Some)?));
+    }
+    Ok(Pass::Next)
 }
