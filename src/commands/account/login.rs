@@ -59,7 +59,9 @@ fn connect(
         device: approval.device_id.clone(),
         key: DeviceKey::from_text(&key.to_text()).ok_or("the new key cannot be read back")?,
     };
-    if !confirmed(ctx, &approval.organization_name)? {
+    // A status that fails here only means no name to show: the organization is still asked about.
+    let member = fetch_status(&new).ok().and_then(|v| v.member_name);
+    if !confirmed(ctx, &approval.organization_name, member.as_deref())? {
         let _ = revoke(&new); // the server already made the device: take it back
         return say(ctx, m::LOGIN_CANCELLED, 1);
     }
@@ -78,9 +80,13 @@ fn connect(
     Ok(0)
 }
 
-/// Phishing of the code (RFC 8628 5.4): the person says whether this is their organization.
-fn confirmed(ctx: &mut Ctx, organization: &str) -> Result<bool> {
+/// Phishing of the code (RFC 8628 5.4): the person says whether this is their organization, and
+/// sees whose membership the device is paired to (the approver may be someone else).
+fn confirmed(ctx: &mut Ctx, organization: &str, member: Option<&str>) -> Result<bool> {
     writeln!(ctx.out, "Organization: {organization}")?;
+    if let Some(member) = member {
+        writeln!(ctx.out, "Member: {member}")?;
+    }
     write!(ctx.out, "{}", m::confirm_organization(organization))?;
     ctx.out.flush()?;
     let mut answer = String::new();

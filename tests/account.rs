@@ -186,6 +186,23 @@ fn a_person_who_does_not_confirm_the_organization_leaves_nothing_behind() {
 }
 
 #[test]
+fn the_confirmation_names_the_member_the_device_is_paired_to_before_asking() {
+    // RED-04: whoever approved the code may not be the person at this keyboard.
+    let rig = Rig::new();
+    let out = rig.run_with(&["login"], "n\n", false, &[]);
+    let member = out.text.find("Member: Jane Doe").expect(&out.text);
+    let prompt = out
+        .text
+        .find("Is that your organization?")
+        .expect(&out.text);
+    assert!(
+        member < prompt,
+        "the name comes before the question: {}",
+        out.text
+    );
+}
+
+#[test]
 fn yes_in_any_case_confirms() {
     for answer in ["y\n", "Y\n", "yes\n", "YES\n", "  yes  \n"] {
         let rig = Rig::new();
