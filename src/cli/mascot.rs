@@ -74,11 +74,10 @@ const PALETTE: [(char, [u8; 3]); 27] = [
 ];
 
 /// Text beside the owl, by art row.
-const SIDE: [(usize, &str); 4] = [
+const SIDE: [(usize, &str); 3] = [
     (5, "SpendBranch CLI"),
-    (7, "only company-authorized metadata."),
-    (8, "prompts and code never leave this device."),
-    (10, "start with: spendbranch setup"),
+    (7, "Start with: spendbranch setup"),
+    (9, "Or: spendbranch --help for all commands"),
 ];
 const ART_WIDTH: usize = 36;
 
