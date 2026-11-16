@@ -1,5 +1,6 @@
 //! The command line: argv in, exit code out.
 pub mod args;
+pub mod mascot;
 pub mod messages;
 pub mod render;
 
@@ -60,7 +61,14 @@ fn dispatch(args: &[String], env: Env, io: &mut Io) -> Result<i32, Box<dyn std::
     };
     match command {
         Parsed::Version => writeln!(io.out, "{VERSION}")?,
-        Parsed::Help => writeln!(io.out, "{help}")?,
+        Parsed::Help => {
+            // The owl only on a terminal: piped help stays plain text. NO_COLOR keeps its shape.
+            if io.interactive {
+                let color = env("NO_COLOR").is_none_or(|v| v.is_empty());
+                writeln!(io.out, "{}", mascot::mascot(color))?;
+            }
+            writeln!(io.out, "{help}")?
+        }
         Parsed::Unknown(name) => {
             writeln!(io.out, "Unknown command: {name}.\n\n{help}")?;
             return Ok(2);
