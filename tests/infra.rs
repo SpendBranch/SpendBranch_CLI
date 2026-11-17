@@ -266,7 +266,7 @@ fn a_newer_database_is_a_typed_error() {
 mod folders {
     use super::*;
     use spendbranch::infra::private_fs;
-    use std::os::unix::fs::PermissionsExt;
+    use std::os::unix::fs::{MetadataExt, PermissionsExt};
 
     fn set(path: &Path, mode: u32) {
         fs::set_permissions(path, fs::Permissions::from_mode(mode)).unwrap();
@@ -289,7 +289,17 @@ mod folders {
             let dir = tmp.path().join(format!("d{existing:o}"));
             fs::create_dir(&dir).unwrap();
             set(&dir, existing);
-            private_fs::create_dir(&dir).unwrap();
+            // Group write is ours only with the user's private group; on macOS a temporary
+            // folder's group is the shared `staff`, so there it is refused (and still untouched).
+            let meta = fs::metadata(&dir).unwrap();
+            let shared = existing & 0o020 != 0 && meta.gid() != meta.uid();
+            match private_fs::create_dir(&dir) {
+                Ok(()) => assert!(!shared, "{existing:o} with a shared group was accepted"),
+                Err(e) => {
+                    assert!(shared, "{existing:o}: {e}");
+                    assert_eq!(e.kind(), std::io::ErrorKind::PermissionDenied);
+                }
+            }
             assert_eq!(mode(&dir), existing, "must stay {existing:o}");
         }
     }

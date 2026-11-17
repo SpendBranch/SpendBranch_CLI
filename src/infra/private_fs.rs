@@ -41,11 +41,15 @@ pub(crate) fn my_uid() -> io::Result<u32> {
     let uid = match from_proc {
         Some(uid) if uid != 0 => uid,
         _ => {
+            // The counter keeps two threads of one process apart: macOS clocks tick in
+            // microseconds, so the time alone repeats.
+            static PROBE: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+            let n = PROBE.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
             let nanos = std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
                 .map_or(0, |d| d.subsec_nanos());
-            let probe =
-                std::env::temp_dir().join(format!(".spendbranch-{}-{nanos}", std::process::id()));
+            let probe = std::env::temp_dir()
+                .join(format!(".spendbranch-{}-{n}-{nanos}", std::process::id()));
             let uid = OpenOptions::new()
                 .write(true)
                 .create_new(true)
