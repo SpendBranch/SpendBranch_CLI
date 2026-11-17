@@ -221,13 +221,23 @@ fn refused(
             Ok(Flow::Again)
         }
         Failed::Split => {
-            // One observation the server finds too big: it can never be sent.
-            tally.add("INVALID_LOCAL", 1);
-            store.apply(&Change {
-                remove_items: vec![sent.items[0].id],
-                rejected: vec![("INVALID_LOCAL".into(), 1)],
-                ..Change::default()
-            })?;
+            // One observation the server finds too big: it can never be sent. With none, the
+            // coverage alone was too big: it goes, or every run would fail on it again.
+            let change = match sent.items.first() {
+                Some(item) => {
+                    tally.add("INVALID_LOCAL", 1);
+                    Change {
+                        remove_items: vec![item.id],
+                        rejected: vec![("INVALID_LOCAL".into(), 1)],
+                        ..Change::default()
+                    }
+                }
+                None => Change {
+                    remove_coverage: sent.coverage,
+                    ..Change::default()
+                },
+            };
+            store.apply(&change)?;
             Ok(Flow::Again)
         }
         _ => Ok(Flow::Stop(stop(ctx, store, f)?)),

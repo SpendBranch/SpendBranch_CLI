@@ -553,6 +553,28 @@ fn a_coverage_report_alone_is_sent_and_then_forgotten() {
 }
 
 #[test]
+fn coverage_alone_that_the_server_finds_too_big_is_dropped_not_a_crash() {
+    let rig = Rig::ready();
+    let db = rusqlite::Connection::open(rig.dir.path().join("state.db")).unwrap();
+    coverage(
+        &db,
+        "codex",
+        "2026-06-01T00:00:00.000Z",
+        "2026-06-01T01:00:00.000Z",
+        "unavailable",
+        Some("adapter_error"),
+    );
+    rig.server.configure(|s| s.ingest.max_plain = Some(10));
+    let out = rig.run(&["sync"]);
+    assert_eq!(out.code, 0, "{}", out.text);
+    assert_eq!(
+        rig.store().pending_counts().unwrap(),
+        (0, 0),
+        "a report that can never fit is not kept to fail every run"
+    );
+}
+
+#[test]
 fn the_buffer_reaches_the_server_from_real_session_files() {
     use std::io::Write;
     let rig = Rig::ready();
