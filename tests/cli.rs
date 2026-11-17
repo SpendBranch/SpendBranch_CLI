@@ -329,7 +329,23 @@ fn failure_messages_are_english_and_never_echo_unknown_input_verbatim_as_a_code_
         ),
         (
             "UNAUTHENTICATED",
-            "This device was revoked or expired. Run `spendbranch login`.",
+            "This device was revoked, expired, or lost access. Run `spendbranch login`.",
+        ),
+        (
+            "VALIDATION_FAILED",
+            "The server refused the data as out of contract. Install the latest spendbranch; if it keeps happening, report it.",
+        ),
+        (
+            "PAYLOAD_TOO_LARGE",
+            "The data sent was too large for the server.",
+        ),
+        (
+            "UNSUPPORTED_MEDIA_TYPE",
+            "The server did not accept the upload format. A proxy in between may be changing requests; check the server address (--server).",
+        ),
+        (
+            "UNAVAILABLE",
+            "The server is temporarily unavailable. Try again later.",
         ),
         ("PLAN_REQUIRED", "The organization has no active plan."),
         ("RATE_LIMITED", "The server requested a pause (rate limit)."),

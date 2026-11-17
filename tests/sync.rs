@@ -198,6 +198,12 @@ fn a_server_that_is_away_leaves_everything_in_the_buffer_and_the_next_run_sends_
     assert_eq!(out.code, 1, "{}", out.text);
     assert!(
         out.text
+            .contains("The server is temporarily unavailable. Try again later."),
+        "{}",
+        out.text
+    );
+    assert!(
+        out.text
             .contains("3 items remain buffered for the next upload."),
         "{}",
         out.text
@@ -307,7 +313,7 @@ fn errors_that_need_the_person_stop_the_run_and_keep_the_buffer() {
         (
             415,
             "UNSUPPORTED_MEDIA_TYPE",
-            "The server rejected the request (UNSUPPORTED_MEDIA_TYPE).".to_owned(),
+            "The server did not accept the upload format. A proxy in between may be changing requests; check the server address (--server).".to_owned(),
         ),
     ] {
         let rig = Rig::ready();
@@ -346,7 +352,11 @@ fn a_device_the_server_revoked_stops_at_the_first_call() {
     });
     let out = rig.run(&["sync"]);
     assert_eq!(out.code, 1);
-    assert!(out.text.contains("revoked or expired"), "{}", out.text);
+    assert!(
+        out.text.contains("revoked, expired, or lost access"),
+        "{}",
+        out.text
+    );
     assert_eq!(rig.buffered(), 2);
 }
 
