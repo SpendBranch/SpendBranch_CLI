@@ -84,19 +84,17 @@ fn request_key(line: &str) -> Option<&str> {
     (!id.is_empty()).then_some(id)
 }
 
-/// The first `"cwd":"..."` of a line. It only feeds the repository lookup, then is dropped.
+/// The session's own `cwd`: the top-level field, never one nested in a message, tool input or
+/// result. It only feeds the repository lookup, then is dropped.
 fn cwd_of(line: &str) -> Option<String> {
-    let start = line.find("\"cwd\":\"")? + 6;
-    let rest = &line[start..];
-    let mut escaped = false;
-    for (i, c) in rest.char_indices().skip(1) {
-        match c {
-            '\\' => escaped = !escaped,
-            '"' if !escaped => return serde_json::from_str(&rest[..=i]).ok(),
-            _ => escaped = false,
-        }
+    #[derive(Deserialize)]
+    struct Top {
+        cwd: Option<String>,
     }
-    None
+    if !line.contains("\"cwd\"") {
+        return None; // most lines: no parse
+    }
+    serde_json::from_str::<Top>(line).ok()?.cwd
 }
 
 /// What the file looks like now.

@@ -111,12 +111,20 @@ impl RepoResolver {
     }
 }
 
-/// A network share (`\\host\share`, `//host/share`, `\\?\UNC\...`). The folder comes from a
-/// transcript, so it must never make this machine contact another one.
+/// Anything that may make this machine contact another one: `\\host\share`, `//host/share`
+/// and every verbatim or device form (`\\?\UNC\...` in any case, `\\?\GLOBALROOT\...`,
+/// `\\.\pipe\...`). The folder comes from a transcript, so only a plain drive passes:
+/// `C:\...`, `\\?\C:\...`, `\\.\C:\...`. Decided on the text, the same on every platform.
 pub fn is_network_path(path: &str) -> bool {
     let p = path.replace('/', "\\");
-    if p.starts_with("\\\\?\\UNC\\") || p.starts_with("\\\\.\\UNC\\") {
+    let Some(rest) = p.strip_prefix("\\\\") else {
+        return false;
+    };
+    let Some(device) = rest
+        .strip_prefix("?\\")
+        .or_else(|| rest.strip_prefix(".\\"))
+    else {
         return true;
-    }
-    p.starts_with("\\\\") && !p.starts_with("\\\\?\\") && !p.starts_with("\\\\.\\")
+    };
+    !matches!(device.as_bytes(), [d, b':'] | [d, b':', b'\\', ..] if d.is_ascii_alphabetic())
 }
