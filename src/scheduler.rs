@@ -19,26 +19,39 @@ fn posix(text: &str) -> String {
     format!("'{}'", text.replace('\'', "'\\''"))
 }
 
-/// systemd: inside double quotes, `\` and `"` are escaped, and `%` and `$` are doubled
-/// (they are specifiers and variables there).
-fn systemd(text: &str) -> String {
+/// Text that can go into a unit, a crontab line, a scheduled task or a hook command as it is:
+/// no line break or NUL (each would start a line of its own: another command), and on Windows
+/// none of `"`, `%`, `$` or `` ` `` (cmd, Task Scheduler and Git Bash expand them, and the same
+/// command line goes to all three).
+pub fn fits_a_command(text: &str, windows: bool) -> bool {
+    !text.contains(['\n', '\r', '\0']) && !(windows && text.contains(['"', '%', '$', '`']))
+}
+
+/// systemd: inside double quotes, `\` and `"` are escaped and `%` is doubled (a specifier
+/// everywhere). `$` is doubled only in a command line: `Environment=` does not expand variables,
+/// so there a doubled `$` would stay doubled.
+fn systemd(text: &str, command: bool) -> String {
     let body = text
         .replace('\\', "\\\\")
         .replace('"', "\\\"")
-        .replace('%', "%%")
-        .replace('$', "$$");
+        .replace('%', "%%");
+    let body = if command {
+        body.replace('$', "$$")
+    } else {
+        body
+    };
     format!("\"{body}\"")
 }
 
 pub fn systemd_service(job: &Job) -> String {
     let mut out = format!(
         "[Unit]\nDescription=SpendBranch usage sync\n\n[Service]\nType=oneshot\nExecStart={} sync\n",
-        systemd(job.exe)
+        systemd(job.exe, true)
     );
     if let Some(home) = job.home {
         out.push_str(&format!(
             "Environment={}\n",
-            systemd(&format!("SPENDBRANCH_HOME={home}"))
+            systemd(&format!("SPENDBRANCH_HOME={home}"), false)
         ));
     }
     out

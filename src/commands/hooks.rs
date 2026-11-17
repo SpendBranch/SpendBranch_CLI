@@ -21,11 +21,16 @@ fn windows(ctx: &Ctx) -> bool {
 }
 
 /// The absolute path of this program, as text (the hook and schedule lines are text).
+/// Refused when it cannot go into a command line as it is (`scheduler::fits_a_command`).
 pub(super) fn exe_text(ctx: &Ctx) -> Result<String> {
     let path = ctx.system.exe()?;
-    path.to_str()
-        .map(str::to_owned)
-        .ok_or_else(|| "the path of this program is not valid text".into())
+    let text = path
+        .to_str()
+        .ok_or("the path of this program is not valid text")?;
+    if !crate::scheduler::fits_a_command(text, windows(ctx)) {
+        return Err(m::EXE_PATH_UNSAFE.into());
+    }
+    Ok(text.to_owned())
 }
 
 /// What the agent's file holds, for the rules to edit.
@@ -53,7 +58,11 @@ pub(super) fn install(ctx: &mut Ctx, source: Source) -> Result<i32> {
     let Read::Text(original) = read(&file)? else {
         return say(ctx, &m::hook_file_problem(&shown, false), 1);
     };
-    let plan = match rules::install(source, original.as_deref(), &exe_text(ctx)?, windows(ctx)) {
+    let exe = match exe_text(ctx) {
+        Ok(exe) => exe,
+        Err(why) => return say(ctx, &why.to_string(), 1),
+    };
+    let plan = match rules::install(source, original.as_deref(), &exe, windows(ctx)) {
         Ok(plan) => plan,
         Err(problem) => {
             return say(

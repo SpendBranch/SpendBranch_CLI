@@ -395,3 +395,26 @@ fn on_windows_the_hook_line_is_quoted_for_windows_whatever_runs_the_test() {
         "{text}"
     );
 }
+
+#[test]
+fn a_program_path_that_would_add_a_command_is_not_written_into_a_hook() {
+    for (exe, windows) in [
+        ("/opt/x\n/bin/evil", false),
+        (r"C:/Users/$(calc)/spendbranch.exe", true),
+        (r"C:/Users/%APPDATA%/spendbranch.exe", true),
+    ] {
+        let mut rig = Rig::new();
+        rig.system.exe = exe.into();
+        if windows {
+            rig.system.platform = spendbranch::infra::system::Platform::Windows;
+        }
+        fs::create_dir_all(rig.dir.path().join(".claude")).unwrap();
+        let out = rig.run(&["hooks", "install", "claude-code"]);
+        assert_eq!(out.code, 1, "{exe}: {}", out.text);
+        assert!(out.text.contains("Move it to a plain path"), "{}", out.text);
+        assert!(
+            !rig.dir.path().join(".claude/settings.json").exists(),
+            "{exe}"
+        );
+    }
+}

@@ -227,6 +227,8 @@ pub fn scheduler_not_removed(why: &str) -> String {
 
 pub const OTEL_WARNING: &str = "Do not turn on OTEL_LOG_USER_PROMPTS, OTEL_LOG_TOOL_DETAILS or OTEL_LOG_RAW_API_BODIES. OpenTelemetry carries no history: `spendbranch sync` stays the source of the final numbers.";
 
+pub const EXE_PATH_UNSAFE: &str = "The path of this program or SPENDBRANCH_HOME has a line break or a character the system would expand (on Windows: \" % $ `). Move it to a plain path and run this again.";
+
 pub const NO_SERVER: &str =
     "No server to pair with: pass `--server URL` or set SPENDBRANCH_SERVER.";
 
