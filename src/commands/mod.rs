@@ -1,6 +1,7 @@
 //! One function per command; they orchestrate, the business rules live elsewhere. Files,
 //! sockets, processes and SQLite are reached only through `infra`.
 mod account;
+mod home;
 mod hook;
 mod hooks;
 mod otel;
@@ -31,6 +32,8 @@ pub struct Ctx<'a> {
     /// Processes and system tools.
     pub system: &'a dyn System,
 }
+
+pub use home::home;
 
 pub(super) type Result<T> = std::result::Result<T, Box<dyn Error>>;
 

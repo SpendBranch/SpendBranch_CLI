@@ -254,6 +254,27 @@ fn a_stop_waits_ten_minutes_after_the_last_sync_but_a_session_end_does_not() {
 }
 
 #[test]
+fn a_sync_that_ended_early_still_holds_the_next_stop_back() {
+    let rig = Rig::ready();
+    let at = spendbranch::contract::Iso::from_millis(rig::now_ms())
+        .unwrap()
+        .to_string();
+    rig.buffer(
+        rig::now_ms(),
+        vec![rig::observation("claude_code", "s", "e1", &at)],
+    );
+    rig.server.configure(|s| {
+        s.ingest
+            .fail_next
+            .push_back((429, "RATE_LIMITED".into(), Some(600)))
+    });
+    assert_eq!(rig.run(&["sync"]).code, 1, "deferred: no sync finished");
+    rig.claude_event("Stop");
+    rig.run(&["hook", "claude-code"]);
+    assert_eq!(spawned(&rig), 0, "a sync was tried a moment ago");
+}
+
+#[test]
 fn codex_never_reads_stdin_and_logs_its_event() {
     let rig = Rig::ready();
     *rig.system.stdin.borrow_mut() = Some(b"{\"last_assistant_message\":\"PRIVATE\"}".to_vec());
@@ -373,4 +394,27 @@ fn on_windows_the_hook_line_is_quoted_for_windows_whatever_runs_the_test() {
         text.contains(r#"\"/opt/spend branch/spendbranch\" hook claude-code"#),
         "{text}"
     );
+}
+
+#[test]
+fn a_program_path_that_would_add_a_command_is_not_written_into_a_hook() {
+    for (exe, windows) in [
+        ("/opt/x\n/bin/evil", false),
+        (r"C:/Users/$(calc)/spendbranch.exe", true),
+        (r"C:/Users/%APPDATA%/spendbranch.exe", true),
+    ] {
+        let mut rig = Rig::new();
+        rig.system.exe = exe.into();
+        if windows {
+            rig.system.platform = spendbranch::infra::system::Platform::Windows;
+        }
+        fs::create_dir_all(rig.dir.path().join(".claude")).unwrap();
+        let out = rig.run(&["hooks", "install", "claude-code"]);
+        assert_eq!(out.code, 1, "{exe}: {}", out.text);
+        assert!(out.text.contains("Move it to a plain path"), "{}", out.text);
+        assert!(
+            !rig.dir.path().join(".claude/settings.json").exists(),
+            "{exe}"
+        );
+    }
 }

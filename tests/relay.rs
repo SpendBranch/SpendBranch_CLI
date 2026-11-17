@@ -24,6 +24,10 @@ use std::{
 
 // --- the server over a real socket ----------------------------------------------------
 
+const TOKEN: &str = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+const AUTH: &str =
+    "X-SpendBranch-Token: 0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef\r\n";
+
 struct Relay {
     port: u16,
     stop: Arc<AtomicBool>,
@@ -48,7 +52,7 @@ impl Relay {
                 sent2.lock().unwrap().push(p.clone());
                 answer(p)
             };
-            relay_server::serve(&listener, &stop2, &forward, &tx).unwrap();
+            relay_server::serve(&listener, &stop2, TOKEN, &forward, &tx).unwrap();
         });
         Self {
             port,
@@ -80,7 +84,12 @@ impl Relay {
         )
     }
 
+    /// A post with the token, as the agent sends it.
     fn post(&self, headers: &str, body: &str) -> (u16, String) {
+        self.post_as(&format!("{AUTH}{headers}"), body)
+    }
+
+    fn post_as(&self, headers: &str, body: &str) -> (u16, String) {
         let req = format!(
             "POST /v1/logs HTTP/1.1\r\nHost: 127.0.0.1:{}\r\nContent-Type: application/json\r\nContent-Length: {}\r\n{headers}\r\n{body}",
             self.port,
@@ -165,7 +174,7 @@ fn bad_requests_get_their_status_and_never_reach_the_forward_step() {
     let p = relay.port;
     let line = |l: &str| {
         format!(
-            "{l}\r\nHost: 127.0.0.1:{p}\r\nContent-Type: application/json\r\nContent-Length: 2\r\n\r\n{{}}"
+            "{l}\r\nHost: 127.0.0.1:{p}\r\n{AUTH}Content-Type: application/json\r\nContent-Length: 2\r\n\r\n{{}}"
         )
     };
     let answers = [
@@ -173,15 +182,15 @@ fn bad_requests_get_their_status_and_never_reach_the_forward_step() {
         ("other path", relay.raw(line("POST /v1/metrics HTTP/1.1").as_bytes()).0, 404),
         ("not HTTP", relay.raw(b"hello\r\n\r\n").0, 400),
         ("bad version", relay.raw(line("POST /v1/logs SPDY/3").as_bytes()).0, 400),
-        ("rebinding", relay.raw(b"POST /v1/logs HTTP/1.1\r\nHost: evil.example\r\nContent-Type: application/json\r\nContent-Length: 2\r\n\r\n{}").0, 403),
+        ("rebinding", relay.raw(format!("POST /v1/logs HTTP/1.1\r\nHost: evil.example\r\n{AUTH}Content-Type: application/json\r\nContent-Length: 2\r\n\r\n{{}}").as_bytes()).0, 403),
         ("origin", relay.post("Origin: http://localhost\r\n", "{}").0, 403),
         ("gzip", relay.post("Content-Encoding: gzip\r\n", "{}").0, 415),
         ("bad json", relay.post("", "{nope").0, 400),
         ("empty", relay.post("", "").0, 400),
-        ("chunked", relay.raw(format!("POST /v1/logs HTTP/1.1\r\nHost: 127.0.0.1:{p}\r\nContent-Type: application/json\r\nTransfer-Encoding: chunked\r\n\r\n0\r\n\r\n").as_bytes()).0, 411),
-        ("huge announced", relay.raw(format!("POST /v1/logs HTTP/1.1\r\nHost: 127.0.0.1:{p}\r\nContent-Type: application/json\r\nContent-Length: 99999999\r\n\r\n").as_bytes()).0, 413),
-        ("two lengths", relay.raw(format!("POST /v1/logs HTTP/1.1\r\nHost: 127.0.0.1:{p}\r\nContent-Type: application/json\r\nContent-Length: 2\r\nContent-Length: 5\r\n\r\n{{}}").as_bytes()).0, 400),
-        ("signed length", relay.raw(format!("POST /v1/logs HTTP/1.1\r\nHost: 127.0.0.1:{p}\r\nContent-Type: application/json\r\nContent-Length: +2\r\n\r\n{{}}").as_bytes()).0, 400),
+        ("chunked", relay.raw(format!("POST /v1/logs HTTP/1.1\r\nHost: 127.0.0.1:{p}\r\n{AUTH}Content-Type: application/json\r\nTransfer-Encoding: chunked\r\n\r\n0\r\n\r\n").as_bytes()).0, 411),
+        ("huge announced", relay.raw(format!("POST /v1/logs HTTP/1.1\r\nHost: 127.0.0.1:{p}\r\n{AUTH}Content-Type: application/json\r\nContent-Length: 99999999\r\n\r\n").as_bytes()).0, 413),
+        ("two lengths", relay.raw(format!("POST /v1/logs HTTP/1.1\r\nHost: 127.0.0.1:{p}\r\n{AUTH}Content-Type: application/json\r\nContent-Length: 2\r\nContent-Length: 5\r\n\r\n{{}}").as_bytes()).0, 400),
+        ("signed length", relay.raw(format!("POST /v1/logs HTTP/1.1\r\nHost: 127.0.0.1:{p}\r\n{AUTH}Content-Type: application/json\r\nContent-Length: +2\r\n\r\n{{}}").as_bytes()).0, 400),
         ("endless head", relay.raw(&[b"POST /v1/logs HTTP/1.1\r\nX: ".as_slice(), &vec![b'a'; 20_000]].concat()).0, 400),
         ("many headers", relay.raw(format!("POST /v1/logs HTTP/1.1\r\nHost: 127.0.0.1:{p}\r\n{}\r\n", "A: b\r\n".repeat(100)).as_bytes()).0, 400),
     ];
@@ -202,7 +211,7 @@ fn bytes_after_the_body_are_not_read_as_part_of_it() {
     );
     // ...and exactly the announced length is read when it is right.
     let req = format!(
-        "POST /v1/logs HTTP/1.1\r\nHost: 127.0.0.1:{}\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{body}TRAILING",
+        "POST /v1/logs HTTP/1.1\r\nHost: 127.0.0.1:{}\r\n{AUTH}Content-Type: application/json\r\nContent-Length: {}\r\n\r\n{body}TRAILING",
         relay.port,
         body.len()
     );
@@ -220,6 +229,111 @@ fn the_61st_batch_in_a_minute_is_refused() {
         }
     }
     assert_eq!(last, 429);
+}
+
+#[test]
+fn without_the_token_nothing_is_signed_and_nothing_is_counted() {
+    let relay = Relay::start(|_| Ok(0));
+    for headers in [
+        "",
+        "X-SpendBranch-Token: nope\r\n",
+        "Authorization: Bearer 0123\r\n",
+    ] {
+        assert_eq!(relay.post_as(headers, &sample()).0, 403, "{headers:?}");
+    }
+    // Two tokens, one of them right: refused, never "the first one wins".
+    assert_eq!(relay.post(AUTH, &sample()).0, 400);
+    // A flood without the token does not use up the agent's 60 a minute.
+    let p = relay.port;
+    for _ in 0..80 {
+        let head = format!(
+            "POST /v1/logs HTTP/1.1\r\nHost: 127.0.0.1:{p}\r\nContent-Type: application/json\r\nContent-Length: 1048576\r\n\r\n"
+        );
+        assert_eq!(relay.raw(head.as_bytes()).0, 403);
+    }
+    assert!(relay.sent.lock().unwrap().is_empty());
+    assert_eq!(relay.post("", &sample()).0, 200);
+}
+
+#[test]
+fn a_client_that_trickles_is_cut_off_when_its_time_is_up() {
+    let relay = Relay::start(|_| Ok(0));
+    let mut slow = TcpStream::connect(("127.0.0.1", relay.port)).unwrap();
+    let mut writer = slow.try_clone().unwrap();
+    // A byte every 4 s: each read is within its own wait, but the request never ends.
+    thread::spawn(move || {
+        while writer.write_all(b"P").is_ok() {
+            thread::sleep(Duration::from_secs(4));
+        }
+    });
+    slow.set_read_timeout(Some(Duration::from_secs(20)))
+        .unwrap();
+    let started = Instant::now();
+    let _ = slow.read(&mut [0u8; 64]); // returns when the relay answers or closes
+    let closed = started.elapsed();
+    assert!(
+        closed < Duration::from_millis(11_500),
+        "cut off after {closed:?}"
+    );
+}
+
+#[test]
+fn a_client_that_trickles_its_headers_gives_its_slot_back_within_seconds() {
+    let relay = Relay::start(|_| Ok(0));
+    let mut slow = TcpStream::connect(("127.0.0.1", relay.port)).unwrap();
+    let mut writer = slow.try_clone().unwrap();
+    thread::spawn(move || {
+        while writer.write_all(b"X").is_ok() {
+            thread::sleep(Duration::from_millis(500));
+        }
+    });
+    slow.set_read_timeout(Some(Duration::from_secs(20)))
+        .unwrap();
+    let started = Instant::now();
+    let _ = slow.read(&mut [0u8; 64]);
+    assert!(
+        started.elapsed() < Duration::from_secs(3),
+        "{:?}",
+        started.elapsed()
+    );
+}
+
+#[test]
+#[cfg(target_os = "linux")]
+fn another_account_is_closed_on_even_with_the_right_token() {
+    // A second account: this user's subordinate ids, through a user namespace. Skipped where
+    // the machine has none (no /etc/subuid entry or no newuidmap).
+    let other = |port: u16, body: &str| {
+        let py = format!(
+            "import socket;b={body:?}.encode();s=socket.create_connection(('127.0.0.1',{port}));\
+             s.sendall(b'POST /v1/logs HTTP/1.1\\r\\nHost: localhost\\r\\n{AUTH}Content-Type: application/json\\r\\nContent-Length: '+str(len(b)).encode()+b'\\r\\n\\r\\n'+b);\
+             s.settimeout(10);print(repr(s.recv(4096)))",
+            AUTH = AUTH.trim_end().replace("\r", "")
+        );
+        Command::new("unshare")
+            .args(["--user", "--map-auto", "--setuid", "1", "--setgid", "1"])
+            .args(["python3", "-I", "-c", &py])
+            .output()
+    };
+    let probe = Command::new("unshare")
+        .args(["--user", "--map-auto", "--setuid", "1", "true"])
+        .status();
+    if !probe.is_ok_and(|s| s.success()) {
+        return;
+    }
+    let relay = Relay::start(|_| Ok(0));
+    let out = other(relay.port, &sample()).unwrap();
+    let said = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        !said.contains("HTTP/1.1"),
+        "answered another account: {said}"
+    );
+    assert!(relay.sent.lock().unwrap().is_empty());
+    assert_eq!(
+        relay.post("", &sample()).0,
+        200,
+        "this account still gets in"
+    );
 }
 
 #[test]
@@ -265,12 +379,25 @@ fn start_program(rig: &Rig, port: u16) -> Child {
     child
 }
 
-fn post_to(port: u16, body: &str) -> (u16, String) {
+/// What `otel` handed the agent: (port, token).
+fn agent_endpoint(rig: &Rig) -> (u16, String) {
+    assert_eq!(rig.run(&["otel", "claude-code"]).code, 0);
+    let store = rig.store();
+    let port = store
+        .meta_get("relay_port")
+        .unwrap()
+        .unwrap()
+        .parse()
+        .unwrap();
+    (port, store.meta_get("relay_token").unwrap().unwrap())
+}
+
+fn post_to(port: u16, token: &str, body: &str) -> (u16, String) {
     let mut stream = TcpStream::connect(("127.0.0.1", port)).unwrap();
     stream
         .set_read_timeout(Some(Duration::from_secs(20)))
         .unwrap();
-    write!(stream, "POST /v1/logs HTTP/1.1\r\nHost: localhost:{port}\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{body}", body.len()).unwrap();
+    write!(stream, "POST /v1/logs HTTP/1.1\r\nHost: localhost:{port}\r\nX-SpendBranch-Token: {token}\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{body}", body.len()).unwrap();
     let mut text = String::new();
     let _ = stream.read_to_string(&mut text);
     (
@@ -300,10 +427,11 @@ fn the_program_forwards_signed_what_passed_the_filter_and_keeps_nothing() {
     let rig = Rig::new();
     authorize(&rig);
     assert_eq!(rig.run(&["login"]).code, 0);
+    let (_, token) = agent_endpoint(&rig);
     let port = free_port();
     let child = start_program(&rig, port);
 
-    let (status, body) = post_to(port, &sample());
+    let (status, body) = post_to(port, &token, &sample());
     assert_eq!((status, body.as_str()), (200, "{}"));
     // The fake server only answers 200 to a request whose signature checks out.
     let received = rig.server.state.lock().unwrap().otlp.received.clone();
@@ -327,7 +455,12 @@ fn the_program_forwards_signed_what_passed_the_filter_and_keeps_nothing() {
     // A server that answers with an error: 502 to the agent, and the drop is announced.
     rig.server
         .configure(|s| s.otlp.fail_next.push_back((503, "UNAVAILABLE".into())));
-    assert_eq!(post_to(port, &sample()).0, 502);
+    assert_eq!(post_to(port, &token, &sample()).0, 502);
+    assert_eq!(
+        post_to(port, "forged", &sample()).0,
+        403,
+        "another process, no token"
+    );
 
     let mut child = child;
     child.0.kill().unwrap();
@@ -372,31 +505,55 @@ fn the_program_forwards_signed_what_passed_the_filter_and_keeps_nothing() {
 }
 
 #[test]
-fn the_program_refuses_a_busy_port_and_an_unpaired_device() {
+fn the_program_refuses_a_busy_port_an_unpaired_device_and_a_missing_otel() {
     let rig = Rig::new();
-    let out = Command::new(env!("CARGO_BIN_EXE_spendbranch"))
-        .args(["relay", "--port", "4999"])
-        .env("SPENDBRANCH_HOME", rig.dir.path())
-        .env("SPENDBRANCH_KEY_STORE", "file")
-        .output()
-        .unwrap();
-    assert_eq!(out.status.code(), Some(1));
-    assert!(String::from_utf8_lossy(&out.stdout).contains("not connected"));
+    let run = |port: Option<u16>| {
+        let mut args = vec!["relay".to_owned()];
+        if let Some(p) = port {
+            args.extend(["--port".into(), p.to_string()]);
+        }
+        let out = Command::new(env!("CARGO_BIN_EXE_spendbranch"))
+            .args(&args)
+            .env("SPENDBRANCH_HOME", rig.dir.path())
+            .env("SPENDBRANCH_KEY_STORE", "file")
+            .output()
+            .unwrap();
+        (
+            out.status.code(),
+            String::from_utf8_lossy(&out.stdout).into_owned(),
+        )
+    };
+    let (code, said) = run(Some(4999));
+    assert_eq!(code, Some(1));
+    assert!(said.contains("not connected"), "{said}");
 
     authorize(&rig);
     assert_eq!(rig.run(&["login"]).code, 0);
+    let (code, said) = run(None);
+    assert_eq!(code, Some(1));
+    assert!(
+        said.contains("Run `spendbranch otel claude-code` first"),
+        "{said}"
+    );
+
     let held = TcpListener::bind("127.0.0.1:0").unwrap();
     let port = held.local_addr().unwrap().port();
-    let out = Command::new(env!("CARGO_BIN_EXE_spendbranch"))
-        .args(["relay", "--port", &port.to_string()])
-        .env("SPENDBRANCH_HOME", rig.dir.path())
-        .env("SPENDBRANCH_KEY_STORE", "file")
-        .output()
-        .unwrap();
-    assert_eq!(out.status.code(), Some(1));
-    let said = String::from_utf8_lossy(&out.stdout);
+    let (_, _) = agent_endpoint(&rig);
+    let (code, said) = run(Some(port));
+    assert_eq!(code, Some(1));
     assert!(
-        said.contains(&format!("Cannot listen on 127.0.0.1:{port}")),
+        said.contains(&format!("Cannot listen on 127.0.0.1:{port}")) && said.contains("--port"),
+        "{said}"
+    );
+    // The agent's own port taken by someone else: said plainly, with the way out.
+    rig.store()
+        .meta_set("relay_port", &port.to_string())
+        .unwrap();
+    let (code, said) = run(None);
+    assert_eq!(code, Some(1));
+    assert!(
+        said.contains("Another program holds the port Claude Code sends to")
+            && said.contains("run `spendbranch otel claude-code` again"),
         "{said}"
     );
 }

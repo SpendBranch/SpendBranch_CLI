@@ -1,16 +1,121 @@
 //! Command line behaviour: help, exit codes and the answers that need no network.
 //! Everything runs against a temporary data folder, never the real one.
-use spendbranch::cli::{self, messages};
+use spendbranch::cli::{self, Io, messages};
+use spendbranch::infra::system::{Platform, Ran, System};
 use spendbranch::infra::{lock, paths, store::Store};
-use std::{path::Path, process::Command};
+use std::{
+    io,
+    path::{Path, PathBuf},
+    process::Command,
+};
+
+/// A system that never starts anything: no tools, no executable path, no keyboard.
+struct Inert;
+
+impl System for Inert {
+    fn platform(&self) -> Platform {
+        Platform::current()
+    }
+    fn exe(&self) -> io::Result<PathBuf> {
+        Err(io::Error::other("no executable path in this mode"))
+    }
+    fn stdin_brief(&self) -> Option<Vec<u8>> {
+        None
+    }
+    fn spawn_detached(&self, _: &Path, _: &[&str], _: &Path) -> io::Result<()> {
+        Ok(())
+    }
+    fn run(&self, _: &str, _: &[&str], _: Option<&str>) -> io::Result<Ran> {
+        Err(io::Error::new(
+            io::ErrorKind::NotFound,
+            "no tools in this mode",
+        ))
+    }
+    fn stopped(&self) -> bool {
+        true
+    }
+}
+
+/// Runs the command line with only these variables set; `tty` says whether it is a terminal.
+fn run_env(args: &[&str], vars: &[(&str, &str)], tty: bool) -> (i32, String) {
+    let args: Vec<String> = args.iter().map(|a| a.to_string()).collect();
+    let vars: Vec<(String, String)> = vars
+        .iter()
+        .map(|(k, v)| (k.to_string(), v.to_string()))
+        .collect();
+    let env = move |k: &str| vars.iter().find(|(n, _)| n == k).map(|(_, v)| v.clone());
+    let mut out = Vec::new();
+    let code = cli::run_with(
+        &args,
+        &env,
+        &mut Io {
+            out: &mut out,
+            input: &mut io::empty(),
+            sleep: &|_| {},
+            open_url: &|_| {},
+            interactive: tty,
+            system: &Inert,
+        },
+    );
+    (code, String::from_utf8(out).unwrap())
+}
 
 fn run_in(home: &Path, args: &[&str]) -> (i32, String) {
-    let args: Vec<String> = args.iter().map(|a| a.to_string()).collect();
-    let home = home.to_str().unwrap().to_string();
-    let env = move |k: &str| (k == "SPENDBRANCH_HOME").then(|| home.clone());
-    let mut out = Vec::new();
-    let code = cli::run(&args, &env, &mut out);
-    (code, String::from_utf8(out).unwrap())
+    run_env(args, &[("SPENDBRANCH_HOME", home.to_str().unwrap())], false)
+}
+
+/// `spendbranch` alone, on a terminal, with a fresh data folder.
+fn home_screen(vars: &[(&str, &str)]) -> String {
+    let dir = tempfile::tempdir().unwrap();
+    let mut vars = vars.to_vec();
+    vars.push(("SPENDBRANCH_HOME", dir.path().to_str().unwrap()));
+    let (code, out) = run_env(&[], &vars, true);
+    assert_eq!(code, 0);
+    out
+}
+
+#[test]
+fn the_owl_on_a_terminal_is_colored_only_where_truecolor_is_known_to_work() {
+    let escapes = |vars: &[(&str, &str)]| home_screen(vars).contains('\x1b');
+    assert!(escapes(&[("COLORTERM", "truecolor")]));
+    assert!(escapes(&[
+        ("COLORTERM", "24bit"),
+        ("TERM", "xterm-256color")
+    ]));
+    assert!(!escapes(&[]), "no COLORTERM: no promise of truecolor");
+    assert!(escapes(&[("WT_SESSION", "0c1d2e3f")]), "Windows Terminal");
+    assert!(!escapes(&[("COLORTERM", "truecolor"), ("TERM", "dumb")]));
+    assert!(!escapes(&[("COLORTERM", "truecolor"), ("NO_COLOR", "1")]));
+    let plain = home_screen(&[]);
+    assert!(
+        plain.contains("( @ )"),
+        "the owl keeps its shape without color"
+    );
+}
+
+#[test]
+fn the_start_screen_points_to_setup_and_to_the_help_without_creating_the_data_folder() {
+    let dir = tempfile::tempdir().unwrap();
+    let home = dir.path().join("data");
+    let (code, out) = run_env(&[], &[("SPENDBRANCH_HOME", home.to_str().unwrap())], true);
+    assert_eq!(code, 0);
+    assert!(
+        out.contains("Not connected") && out.contains("spendbranch setup"),
+        "{out}"
+    );
+    assert!(out.contains("--help` for all commands"), "{out}");
+    assert!(
+        !home.exists(),
+        "looking at the start screen created the data folder"
+    );
+}
+
+#[test]
+fn the_help_does_not_point_to_itself_and_has_no_owl() {
+    let (_, out) = run_env(&["--help"], &[("COLORTERM", "truecolor")], true);
+    assert!(!out.contains("for all commands"), "{out}");
+    assert!(!out.contains("( @ )"), "{out}");
+    assert!(out.contains("─"), "a terminal gets the rules");
 }
 
 fn run(args: &[&str]) -> (i32, String) {
@@ -19,21 +124,47 @@ fn run(args: &[&str]) -> (i32, String) {
 
 #[test]
 fn no_command_or_help_flag_prints_the_help_and_exits_0() {
-    for args in [&[][..], &["--help"], &["-h"], &["nope", "--help"]] {
+    for args in [
+        &[][..],
+        &["--help"],
+        &["-h"],
+        &["nope", "--help"],
+        &["hook", "--help"],
+    ] {
         let (code, out) = run(args);
         assert_eq!(code, 0, "{args:?}");
-        assert!(out.starts_with(&format!("spendbranch {}\n\nUsage:\n", cli::VERSION)));
+        assert!(
+            out.starts_with(&format!("spendbranch {} ", cli::VERSION)),
+            "{out}"
+        );
         for line in [
-            "spendbranch setup [--server URL] [--source claude-code|codex] [--relogin]",
-            "spendbranch hooks uninstall codex",
-            "spendbranch otel <source>",
-            "spendbranch relay [--port N]",
-            "spendbranch --version",
-            "Prompts, responses, code, and paths never leave the device.",
+            "GET STARTED",
+            "  setup                    connect this device",
+            "  hooks uninstall <agent>",
+            "  otel <agent>",
+            "  relay [--port N]",
+            "Prompts, responses, code, and paths",
+            "Run `spendbranch <command> --help` for details.",
         ] {
             assert!(out.contains(line), "help lacks: {line}");
         }
+        assert!(
+            !out.contains('\x1b') && !out.contains('─'),
+            "piped help is plain"
+        );
     }
+}
+
+#[test]
+fn a_command_with_help_shows_its_own_help_and_runs_nothing() {
+    let dir = tempfile::tempdir().unwrap();
+    let (code, out) = run_in(dir.path(), &["setup", "--help"]);
+    assert_eq!(code, 0);
+    assert!(out.starts_with("spendbranch setup [--server URL]"), "{out}");
+    assert!(out.contains("--relogin"), "{out}");
+    assert!(!dir.path().join("state.db").exists(), "setup ran");
+    let (_, out) = run(&["logout", "-h"]);
+    assert!(out.starts_with("spendbranch logout\n"), "{out}");
 }
 
 #[test]
@@ -43,10 +174,16 @@ fn version_wins_over_everything() {
 }
 
 #[test]
-fn unknown_command_option_or_bad_value_is_a_usage_error() {
+fn unknown_command_option_or_bad_value_is_a_short_usage_error() {
+    let (code, out) = run(&["stauts"]);
+    assert_eq!(code, 2);
+    assert_eq!(
+        out,
+        "error: unknown command 'stauts'\n  Did you mean `spendbranch status`?\n\nRun `spendbranch --help` to see all commands.\n"
+    );
     let (code, out) = run(&["frobnicate"]);
     assert_eq!(code, 2);
-    assert!(out.starts_with("Unknown command: frobnicate.\n\nspendbranch "));
+    assert!(!out.contains("Did you mean"), "{out}");
     for args in [
         &["--nope"][..],
         &["login", "--server"],
@@ -55,7 +192,9 @@ fn unknown_command_option_or_bad_value_is_a_usage_error() {
     ] {
         let (code, out) = run(args);
         assert_eq!(code, 2, "{args:?}");
-        assert!(out.contains("Usage:"), "{args:?}: help follows the message");
+        assert!(out.starts_with("error: "), "{args:?}: {out}");
+        assert!(out.contains("`spendbranch --help`"), "{args:?}: {out}");
+        assert!(out.lines().count() <= 3, "{args:?}: the help is not dumped");
     }
 }
 

@@ -6,8 +6,10 @@ use std::{fs, path::Path};
 const PURE: &[&str] = &[
     "src/sources",
     "src/cli/args.rs",
+    "src/cli/mascot.rs",
     "src/cli/messages.rs",
     "src/cli/render.rs",
+    "src/cli/screen.rs",
     "src/contract",
     "src/auth.rs",
     "src/api",

@@ -145,6 +145,19 @@ fn network_shares_are_recognized_in_every_spelling() {
         r"\\?\UNC\server\share",
         r"\\.\UNC\server\share",
         r"\\server",
+        // case and device spellings Windows reads as the same share
+        r"\\?\unc\server\share",
+        r"\\.\unc\server\share",
+        "//?/Unc/server/share/repo",
+        r"\\?\GLOBALROOT\Device\Mup\server\share",
+        r"\\.\pipe\name",
+        r"\\?\",
+        r"\\?\C",
+        // NT paths Win32 passes through, and a drive that climbs out with `..`
+        r"\??\UNC\server\share",
+        "/??/UNC/server/share",
+        r"\\.\C:\..\UNC\server\share",
+        r"\\?\C:\work\..\..\UNC\server",
     ] {
         assert!(is_network_path(share), "{share}");
     }
@@ -153,6 +166,9 @@ fn network_shares_are_recognized_in_every_spelling() {
         "C:/work/repo",
         r"\\?\C:\work\repo",
         r"\\.\C:\work",
+        r"\\?\d:\work",
+        "//?/C:/work",
+        r"\\?\C:",
         "/home/dev/repo",
         "relative/dir",
         "",

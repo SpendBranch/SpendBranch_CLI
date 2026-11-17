@@ -5,7 +5,7 @@ use crate::auth::{DeviceId, DeviceKey};
 use crate::cli::{VERSION, messages as m};
 use crate::contract::Iso;
 use crate::infra::{
-    clock::{Clock, SystemClock},
+    clock,
     http::{Client, Signer},
     keys::{self, KeyStore, Slot},
     store::Store,
@@ -16,7 +16,7 @@ const LOGOUT: &str = "/api/cli/v1/logout";
 const STATUS: &str = "/api/cli/v1/status";
 
 pub(super) fn now() -> Iso {
-    Iso::from_millis(SystemClock.now_ms()).unwrap_or(Iso::EPOCH)
+    Iso::from_millis(clock::now_ms()).unwrap_or(Iso::EPOCH)
 }
 
 /// The data folder, the database and the key store, opened.
@@ -80,18 +80,25 @@ pub(super) fn load(account: &Account) -> Result<Loaded> {
 }
 
 pub(super) fn failure(ctx: &mut Ctx, f: &ApiFailure) -> Result<i32> {
-    say(ctx, &m::failure_text(f, SystemClock.now_ms()), 1)
+    say(ctx, &m::failure_text(f, clock::now_ms()), 1)
 }
 
 pub(super) fn status_of(c: &Connection) -> std::result::Result<StatusView, ApiFailure> {
+    raw_status(c, Client::new(c.server.clone(), VERSION))?
+        .checked()
+        .ok_or_else(|| ApiFailure::bad_response(200))
+}
+
+/// The status as the server sent it, before validation.
+pub(super) fn raw_status(
+    c: &Connection,
+    client: Client,
+) -> std::result::Result<CliStatus, ApiFailure> {
     let signer = Signer {
         device: &c.device,
         key: &c.key,
     };
-    Client::new(c.server.clone(), VERSION)
-        .get::<CliStatus>(STATUS, Some(&signer))?
-        .checked()
-        .ok_or_else(|| ApiFailure::bad_response(200))
+    client.get::<CliStatus>(STATUS, Some(&signer))
 }
 
 pub(super) fn fetch_status(c: &Connection) -> std::result::Result<StatusView, String> {
@@ -99,7 +106,7 @@ pub(super) fn fetch_status(c: &Connection) -> std::result::Result<StatusView, St
         if f.code == "BAD_RESPONSE" {
             m::BAD_STATUS.to_owned()
         } else {
-            m::failure_text(&f, SystemClock.now_ms())
+            m::failure_text(&f, clock::now_ms())
         }
     })
 }

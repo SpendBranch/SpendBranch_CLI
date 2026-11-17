@@ -132,30 +132,3 @@ impl System for Real {
         false
     }
 }
-
-/// For `cli::run`, which must never start anything.
-pub struct Inert;
-
-impl System for Inert {
-    fn platform(&self) -> Platform {
-        Platform::current()
-    }
-    fn exe(&self) -> io::Result<PathBuf> {
-        Err(io::Error::other("no executable path in this mode"))
-    }
-    fn stdin_brief(&self) -> Option<Vec<u8>> {
-        None
-    }
-    fn spawn_detached(&self, _: &Path, _: &[&str], _: &Path) -> io::Result<()> {
-        Ok(())
-    }
-    fn run(&self, _: &str, _: &[&str], _: Option<&str>) -> io::Result<Ran> {
-        Err(io::Error::new(
-            io::ErrorKind::NotFound,
-            "no tools in this mode",
-        ))
-    }
-    fn stopped(&self) -> bool {
-        true
-    }
-}

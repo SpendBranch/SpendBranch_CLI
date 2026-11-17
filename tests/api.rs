@@ -224,6 +224,25 @@ fn an_approval_with_bad_data_is_refused() {
     // what the terminal would obey, or what flips the text direction
     assert!(approved("dev-1", "2027-02-01T00:00:00Z", "org", "Acme\\u001b[31m").is_none());
     assert!(approved("dev-1", "2027-02-01T00:00:00Z", "org", "Acme\\u202eevil").is_none());
+    // the Arabic letter mark, other invisible format characters, line and paragraph separators
+    for hidden in [
+        "\\u061c", "\\u00ad", "\\u2060", "\\u180e", "\\u2028", "\\u2029",
+    ] {
+        let name = format!("Ac{hidden}me");
+        assert!(
+            approved("dev-1", "2027-02-01T00:00:00Z", "org", &name).is_none(),
+            "{hidden}"
+        );
+    }
+    assert!(
+        approved(
+            "dev-1",
+            "2027-02-01T00:00:00Z",
+            "org",
+            "Açaí Ünïcode 株式会社"
+        )
+        .is_some()
+    );
     assert!(approved("dev-1", "2027-02-01T00:00:00Z", "org", &"x".repeat(201)).is_none());
     // and a token is not part of the contract any more: nothing for it to be read into
     assert!(poll(r#"{"status":"approved","token":"sbd_x"}"#).is_none());
@@ -305,4 +324,17 @@ fn failures_do_not_print_server_text() {
         None,
     );
     assert!(!f.to_string().contains("secret detail"));
+}
+
+#[test]
+fn only_a_development_build_has_a_default_server() {
+    assert_eq!(
+        spendbranch::api::default_server(true),
+        Some("http://localhost:5173")
+    );
+    assert_eq!(
+        spendbranch::api::default_server(false),
+        None,
+        "a release pairs only with a server it was told"
+    );
 }

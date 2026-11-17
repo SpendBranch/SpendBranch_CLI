@@ -283,6 +283,43 @@ fn only_our_command_lines_are_recognised() {
     assert!(!is_ours(CLAUDE, "'/x/spendbranch' hook codex Stop"));
     assert!(is_ours(CODEX, "'/x/spendbranch' hook codex Stop"));
     assert!(!is_ours(CODEX, "'/x/spendbranch' hook claude-code"));
+    // other people's hooks that only mention the name
+    assert!(!is_ours(
+        CLAUDE,
+        "notify-send spendbranch-done hook claude-code"
+    ));
+    assert!(!is_ours(CODEX, "audit --tag spendbranch hook codex Stop"));
+    assert!(!is_ours(
+        CLAUDE,
+        "'/x/spendbranch' hook claude-code; rm -rf ~"
+    ));
+    assert!(is_ours(
+        CLAUDE,
+        "'/opt/dl/spendbranch-x86_64-linux' hook claude-code"
+    ));
+    assert!(!is_ours(CLAUDE, "'/x/spend-branch' hook claude-code"));
+    assert!(!is_ours(CLAUDE, "'/x/spendbranch hook claude-code"));
+    // ours, as every system's `command` writes it
+    assert!(is_ours(
+        CLAUDE,
+        &command(
+            "/home/o'neil/spend branch/spendbranch",
+            false,
+            "hook claude-code"
+        )
+    ));
+    assert!(is_ours(
+        CLAUDE,
+        &command(
+            r"C:\Program Files\SpendBranch\spendbranch.exe",
+            true,
+            "hook claude-code"
+        )
+    ));
+    assert!(is_ours(
+        CODEX,
+        &command("/x/spendbranch", false, "hook codex SessionEnd")
+    ));
 }
 
 #[test]
@@ -379,5 +416,32 @@ fn the_end_of_a_session_always_syncs_and_the_rest_waits_ten_minutes() {
     assert!(
         hooks::due(Some("Stop"), ago(-5 * min), now),
         "a clock that went back must not block forever"
+    );
+}
+
+#[test]
+fn a_binary_under_any_name_keeps_one_entry_per_event_and_finds_it_again() {
+    for exe in ["/opt/dl/spendbranch-x86_64-linux", "/usr/local/bin/sb"] {
+        let once = written(install(CLAUDE, None, exe, false));
+        assert_eq!(
+            install(CLAUDE, Some(&once), exe, false),
+            Ok(Plan::Unchanged),
+            "{exe}: a second install changes nothing"
+        );
+        assert_eq!(
+            state(CLAUDE, Some(&once), exe, false),
+            State::Installed,
+            "{exe}"
+        );
+    }
+    let named = written(install(
+        CLAUDE,
+        None,
+        "/opt/dl/spendbranch-x86_64-linux",
+        false,
+    ));
+    assert_eq!(
+        json_of(&written(uninstall(CLAUDE, Some(&named)))),
+        json!({})
     );
 }

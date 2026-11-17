@@ -98,13 +98,15 @@ pub struct Approval {
     pub organization_name: String,
 }
 
-/// Text the server chose that we will print: no control or invisible-direction characters.
+/// Text the server chose that we will print: no control (Cc), format (Cf: direction marks,
+/// zero-width characters, the Arabic letter mark...) or line/paragraph separator (Zl, Zp).
 pub(super) fn printable(text: &str, max_chars: usize) -> bool {
     let n = text.chars().count();
     (1..=max_chars).contains(&n)
         && text.chars().all(|c| {
             !c.is_control()
-                && !matches!(c, '\u{200B}'..='\u{200F}' | '\u{202A}'..='\u{202E}' | '\u{2066}'..='\u{2069}' | '\u{FEFF}')
+                && !crate::contract::text::is_format_char(c)
+                && !matches!(c, '\u{2028}' | '\u{2029}')
         })
 }
 

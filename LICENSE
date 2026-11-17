@@ -1,15 +1,25 @@
-SpendBranch Source-Available Audit License, version 1.0
+SpendBranch Source-Available Audit License, version 1.1
 
 Copyright (c) 2026 SpendBranch. All rights reserved.
 
-This repository is public so that anyone can inspect, in full, the software
-that SpendBranch asks them to install on their machine. It is source-available
-for auditing. It is NOT open source software.
+IN SHORT (this summary is part of the license; sections 1 to 11 give the
+detail):
+
+- This code is public ONLY so that anyone can check what the SpendBranch CLI
+  does before installing it on their machine. Being able to see it does not
+  mean you may use it.
+- It is NOT open source. It is proprietary software that you may read.
+- You may NOT copy it, reuse it, fork it, or take any part of it (code,
+  structure, design or logic) into another project, whether yours or anyone
+  else's, commercial or not.
+- You may NOT use it to train, fine-tune, evaluate or improve any artificial
+  intelligence or machine learning model, or put it in any dataset.
 
 1. DEFINITIONS
 
 "Software" means everything in this repository: source code, schemas, test
-fixtures, build and CI configuration, and documentation.
+fixtures, test vectors, build and CI configuration, and documentation, and
+any part, excerpt or translation of it.
 
 "SpendBranch" means the owner of this repository and its authorized
 representatives.
@@ -22,73 +32,112 @@ Software in order to understand what it does, to assess its security and
 privacy properties, or to confirm that an Official Binary corresponds to this
 source code.
 
+"AI System" means any artificial intelligence or machine learning model or
+system, including large language models, code generation models and code
+assistants, and any dataset, corpus, index or embedding store used to build,
+train, tune, evaluate or feed one.
+
 2. WHAT YOU MAY DO
 
 You may, free of charge and for an Audit Purpose only:
 
 a. view, read, search and analyze the Software, including with automated
-   analysis tools;
+   analysis tools (such as linters, scanners, debuggers, or an AI assistant
+   you direct to review it), subject to section 4;
 b. download an unmodified copy of the Software, build it unmodified on your own
    machines, and run its tests and the resulting build, solely to carry out the
    audit (including comparing the result with an Official Binary);
 c. quote short excerpts of the Software, with attribution, in security
-   reports, research, reviews and technical discussion;
+   reports, research, reviews and technical discussion about the Software;
 d. report issues, vulnerabilities and suggestions to SpendBranch.
+
+Nothing else is permitted. If a use is not listed in this section, it is not
+allowed.
 
 3. WHAT YOU MAY NOT DO
 
 Except as SpendBranch expressly permits in writing, you may not:
 
 a. use the Software, or anything derived from it, for any commercial purpose,
-   or in any product or service, whether or not you charge for it;
+   or in any product, service or project, whether or not you charge for it;
 b. fork the Software, or create any derivative work from it;
-c. modify, adapt, translate, port or patch the Software, other than the
-   temporary, local, unredistributed changes strictly needed to run an audit
-   (for example, adding logging to observe behavior), which you must discard
-   when the audit ends;
-d. copy, publish, host, distribute, sublicense, sell, lease or otherwise make
-   the Software available to anyone else, in source or binary form, in whole
-   or in part (other than the excerpts allowed in section 2c);
-e. run or deploy a build you made yourself as a substitute for an Official
+c. copy, reuse or reimplement the Software, in whole or in part, in any other
+   software, including by copying, retyping, translating it into another
+   programming language, or closely reproducing its code, structure, sequence,
+   organization, protocols or logic;
+d. modify, adapt, port or patch the Software, other than the temporary, local,
+   unredistributed changes strictly needed to run an audit (for example,
+   adding logging to observe behavior), which you must discard when the audit
+   ends;
+e. copy, publish, host, mirror, distribute, sublicense, sell, lease or
+   otherwise make the Software available to anyone else, in source or binary
+   form, in whole or in part (other than the excerpts allowed in section 2c);
+f. run or deploy a build you made yourself as a substitute for an Official
    Binary, or offer one to others;
-f. remove or alter any copyright, license or attribution notice;
-g. use the SpendBranch name, logos or marks to endorse or promote anything
+g. remove or alter any copyright, license or attribution notice;
+h. use the SpendBranch name, logos or marks to endorse or promote anything
    without permission.
 
 Using an Official Binary is governed by the terms under which SpendBranch
 provides it, not by this license.
 
-4. GITHUB AND OTHER HOSTING PLATFORMS
+4. ARTIFICIAL INTELLIGENCE AND MACHINE LEARNING
+
+The Software may not be used by, for, or to build any AI System. In
+particular, you may not, and you may not allow or help anyone else to:
+
+a. use the Software, in whole or in part, to train, pre-train, fine-tune,
+   distill, align, evaluate or benchmark any AI System, or to otherwise
+   improve one;
+b. include the Software in any dataset, corpus, archive, index or embedding
+   store that is, or may be, used for any purpose listed in 4a;
+c. scrape, crawl, download or collect the Software for any purpose listed in
+   4a or 4b;
+d. use the Software as retrieval or reference material from which an AI
+   System generates code or content for anyone other than an auditor carrying
+   out an Audit Purpose.
+
+Using an AI assistant to help you audit the Software, as allowed in section
+2a, is permitted only if the provider of that assistant does not keep the
+Software or use it for any purpose listed in 4a or 4b.
+
+This section applies to everyone, including operators of AI Systems and of
+the crawlers and services that collect data for them, and it applies whether
+the Software was obtained from this repository, from a fork, mirror, cache or
+archive, or from any other source.
+
+5. GITHUB AND OTHER HOSTING PLATFORMS
 
 The terms of a hosting platform may let users view or fork public
 repositories using that platform's features. Those platform features do not
 grant you any license to the Software beyond this license. A fork made with a
-platform feature is still subject to this license, and sections 3b and 3d
-still apply to it.
+platform feature is still subject to this license, and sections 3 and 4 still
+apply to it. Making the repository public is not consent to any use not
+listed in section 2.
 
-5. THIRD-PARTY COMPONENTS
+6. THIRD-PARTY COMPONENTS
 
 This license covers only the material SpendBranch owns. Third-party
 dependencies are not part of the Software; each one stays under its own
 license.
 
-6. FEEDBACK
+7. FEEDBACK
 
 If you send SpendBranch feedback, suggestions or reports, SpendBranch may use
 them without restriction and without any obligation to you.
 
-7. NO RIGHTS BEYOND THIS LICENSE
+8. NO RIGHTS BEYOND THIS LICENSE
 
 SpendBranch keeps all rights not expressly granted here. No patent license is
 granted. Nothing in this license transfers ownership of the Software to you.
 
-8. TERMINATION
+9. TERMINATION
 
 This license ends automatically, without notice, if you breach any of its
 terms. When it ends you must stop all use of the Software and delete every
-copy you hold. Sections 3 to 9 survive termination.
+copy you hold. Sections 3 to 10 survive termination.
 
-9. DISCLAIMER AND LIMITATION OF LIABILITY
+10. DISCLAIMER AND LIMITATION OF LIABILITY
 
 THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
 IMPLIED, INCLUDING THE WARRANTIES OF MERCHANTABILITY, FITNESS FOR A PARTICULAR
@@ -96,7 +145,7 @@ PURPOSE AND NON-INFRINGEMENT. TO THE MAXIMUM EXTENT PERMITTED BY LAW,
 SPENDBRANCH IS NOT LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY ARISING
 FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR ITS USE.
 
-10. CONTACT
+11. CONTACT
 
 To request permission for anything this license does not allow, contact
 SpendBranch through the channels published on its official website.

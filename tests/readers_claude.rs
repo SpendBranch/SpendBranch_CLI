@@ -677,6 +677,51 @@ fn a_repository_comes_from_the_folder_and_the_folder_never_leaves() {
 }
 
 #[test]
+fn the_repository_is_the_sessions_folder_not_a_cwd_nested_in_the_message() {
+    if std::process::Command::new("git")
+        .arg("--version")
+        .output()
+        .is_err()
+    {
+        return; // no git on this machine
+    }
+    let mut rig = Rig::new();
+    let repo = |name: &str, url: &str| {
+        let dir = rig.root.path().join(name);
+        fs::create_dir_all(&dir).unwrap();
+        for args in [&["init", "-q"][..], &["remote", "add", "origin", url]] {
+            let ok = std::process::Command::new("git")
+                .args(args)
+                .current_dir(&dir)
+                .status()
+                .unwrap();
+            assert!(ok.success());
+        }
+        dir.to_string_lossy().into_owned()
+    };
+    let real = repo("real", "https://github.com/acme/portal.git");
+    let forged = repo("forged", "https://github.com/attacker/forged.git");
+    // As in real transcripts: `message` (here with a tool input that has its own `cwd`) comes
+    // before the session's `cwd`.
+    let line = json!({
+        "type": "assistant", "sessionId": "s1", "requestId": "r1",
+        "timestamp": "2026-06-01T10:00:00Z", "version": "2.1.300",
+        "message": {"id": "m_r1", "model": "claude-test-1",
+            "content": [{"type": "tool_use", "name": "Bash", "input": {"cwd": forged}}],
+            "usage": {"input_tokens": 10, "output_tokens": 5,
+                      "cache_read_input_tokens": 0, "cache_creation_input_tokens": 0}},
+        "cwd": real,
+    })
+    .to_string();
+    write(&rig.path("p/s1.jsonl"), &[line]);
+    let out = rig.collect();
+    assert_eq!(
+        out.observations[0].repository.as_ref().unwrap().as_str(),
+        "github.com/acme/portal"
+    );
+}
+
+#[test]
 fn nothing_is_saved_until_the_store_commits() {
     let mut rig = Rig::new();
     write(

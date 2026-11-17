@@ -216,18 +216,36 @@ fn refused(
             dropped_batch(ctx, store)?;
             Ok(Flow::Again)
         }
+        // The coverage may be what is too big: it goes alone first, so no event is blamed for it.
+        Failed::Split if !sent.items.is_empty() && !sent.coverage.is_empty() => {
+            *max_items = 0;
+            Ok(Flow::Again)
+        }
         Failed::Split if sent.items.len() > 1 => {
             *max_items = sent.items.len().div_ceil(2);
             Ok(Flow::Again)
         }
         Failed::Split => {
-            // One observation the server finds too big: it can never be sent.
-            tally.add("INVALID_LOCAL", 1);
-            store.apply(&Change {
-                remove_items: vec![sent.items[0].id],
-                rejected: vec![("INVALID_LOCAL".into(), 1)],
-                ..Change::default()
-            })?;
+            // One observation the server finds too big: it can never be sent. With none, the
+            // coverage alone was too big: it goes, or every run would fail on it again.
+            let change = match sent.items.first() {
+                Some(item) => {
+                    tally.add("INVALID_LOCAL", 1);
+                    Change {
+                        remove_items: vec![item.id],
+                        rejected: vec![("INVALID_LOCAL".into(), 1)],
+                        ..Change::default()
+                    }
+                }
+                None => {
+                    *max_items = crate::contract::MAX_BATCH_OBSERVATIONS;
+                    Change {
+                        remove_coverage: sent.coverage,
+                        ..Change::default()
+                    }
+                }
+            };
+            store.apply(&change)?;
             Ok(Flow::Again)
         }
         _ => Ok(Flow::Stop(stop(ctx, store, f)?)),
@@ -288,15 +306,22 @@ enum Pass {
     Done(Option<i32>),
 }
 
-/// `true` (after saying so) while `nextAttemptAt` is still in the future.
+/// `true` (after saying so) while `nextAttemptAt` is still in the future. One further out than
+/// any server may ask for was saved under a clock that ran ahead: it is forgotten, or uploads
+/// would stop for as long as the clock was wrong.
 fn deferred(ctx: &mut Ctx, store: &Store) -> Result<bool> {
+    let now = ms();
     let Some(next) = store
         .sync_get("nextAttemptAt")?
         .and_then(|t| Iso::parse(&t))
-        .filter(|t| t.millis() > ms())
+        .filter(|t| t.millis() > now)
     else {
         return Ok(false);
     };
+    if next.millis() - now > rules::MAX_DEFER_MS {
+        store.sync_delete(&["nextAttemptAt"])?;
+        return Ok(false);
+    }
     let (waiting, _) = store.pending_counts()?;
     writeln!(
         ctx.out,
@@ -401,6 +426,10 @@ fn pass(
     };
     let applied = rules::apply_results(sent().items, &outcomes, ms());
     record(store, tally, sent(), &applied)?;
+    if *max_items == 0 {
+        // The coverage went alone; the events are next, in full batches again.
+        *max_items = crate::contract::MAX_BATCH_OBSERVATIONS;
+    }
     if applied.session_owned.is_some() {
         // A session that is not this member's: its buffer is gone, and the run stops here.
         summary(ctx, tally)?;

@@ -4,7 +4,11 @@ use lexopt::prelude::*;
 /// What the command line asked for.
 #[derive(Debug, PartialEq, Eq)]
 pub enum Parsed {
+    /// No arguments at all: the start screen on a terminal, the help otherwise.
+    Home,
     Help,
+    /// `<command> --help`.
+    CommandHelp(&'static str),
     Version,
     /// A word that is not a command.
     Unknown(String),
@@ -41,7 +45,7 @@ pub enum Command {
     Logout,
 }
 
-/// `Err` carries a usage message; the caller prints it with the help and exits 2.
+/// `Err` carries what was wrong; the caller prints it as a usage error and exits 2.
 pub fn parse(args: &[String]) -> Result<Parsed, String> {
     let (mut server, mut source, mut port) = (None, None, None);
     let (mut relogin, mut version, mut help) = (false, false, false);
@@ -65,6 +69,11 @@ pub fn parse(args: &[String]) -> Result<Parsed, String> {
     }
     let mut pos = positionals.into_iter();
     let (command, a1, a2) = (pos.next(), pos.next(), pos.next());
+    if help {
+        return Ok(command
+            .and_then(|c| COMMANDS.into_iter().find(|k| *k == c))
+            .map_or(Parsed::Help, Parsed::CommandHelp));
+    }
     let run = match command.as_deref() {
         Some("login") => Command::Login { server },
         Some("setup") => Command::Setup {
@@ -91,8 +100,55 @@ pub fn parse(args: &[String]) -> Result<Parsed, String> {
                 .transpose()?,
         },
         Some("logout") => Command::Logout,
-        Some(other) if !help => return Ok(Parsed::Unknown(other.to_string())),
-        _ => return Ok(Parsed::Help),
+        Some(other) => return Ok(Parsed::Unknown(other.to_string())),
+        None => return Ok(Parsed::Home),
     };
     Ok(Parsed::Run(run))
+}
+
+/// The commands a person types (`hook` is the agents' own, so it is left out).
+pub const COMMANDS: [&str; 10] = [
+    "setup", "login", "status", "sync", "enable", "disable", "hooks", "otel", "relay", "logout",
+];
+
+/// The command a typo most likely meant: at most 2 edits away.
+pub fn suggest(word: &str) -> Option<&'static str> {
+    COMMANDS
+        .into_iter()
+        .map(|c| (distance(word, c), c))
+        .filter(|(d, _)| *d <= 2)
+        .min_by_key(|(d, _)| *d)
+        .map(|(_, c)| c)
+}
+
+/// Levenshtein distance, one row at a time.
+fn distance(a: &str, b: &str) -> usize {
+    let b: Vec<char> = b.chars().collect();
+    let mut row: Vec<usize> = (0..=b.len()).collect();
+    for (i, ca) in a.chars().enumerate() {
+        let mut diagonal = row[0];
+        row[0] = i + 1;
+        for (j, cb) in b.iter().enumerate() {
+            let above = row[j + 1];
+            row[j + 1] = (diagonal + usize::from(ca != *cb))
+                .min(row[j] + 1)
+                .min(above + 1);
+            diagonal = above;
+        }
+    }
+    row[b.len()]
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_typo_suggests_the_nearest_command_and_nonsense_suggests_nothing() {
+        assert_eq!(suggest("stauts"), Some("status"));
+        assert_eq!(suggest("setpu"), Some("setup"));
+        assert_eq!(suggest("logot"), Some("logout"));
+        assert_eq!(suggest("frobnicate"), None);
+        assert_eq!(distance("", "sync"), 4);
+    }
 }
