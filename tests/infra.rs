@@ -364,6 +364,48 @@ mod folders {
     }
 
     #[test]
+    #[cfg(target_os = "linux")]
+    fn a_folder_that_belongs_to_another_account_is_refused() {
+        // The other account: this user's subordinate ids, through a user namespace.
+        // Made by this user (root in the namespace) and handed to the other uid, so the other
+        // account needs no way into the parent folders.
+        use std::os::unix::fs::MetadataExt;
+        let tmp = tempfile::tempdir().unwrap();
+        let theirs = tmp.path().join("theirs");
+        let me = fs::metadata(tmp.path()).unwrap().uid();
+        let name = std::process::Command::new("id")
+            .arg("-un")
+            .output()
+            .unwrap();
+        let name = String::from_utf8_lossy(&name.stdout).trim().to_owned();
+        let Some(first) = fs::read_to_string("/etc/subuid").ok().and_then(|t| {
+            t.lines().find_map(|l| {
+                l.strip_prefix(&format!("{name}:"))?
+                    .split(':')
+                    .next()
+                    .map(str::to_owned)
+            })
+        }) else {
+            return; // no subordinate ids on this machine
+        };
+        let made = std::process::Command::new("unshare")
+            .arg("--user")
+            .arg(format!("--map-users=0:{me}:1"))
+            .arg(format!("--map-groups=0:{me}:1"))
+            .arg(format!("--map-users=1:{first}:1"))
+            .arg(format!("--map-groups=1:{first}:1"))
+            .args(["sh", "-c", "mkdir -m 700 \"$0\" && chown 1:1 \"$0\""])
+            .arg(&theirs)
+            .status();
+        if !made.is_ok_and(|s| s.success()) {
+            return; // no subordinate ids on this machine
+        }
+        let err = private_fs::create_dir(&theirs).unwrap_err();
+        assert_eq!(err.kind(), std::io::ErrorKind::PermissionDenied);
+        assert!(err.to_string().contains("belongs to someone else"), "{err}");
+    }
+
+    #[test]
     fn a_symlink_under_one_of_our_names_is_never_followed() {
         let tmp = tempfile::tempdir().unwrap();
         let data = tmp.path().join("data");
