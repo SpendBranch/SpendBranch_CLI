@@ -69,10 +69,13 @@ jobs:
       # A failure on one system should show every other failure of that system in the same run.
       - run: cargo test --locked --no-fail-fast
       - run: cargo run --locked -q -- --version
+      # The performance budget on the release build (tests/perf.rs): the hook under 200 ms, a
+      # sync with nothing new under 300 ms, a first sync under 30 MB (Linux) and the read speed.
+      - name: Performance budget
+        run: cargo test --release --locked --test perf -- --ignored --nocapture
       - name: Release binary stays under 10 MB
-        if: matrix.name == 'linux-x64'
+        shell: bash
         run: |
-          cargo build --release --locked
-          size=$(stat -c %s target/release/spendbranch)
+          size=$(wc -c < "target/release/spendbranch${{ runner.os == 'Windows' && '.exe' || '' }}")
           echo "release binary: $size bytes"
           test "$size" -lt 10000000
