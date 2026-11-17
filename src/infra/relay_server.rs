@@ -100,7 +100,8 @@ fn same_user(stream: &TcpStream, peer: SocketAddr) -> bool {
         match std::fs::read_to_string("/proc/net/tcp") {
             Ok(table) => {
                 let me = super::private_fs::my_uid().ok();
-                me.is_some() && relay::peer_uid(&table, peer, us) == me
+                let end = |a: std::net::SocketAddrV4| (a.ip().octets(), a.port());
+                me.is_some() && relay::peer_uid(&table, end(peer), end(us)) == me
             }
             Err(e) => e.kind() == io::ErrorKind::NotFound,
         }

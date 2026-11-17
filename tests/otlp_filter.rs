@@ -222,3 +222,61 @@ fn the_relay_filter_keeps_exactly_the_otlp_fields_the_owner_authorizes() {
         .collect();
     assert_eq!(otlp::KEYS.to_vec(), declared);
 }
+
+#[test]
+fn walking_the_bytes_gives_exactly_what_walking_the_parsed_body_gives() {
+    let mut bodies: Vec<String> = fixtures()
+        .iter()
+        .map(|d| fs::read_to_string(d.join("input.json")).unwrap())
+        .collect();
+    let rec = |extra: &str| {
+        format!(r#"{{"resourceLogs":[{{"scopeLogs":[{{"logRecords":[{extra}]}}]}}]}}"#)
+    };
+    for odd in [
+        "0, null, \"x\", [1,[2]], {}",
+        r#"{"eventName":"","body":{"stringValue":"api_request"},"attributes":[{"key":"model","value":{"stringValue":"m1"}}]}"#,
+        r#"{"eventName":7,"attributes":[{"key":"event.name","value":5},{"key":"event.name","value":{"stringValue":"api_request"}}]}"#,
+        r#"{"attributes":[{"key":"event.name","value":{"stringValue":"api_request"}},{"key":"input_tokens","value":{"intValue":1.5}},{"key":"input_tokens","value":{"intValue":"7"}},{"key":"output_tokens","value":{"stringValue":"9","intValue":null}}]}"#,
+        r#"{"eventName":"api_request","timeUnixNano":-5,"attributes":{"key":"model"}}"#,
+        r#"{"eventName":"api_request","timeUnixNano":12,"attributes":[null,1,{"key":3,"value":{}},{"value":{"stringValue":"no key"}},{"key":"model"},{"key":"model","value":{"stringValue":"ok-model","x":[1,2,{"y":3}]}}]}"#,
+        r#"{"eventName":"claude_code.api_request","attributes":[{"key":"session.id","value":{"stringValue":"s","stringValue":7}},{"key":"request_id","key":"model","value":{"stringValue":"r1"}}]}"#,
+    ] {
+        bodies.push(rec(odd));
+    }
+    bodies.push(rec(&vec![r#"{"eventName":"api_request"}"#; 2100].join(",")));
+    bodies.push(format!(
+        r#"{{"resourceLogs":[{{"scopeLogs":[{{"logRecords":[{}]}},{{"logRecords":[{}]}}]}},7,{{"scopeLogs":{{}}}}]}}"#,
+        vec!["0"; 1999].join(","),
+        [r#"{"eventName":"api_request"}"#; 3].join(",")
+    ));
+    for garbage in [
+        "[]",
+        "7",
+        "\"x\"",
+        "null",
+        r#"{"resourceLogs":{}}"#,
+        r#"{"resourceLogs":[[],{"scopeLogs":[[{}]]}]}"#,
+    ] {
+        bodies.push(garbage.into());
+    }
+    for body in &bodies {
+        let parsed = otlp::lenient(&serde_json::from_str(body).unwrap());
+        let walked = otlp::lenient_bytes(body.as_bytes()).expect(body);
+        assert_eq!(walked.payload, parsed.payload, "{body}");
+        assert_eq!(
+            (walked.kept, walked.dropped, walked.ignored),
+            (parsed.kept, parsed.dropped, parsed.ignored),
+            "{body}"
+        );
+    }
+    // Not JSON, something after it, or a list key given twice in one object: refused.
+    for bad in [
+        "{nope",
+        "{} {}",
+        r#"{"resourceLogs":[],"resourceLogs":[]}"#,
+        r#"{"resourceLogs":[{"scopeLogs":[],"scopeLogs":[]}]}"#,
+        r#"{"resourceLogs":[{"scopeLogs":[{"logRecords":[],"logRecords":[]}]}]}"#,
+    ] {
+        assert!(otlp::lenient_bytes(bad.as_bytes()).is_none(), "{bad}");
+    }
+}

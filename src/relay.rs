@@ -67,20 +67,11 @@ pub fn new_endpoint(random: [u8; 34]) -> (String, u16) {
 }
 
 /// Who owns the client's end of a loopback connection, read from Linux's `/proc/net/tcp`: the
-/// line whose local address is the client (`peer`) and whose remote address is the relay (`us`).
-/// Addresses there are the raw network-order word printed in host order, ports in hex.
-pub fn peer_uid(
-    table: &str,
-    peer: std::net::SocketAddrV4,
-    us: std::net::SocketAddrV4,
-) -> Option<u32> {
-    let hex = |a: std::net::SocketAddrV4| {
-        format!(
-            "{:08X}:{:04X}",
-            u32::from_ne_bytes(a.ip().octets()),
-            a.port()
-        )
-    };
+/// line whose local address is the client (`peer`) and whose remote address is the relay (`us`),
+/// each an IPv4 address and a port. Addresses there are the raw network-order word printed in
+/// host order, ports in hex.
+pub fn peer_uid(table: &str, peer: ([u8; 4], u16), us: ([u8; 4], u16)) -> Option<u32> {
+    let hex = |(ip, port): ([u8; 4], u16)| format!("{:08X}:{port:04X}", u32::from_ne_bytes(ip));
     let (peer, us) = (hex(peer), hex(us));
     table.lines().skip(1).find_map(|line| {
         let f: Vec<&str> = line.split_whitespace().collect();
@@ -153,9 +144,9 @@ pub struct Prepared {
     pub refused: u64,
 }
 
+/// Walked as it is parsed: what the body holds is never kept, only what passes.
 pub fn prepare(body: &[u8]) -> Result<Prepared, u16> {
-    let value: Value = serde_json::from_slice(body).map_err(|_| 400u16)?;
-    let f = otlp::lenient(&value);
+    let f = otlp::lenient_bytes(body).ok_or(400u16)?;
     Ok(Prepared {
         payload: f.payload,
         kept: f.kept,

@@ -300,8 +300,7 @@ fn the_answer_counts_what_was_refused() {
 
 #[test]
 fn the_owner_of_the_clients_end_is_read_from_the_kernels_table() {
-    use std::net::{Ipv4Addr, SocketAddrV4};
-    let lo = |port| SocketAddrV4::new(Ipv4Addr::LOCALHOST, port);
+    let lo = |port: u16| ([127, 0, 0, 1], port);
     let word = format!("{:08X}", u32::from_ne_bytes([127, 0, 0, 1]));
     let table = format!(
         "  sl  local_address rem_address   st tx_queue rx_queue tr tm->when retrnsmt   uid  timeout inode\n\
