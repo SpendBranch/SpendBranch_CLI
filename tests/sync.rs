@@ -594,6 +594,58 @@ fn coverage_alone_that_the_server_finds_too_big_is_dropped_not_a_crash() {
 }
 
 #[test]
+fn a_batch_too_big_because_of_its_coverage_sends_the_coverage_alone_and_keeps_every_event() {
+    use spendbranch::sync::{self, Item};
+    let rig = Rig::ready();
+    let row = |i: usize| {
+        json!({"source": "claude_code", "from": format!("2026-06-01T{:02}:00:00.000Z", i % 24),
+               "to": format!("2026-06-01T{:02}:30:00.000Z", i % 24), "state": "unavailable",
+               "reason": "adapter_error"})
+        .to_string()
+    };
+    let reports: Vec<_> = sync::parse_coverage((0..50).map(|i| (i as i64, row(i)))).0;
+    let items: Vec<Item> = events(5)
+        .into_iter()
+        .enumerate()
+        .map(|(i, observation)| Item {
+            id: i as i64,
+            queued_at: 0,
+            payload: String::new(),
+            observation,
+        })
+        .collect();
+    let size = |n: usize, c: usize| {
+        let id = uuid::Uuid::new_v4();
+        sync::pack(id, &items[..n], &reports[..c], 500)
+            .unwrap()
+            .json
+            .len()
+    };
+    let limit = size(5, 0).max(size(0, 50));
+    assert!(
+        size(1, 50) > limit,
+        "one event with the coverage must not fit"
+    );
+    rig.server.configure(|s| s.ingest.max_plain = Some(limit));
+    let db = rusqlite::Connection::open(rig.dir.path().join("state.db")).unwrap();
+    for i in 0..50 {
+        db.execute("INSERT INTO pending_coverage(payload) VALUES(?1)", [row(i)])
+            .unwrap();
+    }
+    rig.buffer(now_ms(), events(5));
+    let out = rig.run(&["sync"]);
+    assert_eq!(out.code, 0, "{}", out.text);
+    assert!(
+        !out.text.contains("did not pass"),
+        "valid events blamed: {}",
+        out.text
+    );
+    let s = rig.server.state.lock().unwrap();
+    assert_eq!(s.stored.len(), 5, "every event reached the server");
+    assert_eq!(s.stored_coverage.len(), 50);
+}
+
+#[test]
 fn the_buffer_reaches_the_server_from_real_session_files() {
     use std::io::Write;
     let rig = Rig::ready();
