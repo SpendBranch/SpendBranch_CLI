@@ -299,6 +299,44 @@ fn a_client_that_trickles_its_headers_gives_its_slot_back_within_seconds() {
 }
 
 #[test]
+#[cfg(target_os = "linux")]
+fn another_account_is_closed_on_even_with_the_right_token() {
+    // A second account: this user's subordinate ids, through a user namespace. Skipped where
+    // the machine has none (no /etc/subuid entry or no newuidmap).
+    let other = |port: u16, body: &str| {
+        let py = format!(
+            "import socket;b={body:?}.encode();s=socket.create_connection(('127.0.0.1',{port}));\
+             s.sendall(b'POST /v1/logs HTTP/1.1\\r\\nHost: localhost\\r\\n{AUTH}Content-Type: application/json\\r\\nContent-Length: '+str(len(b)).encode()+b'\\r\\n\\r\\n'+b);\
+             s.settimeout(10);print(repr(s.recv(4096)))",
+            AUTH = AUTH.trim_end().replace("\r", "")
+        );
+        Command::new("unshare")
+            .args(["--user", "--map-auto", "--setuid", "1", "--setgid", "1"])
+            .args(["python3", "-I", "-c", &py])
+            .output()
+    };
+    let probe = Command::new("unshare")
+        .args(["--user", "--map-auto", "--setuid", "1", "true"])
+        .status();
+    if !probe.is_ok_and(|s| s.success()) {
+        return;
+    }
+    let relay = Relay::start(|_| Ok(0));
+    let out = other(relay.port, &sample()).unwrap();
+    let said = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        !said.contains("HTTP/1.1"),
+        "answered another account: {said}"
+    );
+    assert!(relay.sent.lock().unwrap().is_empty());
+    assert_eq!(
+        relay.post("", &sample()).0,
+        200,
+        "this account still gets in"
+    );
+}
+
+#[test]
 fn a_client_that_stalls_does_not_block_the_others() {
     let relay = Relay::start(|_| Ok(0));
     let mut slow = TcpStream::connect(("127.0.0.1", relay.port)).unwrap();

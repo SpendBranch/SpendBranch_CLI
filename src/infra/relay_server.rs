@@ -64,6 +64,9 @@ pub fn serve(
                     if stop.load(Ordering::Relaxed) {
                         break;
                     }
+                    if !same_user(&stream, peer) {
+                        continue; // another account: closed before a byte is read
+                    }
                     if active.fetch_add(1, Ordering::SeqCst) >= MAX_CONNECTIONS {
                         active.fetch_sub(1, Ordering::SeqCst);
                         let _ = reply(&stream, 503);
@@ -83,6 +86,30 @@ pub fn serve(
         }
         Ok(())
     })
+}
+
+/// Whether the client runs as this user. Linux says so in `/proc/net/tcp`; where there is no
+/// such table (macOS, Windows) every local client passes and the token is the only door.
+// ponytail: Linux only; macOS (LOCAL_PEERPID) and Windows (GetExtendedTcpTable) need FFI.
+fn same_user(stream: &TcpStream, peer: SocketAddr) -> bool {
+    #[cfg(unix)]
+    {
+        let (SocketAddr::V4(peer), Ok(SocketAddr::V4(us))) = (peer, stream.local_addr()) else {
+            return false;
+        };
+        match std::fs::read_to_string("/proc/net/tcp") {
+            Ok(table) => {
+                let me = super::private_fs::my_uid().ok();
+                me.is_some() && relay::peer_uid(&table, peer, us) == me
+            }
+            Err(e) => e.kind() == io::ErrorKind::NotFound,
+        }
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = (stream, peer);
+        true
+    }
 }
 
 fn reply(mut stream: &TcpStream, status: u16) -> io::Result<()> {

@@ -31,7 +31,7 @@ pub fn folder_is_private(mode: u32, owner: u32, group: u32, me: u32) -> bool {
 /// of a file just made in the user's temporary folder. `/proc/self` of a process that is not
 /// dumpable belongs to root, so root from there is checked with the file. Worked out once.
 #[cfg(unix)]
-fn my_uid() -> io::Result<u32> {
+pub(crate) fn my_uid() -> io::Result<u32> {
     use std::os::unix::fs::MetadataExt;
     static UID: std::sync::OnceLock<u32> = std::sync::OnceLock::new();
     if let Some(uid) = UID.get() {

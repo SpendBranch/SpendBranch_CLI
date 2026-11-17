@@ -297,3 +297,26 @@ fn the_answer_counts_what_was_refused() {
         0
     );
 }
+
+#[test]
+fn the_owner_of_the_clients_end_is_read_from_the_kernels_table() {
+    use std::net::{Ipv4Addr, SocketAddrV4};
+    let lo = |port| SocketAddrV4::new(Ipv4Addr::LOCALHOST, port);
+    let word = format!("{:08X}", u32::from_ne_bytes([127, 0, 0, 1]));
+    let table = format!(
+        "  sl  local_address rem_address   st tx_queue rx_queue tr tm->when retrnsmt   uid  timeout inode\n\
+         \x20  0: {word}:5208 00000000:0000 0A 00000000:00000000 00:00000000 00000000  1000        0 1 1\n\
+         \x20  1: {word}:C2EA {word}:5208 01 00000000:00000000 00:00000000 00000000 100001        0 2 1\n\
+         \x20  2: {word}:5208 {word}:C2EA 01 00000000:00000000 00:00000000 00000000  1000        0 3 1\n"
+    );
+    assert_eq!(
+        relay::peer_uid(&table, lo(0xC2EA), lo(0x5208)),
+        Some(100_001)
+    );
+    assert_eq!(
+        relay::peer_uid(&table, lo(0xC2EB), lo(0x5208)),
+        None,
+        "not in the table"
+    );
+    assert_eq!(relay::peer_uid("", lo(1), lo(2)), None);
+}

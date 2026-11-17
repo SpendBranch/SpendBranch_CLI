@@ -66,6 +66,29 @@ pub fn new_endpoint(random: [u8; 34]) -> (String, u16) {
     )
 }
 
+/// Who owns the client's end of a loopback connection, read from Linux's `/proc/net/tcp`: the
+/// line whose local address is the client (`peer`) and whose remote address is the relay (`us`).
+/// Addresses there are the raw network-order word printed in host order, ports in hex.
+pub fn peer_uid(
+    table: &str,
+    peer: std::net::SocketAddrV4,
+    us: std::net::SocketAddrV4,
+) -> Option<u32> {
+    let hex = |a: std::net::SocketAddrV4| {
+        format!(
+            "{:08X}:{:04X}",
+            u32::from_ne_bytes(a.ip().octets()),
+            a.port()
+        )
+    };
+    let (peer, us) = (hex(peer), hex(us));
+    table.lines().skip(1).find_map(|line| {
+        let f: Vec<&str> = line.split_whitespace().collect();
+        (f.get(1) == Some(&peer.as_str()) && f.get(2) == Some(&us.as_str()))
+            .then(|| f.get(7)?.parse().ok())?
+    })
+}
+
 /// Equal in time that does not depend on where they differ.
 fn same(a: &str, b: &str) -> bool {
     a.len() == b.len() && a.bytes().zip(b.bytes()).fold(0, |d, (x, y)| d | (x ^ y)) == 0
