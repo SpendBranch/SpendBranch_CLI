@@ -2,7 +2,12 @@
 
 Collects only company-authorized metadata (IDs, model, token counts, normalized repository and branch) from local AI coding agent sessions and uploads it to SpendBranch. Prompts, responses, code and local paths never leave the device.
 
-Status: under development (foundation phase).
+Status: pre-release.
+
+## Install
+
+Download a release and run `spendbranch setup`: see [docs/INSTALL.md](docs/INSTALL.md), which also
+explains how to uninstall.
 
 ## License
 
@@ -22,6 +27,24 @@ cargo deny check
 - `schema/ingest-v1.json`: JSON Schema of the upload contract (`ingest/v1`).
 - `tests/fixtures/`: synthetic fixture corpus; see its README.
 - `cargo test --release --test perf -- --ignored --nocapture`: performance budget.
+
+## Release
+
+Push a tag equal to the version in `Cargo.toml` (`git tag v0.2.0 && git push origin v0.2.0`).
+`.github/workflows/release.yml` runs the whole CI on the 6 systems, builds the 6 binaries, and
+publishes the release with the archives and `SHA256SUMS` (a tag with a hyphen, such as
+`v0.2.0-rc.1`, is a pre-release).
+
+- Production server: the repository variable `SPENDBRANCH_DEFAULT_SERVER` (https only) becomes
+  the release's default. Without it, a release needs `--server` or `SPENDBRANCH_SERVER`.
+- Signing runs only when its repository secrets exist; otherwise the binary ships unsigned, with
+  a warning in the run.
+  - macOS: `APPLE_CERTIFICATE_P12` (base64 of the Developer ID Application .p12),
+    `APPLE_CERTIFICATE_PASSWORD`, `APPLE_SIGNING_IDENTITY`, and for notarization `APPLE_ID`,
+    `APPLE_TEAM_ID`, `APPLE_APP_PASSWORD` (an app-specific password).
+  - Windows: `WINDOWS_CERTIFICATE_PFX` (base64 of the .pfx) and `WINDOWS_CERTIFICATE_PASSWORD`.
+- `fuzz/` holds the cargo-fuzz targets (`cargo +nightly fuzz run claude_code`); they run weekly
+  in `.github/workflows/fuzz.yml`.
 
 ## Layout
 
