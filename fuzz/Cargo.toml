@@ -1,0 +1,40 @@
+# Fuzzing (nightly + cargo-fuzz). From the repository root:
+#   cargo +nightly fuzz run claude_code -- -max_total_time=300
+# Targets: claude_code, codex, repository_key. See .github/workflows/fuzz.yml.
+[package]
+name = "spendbranch-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2024"
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4"
+spendbranch = { path = ".." }
+
+# Its own workspace: never part of the CLI's build, lock file or `cargo deny`.
+[workspace]
+members = ["."]
+
+[[bin]]
+name = "claude_code"
+path = "fuzz_targets/claude_code.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "codex"
+path = "fuzz_targets/codex.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "repository_key"
+path = "fuzz_targets/repository_key.rs"
+test = false
+doc = false
+bench = false

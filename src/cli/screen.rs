@@ -45,7 +45,7 @@ impl Style {
             format!("`{s}`")
         }
     }
-    fn mark(self, code: &str, glyph: &str, plain: &str) -> String {
+    pub fn mark(self, code: &str, glyph: &str, plain: &str) -> String {
         if self.color {
             self.paint(code, glyph)
         } else {
@@ -84,12 +84,40 @@ fn pad(s: &str, w: usize) -> String {
 }
 
 /// Plain text cut to `w` columns.
-fn fit(s: &str, w: usize) -> String {
+pub fn fit(s: &str, w: usize) -> String {
     if s.chars().count() <= w {
         s.to_owned()
     } else {
         s.chars().take(w - 1).chain(['…']).collect()
     }
+}
+
+/// Plain text broken into lines of at most `w` columns, at spaces; a longer word is cut.
+pub fn wrap(text: &str, w: usize) -> Vec<String> {
+    let mut lines = Vec::new();
+    let mut line = String::new();
+    for word in text.split(' ') {
+        let mut word: Vec<char> = word.chars().collect();
+        while word.len() > w {
+            if !line.is_empty() {
+                lines.push(std::mem::take(&mut line));
+            }
+            lines.push(word.drain(..w).collect());
+        }
+        let word: String = word.into_iter().collect();
+        if line.is_empty() {
+            line = word;
+        } else if line.chars().count() + 1 + word.chars().count() <= w {
+            line.push(' ');
+            line.push_str(&word);
+        } else {
+            lines.push(std::mem::replace(&mut line, word));
+        }
+    }
+    if !line.is_empty() || lines.is_empty() {
+        lines.push(line);
+    }
+    lines
 }
 
 /// `╭─── title ───╮`, with a `┬` after `split` inner columns when the box has two panes.
@@ -343,6 +371,39 @@ pub fn command_help(st: Style, h: &m::CommandHelp) -> String {
     boxed(st, &name, &lines)
 }
 
+// --- steps (setup) --------------------------------------------------------------------
+
+/// A step starting, before what it prints as it goes.
+pub fn step_start(st: Style, label: &str) -> String {
+    format!(
+        "{} {}",
+        st.mark("1;38;2;240;176;32", "●", "*"),
+        st.bold(label)
+    )
+}
+
+/// How a step ended: its mark, its name and one line of detail.
+pub fn step(st: Style, mark: &str, label: &str, detail: &str) -> String {
+    let lead = format!("{mark} {}", st.bold(label));
+    format!("{} {detail}", pad(&lead, width(mark) + 1 + 11))
+        .trim_end()
+        .to_owned()
+}
+
+/// What goes before each line a step printed: the step line goes on down past it.
+pub fn nest(st: Style) -> String {
+    if st.tty {
+        format!("{}   ", st.line("│"))
+    } else {
+        "    ".into()
+    }
+}
+
+/// The line between two steps; nothing off a terminal.
+pub fn joint(st: Style) -> Option<String> {
+    st.tty.then(|| st.line("│"))
+}
+
 /// A usage error: what was wrong, a guess when there is one, and where the help is.
 pub fn usage_error(st: Style, what: &str, guess: Option<&str>) -> String {
     let mut out = vec![format!("{} {what}", st.mark("31", "error:", "error:"))];
@@ -440,6 +501,13 @@ mod tests {
         for screen in every_screen(st) {
             assert!(!screen.contains('\x1b') && !screen.contains('│') && !screen.contains('─'));
         }
+    }
+
+    #[test]
+    fn wrapping_keeps_words_whole_and_cuts_only_what_cannot_fit() {
+        assert_eq!(wrap("a bb ccc dddd", 6), ["a bb", "ccc", "dddd"]);
+        assert_eq!(wrap("abcdefgh x", 3), ["abc", "def", "gh", "x"]);
+        assert_eq!(wrap("", 5), [""]);
     }
 
     #[test]

@@ -1,0 +1,43 @@
+name: Fuzz
+
+# The two transcript parsers and repository_key_of take text written by other programs: fed
+# random input for 10 minutes each, they must never panic nor break their invariants.
+on:
+  schedule:
+    - cron: '17 4 * * 1'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  fuzz:
+    name: fuzz ${{ matrix.target }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { target: claude_code, seeds: tests/fixtures/claude-code }
+          - { target: codex, seeds: tests/fixtures/codex }
+          - { target: repository_key, seeds: '' }
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Install nightly and cargo-fuzz
+        run: |
+          rustup toolchain install nightly --profile minimal --no-self-update
+          cargo install cargo-fuzz --version 0.13.2 --locked
+      - name: Seed the corpus with the test fixtures
+        run: |
+          mkdir -p "fuzz/corpus/${{ matrix.target }}"
+          if [ -n "${{ matrix.seeds }}" ]; then
+            find "${{ matrix.seeds }}" -name '*.jsonl' -exec cp {} "fuzz/corpus/${{ matrix.target }}/" \;
+          fi
+      - name: Fuzz for 10 minutes
+        run: cargo +nightly fuzz run ${{ matrix.target }} "fuzz/corpus/${{ matrix.target }}" -- -max_total_time=600
+      - name: Keep the input that broke it
+        if: failure()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: fuzz-crash-${{ matrix.target }}
+          path: fuzz/artifacts/${{ matrix.target }}

@@ -465,7 +465,8 @@ fn setup_takes_the_same_source_spellings_as_enable() {
     for source in ["claude-code", "claude_code", "codex"] {
         let (code, out) = run(&["setup", "--source", source, "--server", "not a url"]);
         assert_eq!(code, 2, "{source}");
-        assert!(out.starts_with(messages::INVALID_SERVER), "{source}: {out}");
+        assert!(out.contains(messages::INVALID_SERVER), "{source}: {out}");
+        assert!(!out.contains(messages::USAGE_SETUP), "{source}: {out}");
     }
     assert_eq!(
         run(&["setup", "--source", "gemini"]),

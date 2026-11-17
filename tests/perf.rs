@@ -1,12 +1,19 @@
 //! Performance budget. Slow, so ignored by default; run it in release mode:
 //!
 //! ```text
-//! cargo test --release --test perf -- --ignored --nocapture
+//! cargo test --release --test perf -- --ignored --nocapture --test-threads=1
 //! ```
 //!
 //! The thresholds are a safety net against gross regressions (they only apply to release
 //! builds). The plan's goal is a first read of 1 GB of transcripts in under 10 s, which is
-//! about 100 MiB/s; these floors are set at half of that.
+//! about 100 MiB/s; these floors are set at half of that. The CI runs this file on all 6
+//! systems: the hook under 200 ms, a sync with nothing new under 300 ms, a first sync under
+//! 30 MB of memory (Linux, where /proc shows it).
+#[path = "common/fake_server.rs"]
+mod fake_server;
+#[path = "common/rig.rs"]
+mod rig;
+
 use spendbranch::contract::Iso;
 use spendbranch::infra::store::{SpoolLimits, Store};
 use spendbranch::readers::{claude_code, codex};
@@ -35,7 +42,7 @@ fn age(path: &Path) {
 }
 
 /// A Claude Code transcript where one line in ten carries usage and the rest is conversation.
-fn claude_transcript(path: &Path, mib: usize) -> usize {
+fn claude_transcript(path: &Path, mib: usize, at: &str) -> usize {
     fs::create_dir_all(path.parent().unwrap()).unwrap();
     let mut out = BufWriter::new(fs::File::create(path).unwrap());
     let filler = "lorem ipsum dolor sit amet ".repeat(55);
@@ -43,11 +50,11 @@ fn claude_transcript(path: &Path, mib: usize) -> usize {
     while bytes < mib * MIB {
         let line = if i.is_multiple_of(10) {
             format!(
-                r#"{{"type":"assistant","sessionId":"s1","requestId":"req_{i}","timestamp":"2026-06-01T10:00:00Z","version":"2.1.300","cwd":"/x","message":{{"id":"m{i}","model":"claude-test-1","content":[{{"type":"text","text":"{filler}"}}],"usage":{{"input_tokens":10,"output_tokens":20,"cache_read_input_tokens":30,"cache_creation_input_tokens":40}}}}}}"#
+                r#"{{"type":"assistant","sessionId":"s1","requestId":"req_{i}","timestamp":"{at}","version":"2.1.300","cwd":"/x","message":{{"id":"m{i}","model":"claude-test-1","content":[{{"type":"text","text":"{filler}"}}],"usage":{{"input_tokens":10,"output_tokens":20,"cache_read_input_tokens":30,"cache_creation_input_tokens":40}}}}}}"#
             )
         } else {
             format!(
-                r#"{{"type":"user","sessionId":"s1","timestamp":"2026-06-01T10:00:00Z","message":{{"role":"user","content":"{filler}"}}}}"#
+                r#"{{"type":"user","sessionId":"s1","timestamp":"{at}","message":{{"role":"user","content":"{filler}"}}}}"#
             )
         };
         bytes += line.len() + 1;
@@ -99,7 +106,7 @@ fn reading_and_saving_stay_within_budget() {
     let dir = tempfile::tempdir().unwrap();
 
     let file = dir.path().join("claude/projects/p/s1.jsonl");
-    let bytes = claude_transcript(&file, 400);
+    let bytes = claude_transcript(&file, 400, "2026-06-01T10:00:00Z");
     let config = claude_code::Config {
         projects_dir: dir.path().join("claude/projects"),
         account_file: dir.path().join("none.json"),
@@ -202,5 +209,103 @@ fn the_hook_exits_in_under_200_ms() {
             median < Duration::from_millis(200),
             "hook median {median:?}"
         );
+    }
+}
+
+/// The real binary, in the rig's home, against its server. Variables from the machine running
+/// the tests that would point elsewhere are taken out.
+fn spendbranch(rig: &rig::Rig, args: &[&str]) -> std::process::Child {
+    use std::process::{Command, Stdio};
+    let mut command = Command::new(env!("CARGO_BIN_EXE_spendbranch"));
+    for name in [
+        "CLAUDE_CONFIG_DIR",
+        "CODEX_HOME",
+        "XDG_CONFIG_HOME",
+        "SPENDBRANCH_HOME",
+    ] {
+        command.env_remove(name);
+    }
+    command
+        .args(args)
+        .env("SPENDBRANCH_HOME", rig.dir.path())
+        .env("SPENDBRANCH_KEY_STORE", "file")
+        .env("SPENDBRANCH_SERVER", &rig.server.base)
+        .env("HOME", rig.dir.path())
+        .env("USERPROFILE", rig.dir.path())
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .unwrap()
+}
+
+/// Waits for `child`, with its peak resident memory in KiB where /proc shows it (Linux).
+// ponytail: polls VmHWM every 5 ms, so growth in the last moments before exit can be missed;
+// wait4/getrusage would be exact but need `unsafe`.
+fn wait_with_peak(mut child: std::process::Child) -> (std::process::ExitStatus, Option<u64>) {
+    let status_file = format!("/proc/{}/status", child.id());
+    let mut peak = None;
+    loop {
+        if let Some(status) = child.try_wait().unwrap() {
+            return (status, peak);
+        }
+        let hwm = fs::read_to_string(&status_file).ok().and_then(|s| {
+            s.lines()
+                .find_map(|l| l.strip_prefix("VmHWM:"))
+                .and_then(|v| v.trim().trim_end_matches("kB").trim().parse::<u64>().ok())
+        });
+        if let Some(kib) = hwm {
+            peak = Some(peak.unwrap_or(0).max(kib));
+        }
+        std::thread::sleep(Duration::from_millis(5));
+    }
+}
+
+/// What the scheduler and the hooks run most: a sync that finds nothing new, under 300 ms.
+#[test]
+#[ignore = "slow; run in release mode with the others"]
+fn a_sync_with_nothing_new_takes_under_300_ms() {
+    let rig = rig::Rig::ready();
+    for dir in [".claude/projects", ".codex/sessions"] {
+        fs::create_dir_all(rig.dir.path().join(dir)).unwrap();
+    }
+    assert!(spendbranch(&rig, &["sync"]).wait().unwrap().success());
+    let mut times = Vec::new();
+    for _ in 0..9 {
+        let started = Instant::now();
+        assert!(spendbranch(&rig, &["sync"]).wait().unwrap().success());
+        times.push(started.elapsed());
+    }
+    times.sort();
+    let median = times[times.len() / 2];
+    println!("sync with nothing new: median {median:?}");
+    if !cfg!(debug_assertions) {
+        assert!(median < Duration::from_millis(300), "median {median:?}");
+    }
+}
+
+/// A first sync that reads a big transcript and uploads what it found stays under 30 MB: the
+/// transcript is streamed and the buffer is sent in batches, never held whole.
+#[test]
+#[ignore = "slow; run in release mode with the others"]
+fn a_first_sync_of_a_big_transcript_stays_under_30_mb() {
+    let rig = rig::Rig::ready();
+    let file = rig.dir.path().join(".claude/projects/p/s1.jsonl");
+    let bytes = claude_transcript(&file, 200, "2026-11-15T10:00:00Z");
+    let started = Instant::now();
+    let (status, peak) = wait_with_peak(spendbranch(&rig, &["sync"]));
+    let took = started.elapsed();
+    assert!(status.success());
+    report("first sync (read and upload)", bytes, took);
+    match peak {
+        Some(kib) => println!("first sync: peak memory {} MiB", kib / 1024),
+        None => println!("first sync: peak memory not measured here (no /proc)"),
+    }
+    if !cfg!(debug_assertions) {
+        if let Some(kib) = peak {
+            assert!(kib < 30 * 1024, "peak memory {kib} KiB");
+        }
+        // The plan's goal is 1 GB in 10 s; a 5x margin keeps a slow CI machine from failing.
+        assert!(took < Duration::from_secs(10), "200 MiB took {took:?}");
     }
 }

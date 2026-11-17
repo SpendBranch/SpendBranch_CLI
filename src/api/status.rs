@@ -3,12 +3,19 @@ use super::pairing::printable;
 use crate::contract::Iso;
 use serde::Deserialize;
 
-/// Where the API is when no address is given: the product's own origin, in a development build
-/// only. A release has none until the production origin exists: plain http to whoever listens on
+/// Where the API is when no address is given. A development build: the local origin. A release:
+/// the origin it was built with (`SPENDBRANCH_DEFAULT_SERVER` at build time, see
+/// `RELEASE_SERVER`), and only an https one; without it, none. Plain http to whoever listens on
 /// this machine's port 5173 must never be where a real device pairs.
-pub fn default_server(debug_build: bool) -> Option<&'static str> {
-    debug_build.then_some("http://localhost:5173")
+pub fn default_server(debug_build: bool, release: Option<&'static str>) -> Option<&'static str> {
+    if debug_build {
+        return Some("http://localhost:5173");
+    }
+    release.filter(|s| s.starts_with("https://") && s.len() > "https://".len())
 }
+
+/// The production origin, set by the release pipeline when it builds.
+pub const RELEASE_SERVER: Option<&str> = option_env!("SPENDBRANCH_DEFAULT_SERVER");
 
 /// `GET /api/cli/v1/status`, as the server sent it. `checked` is the only way to use it.
 #[derive(Clone, Debug, Deserialize)]

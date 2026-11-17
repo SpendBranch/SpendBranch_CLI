@@ -5,9 +5,10 @@ pub struct Range {
     pub to: &'static str,
 }
 
+/// 2.1.326: a real session read end to end against the API (2026-11-17), nothing unreadable.
 pub const CLAUDE_CODE_TESTED: Range = Range {
     from: "2.1.290",
-    to: "2.1.320",
+    to: "2.1.326",
 };
 pub const CODEX_TESTED: Range = Range {
     from: "0.155.0",

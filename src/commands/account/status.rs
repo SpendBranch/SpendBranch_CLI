@@ -37,44 +37,32 @@ pub(super) fn local_status(ctx: &Ctx, store: &Store) -> Result<render::Local> {
     })
 }
 
-fn print_lines(ctx: &mut Ctx, lines: Vec<String>) -> Result<()> {
-    for line in lines {
-        writeln!(ctx.out, "{line}")?;
-    }
-    Ok(())
-}
-
 pub fn status(ctx: &mut Ctx) -> Result<i32> {
     let account = open(ctx)?;
     let local = local_status(ctx, &account.store)?;
     let connection = match load(&account)? {
         Loaded::NotConnected => return say(ctx, m::NOT_CONNECTED, 1),
-        Loaded::Broken(text) => {
-            say(ctx, &text, 1)?;
-            print_lines(ctx, render::local_lines(&local, now()))?;
-            return Ok(1);
-        }
+        Loaded::Broken(text) => return local_only(ctx, &text, &local),
         Loaded::Ready(c) => c,
     };
     match fetch_status(&connection) {
         Ok(view) => {
-            let file = account.keys.backend() == Backend::File;
-            let lines = render::remote_lines(
-                &view,
-                &connection.server.base(),
-                &connection.key.fingerprint(),
-                file,
-                &local,
-                now(),
-            );
-            print_lines(ctx, lines)?;
-            print_lines(ctx, render::local_lines(&local, now()))?;
-            Ok(0)
+            let remote = render::Remote {
+                view: &view,
+                server: &connection.server.base(),
+                local_fingerprint: &connection.key.fingerprint(),
+                key_in_file: account.keys.backend() == Backend::File,
+            };
+            let screen = render::status(ctx.style, Some(&remote), &local, now());
+            say(ctx, &screen, 0)
         }
-        Err(text) => {
-            say(ctx, &text, 1)?;
-            print_lines(ctx, render::local_lines(&local, now()))?;
-            Ok(1)
-        }
+        Err(text) => local_only(ctx, &text, &local),
     }
+}
+
+/// The server could not be asked: why, then what this device knows.
+fn local_only(ctx: &mut Ctx, why: &str, local: &render::Local) -> Result<i32> {
+    say(ctx, why, 0)?;
+    let screen = render::status(ctx.style, None, local, now());
+    say(ctx, &screen, 1)
 }

@@ -2,3 +2,8 @@
 /cli/
 /target
 /API-INTEGRATION.md
+/fuzz/target
+/fuzz/corpus
+/fuzz/artifacts
+/fuzz/coverage
+/fuzz/Cargo.lock

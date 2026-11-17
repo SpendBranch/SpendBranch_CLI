@@ -4,6 +4,8 @@ on:
   push:
     branches: [main]
   pull_request:
+  # The release pipeline runs this whole workflow first: nothing is built for release untested.
+  workflow_call:
 
 # A new push to the same branch makes the previous run pointless.
 concurrency:
@@ -67,10 +69,14 @@ jobs:
       # A failure on one system should show every other failure of that system in the same run.
       - run: cargo test --locked --no-fail-fast
       - run: cargo run --locked -q -- --version
+      # The performance budget on the release build (tests/perf.rs): the hook under 200 ms, a
+      # sync with nothing new under 300 ms, a first sync under 30 MB (Linux) and the read speed.
+      - name: Performance budget
+        # One at a time: a timing taken while the 200 MiB sync runs beside it measures the contention.
+        run: cargo test --release --locked --test perf -- --ignored --nocapture --test-threads=1
       - name: Release binary stays under 10 MB
-        if: matrix.name == 'linux-x64'
+        shell: bash
         run: |
-          cargo build --release --locked
-          size=$(stat -c %s target/release/spendbranch)
+          size=$(wc -c < "target/release/spendbranch${{ runner.os == 'Windows' && '.exe' || '' }}")
           echo "release binary: $size bytes"
           test "$size" -lt 10000000

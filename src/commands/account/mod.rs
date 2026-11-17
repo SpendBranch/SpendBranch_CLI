@@ -125,6 +125,7 @@ mod sources;
 mod status;
 
 pub use login::login;
+pub(in crate::commands) use login::login_with;
 pub use logout::logout;
 pub(in crate::commands) use sources::enable_with;
 pub use sources::{disable, enable};
