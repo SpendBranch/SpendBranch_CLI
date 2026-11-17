@@ -93,10 +93,11 @@ fn words(command: &str) -> Option<Vec<String>> {
     Some(out)
 }
 
-/// Our entry: a program named `spendbranch` (any folder: another install of ours is replaced)
-/// followed by exactly our arguments, or the line the TypeScript CLI wrote
-/// (`node '<.../spendbranch/...>' hook claude-code`). A command that only mentions
-/// `spendbranch` somewhere is someone else's.
+/// Our entry: a program whose file name starts with `spendbranch` (any folder, any suffix such
+/// as `spendbranch-x86_64-linux`: another install of ours is replaced) followed by exactly our
+/// arguments, or the line the TypeScript CLI wrote (`node '<.../spendbranch/...>' hook
+/// claude-code`). A command that only mentions `spendbranch` somewhere is someone else's.
+/// `install` also owns the exact line it writes, whatever the binary is called.
 pub fn is_ours(source: Source, command: &str) -> bool {
     let Some(words) = words(command) else {
         return false;
@@ -108,11 +109,7 @@ pub fn is_ours(source: Source, command: &str) -> bool {
             .to_ascii_lowercase()
     };
     let args = match words.as_slice() {
-        [program, args @ ..]
-            if matches!(name(program).as_str(), "spendbranch" | "spendbranch.exe") =>
-        {
-            args
-        }
+        [program, args @ ..] if name(program).starts_with("spendbranch") => args,
         [node, script, args @ ..]
             if matches!(name(node).as_str(), "node" | "node.exe")
                 && script.contains("spendbranch") =>
@@ -127,11 +124,12 @@ pub fn is_ours(source: Source, command: &str) -> bool {
     }
 }
 
-fn ours(source: Source, entry: &Value) -> bool {
-    entry
-        .get("command")
-        .and_then(Value::as_str)
-        .is_some_and(|c| is_ours(source, c))
+/// Ours by its shape, or the very line `keep` holds (a binary under any name).
+fn ours(source: Source, entry: &Value, keep: Option<&Value>) -> bool {
+    let command = |e: &Value| e.get("command").and_then(Value::as_str).map(str::to_owned);
+    let line = command(entry);
+    line.as_deref().is_some_and(|c| is_ours(source, c))
+        || (line.is_some() && keep.and_then(command) == line)
 }
 
 fn parse(original: Option<&str>) -> Result<Value, Problem> {
@@ -159,6 +157,7 @@ fn finish(before: &Value, after: Value, existed: bool) -> Plan {
 /// Removes our entries from the groups of one event. With `keep`, the first one found is
 /// replaced by it instead (and the rest go). Groups we emptied are dropped; others stay.
 fn strip(source: Source, groups: &mut Vec<Value>, mut keep: Option<&Value>) -> bool {
+    let wanted = keep;
     let mut placed = false;
     groups.retain_mut(|group| {
         let Some(list) = group.get_mut("hooks").and_then(Value::as_array_mut) else {
@@ -166,7 +165,7 @@ fn strip(source: Source, groups: &mut Vec<Value>, mut keep: Option<&Value>) -> b
         };
         let before = list.len();
         list.retain_mut(|entry| {
-            if !ours(source, entry) {
+            if !ours(source, entry, wanted) {
                 return true;
             }
             match keep.take() {
