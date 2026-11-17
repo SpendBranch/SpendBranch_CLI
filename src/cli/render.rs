@@ -18,7 +18,7 @@ fn day(at: Iso) -> String {
     at.to_string().chars().take(10).collect()
 }
 
-fn ago(at: Iso, now: Iso) -> String {
+pub fn ago(at: Iso, now: Iso) -> String {
     let hours = (now.millis() - at.millis()) / HOUR_MS;
     match hours {
         h if h >= 48 => format!("{} days ago", h / 24),

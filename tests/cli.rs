@@ -64,9 +64,19 @@ fn run_in(home: &Path, args: &[&str]) -> (i32, String) {
     run_env(args, &[("SPENDBRANCH_HOME", home.to_str().unwrap())], false)
 }
 
+/// `spendbranch` alone, on a terminal, with a fresh data folder.
+fn home_screen(vars: &[(&str, &str)]) -> String {
+    let dir = tempfile::tempdir().unwrap();
+    let mut vars = vars.to_vec();
+    vars.push(("SPENDBRANCH_HOME", dir.path().to_str().unwrap()));
+    let (code, out) = run_env(&[], &vars, true);
+    assert_eq!(code, 0);
+    out
+}
+
 #[test]
 fn the_owl_on_a_terminal_is_colored_only_where_truecolor_is_known_to_work() {
-    let escapes = |vars: &[(&str, &str)]| run_env(&["--help"], vars, true).1.contains('\x1b');
+    let escapes = |vars: &[(&str, &str)]| home_screen(vars).contains('\x1b');
     assert!(escapes(&[("COLORTERM", "truecolor")]));
     assert!(escapes(&[
         ("COLORTERM", "24bit"),
@@ -76,7 +86,7 @@ fn the_owl_on_a_terminal_is_colored_only_where_truecolor_is_known_to_work() {
     assert!(escapes(&[("WT_SESSION", "0c1d2e3f")]), "Windows Terminal");
     assert!(!escapes(&[("COLORTERM", "truecolor"), ("TERM", "dumb")]));
     assert!(!escapes(&[("COLORTERM", "truecolor"), ("NO_COLOR", "1")]));
-    let (_, plain) = run_env(&["--help"], &[], true);
+    let plain = home_screen(&[]);
     assert!(
         plain.contains("( @ )"),
         "the owl keeps its shape without color"
@@ -84,25 +94,28 @@ fn the_owl_on_a_terminal_is_colored_only_where_truecolor_is_known_to_work() {
 }
 
 #[test]
-fn the_help_does_not_point_to_itself() {
-    let (_, out) = run_env(&["--help"], &[("COLORTERM", "truecolor")], true);
-    assert!(!out.contains("--help for all commands"), "{out}");
+fn the_start_screen_points_to_setup_and_to_the_help_without_creating_the_data_folder() {
+    let dir = tempfile::tempdir().unwrap();
+    let home = dir.path().join("data");
+    let (code, out) = run_env(&[], &[("SPENDBRANCH_HOME", home.to_str().unwrap())], true);
+    assert_eq!(code, 0);
+    assert!(
+        out.contains("Not connected") && out.contains("spendbranch setup"),
+        "{out}"
+    );
+    assert!(out.contains("--help` for all commands"), "{out}");
+    assert!(
+        !home.exists(),
+        "looking at the start screen created the data folder"
+    );
 }
 
 #[test]
-fn the_colored_owl_sends_a_color_only_when_it_changes() {
+fn the_help_does_not_point_to_itself_and_has_no_owl() {
     let (_, out) = run_env(&["--help"], &[("COLORTERM", "truecolor")], true);
-    let codes = out.matches("\x1b[38;2;").count();
-    let inked: usize = out
-        .lines()
-        .take(18)
-        .map(|l| l.chars().filter(|c| !c.is_whitespace()).count())
-        .sum();
-    assert!(
-        codes * 2 < inked,
-        "{codes} color codes for {inked} characters"
-    );
-    assert!(out.len() < 6_000, "{} bytes", out.len());
+    assert!(!out.contains("for all commands"), "{out}");
+    assert!(!out.contains("( @ )"), "{out}");
+    assert!(out.contains("─"), "a terminal gets the rules");
 }
 
 fn run(args: &[&str]) -> (i32, String) {
@@ -111,21 +124,47 @@ fn run(args: &[&str]) -> (i32, String) {
 
 #[test]
 fn no_command_or_help_flag_prints_the_help_and_exits_0() {
-    for args in [&[][..], &["--help"], &["-h"], &["nope", "--help"]] {
+    for args in [
+        &[][..],
+        &["--help"],
+        &["-h"],
+        &["nope", "--help"],
+        &["hook", "--help"],
+    ] {
         let (code, out) = run(args);
         assert_eq!(code, 0, "{args:?}");
-        assert!(out.starts_with(&format!("spendbranch {}\n\nUsage:\n", cli::VERSION)));
+        assert!(
+            out.starts_with(&format!("spendbranch {} ", cli::VERSION)),
+            "{out}"
+        );
         for line in [
-            "spendbranch setup [--server URL] [--source claude-code|codex] [--relogin]",
-            "spendbranch hooks uninstall codex",
-            "spendbranch otel <source>",
-            "spendbranch relay [--port N]",
-            "spendbranch --version",
-            "Prompts, responses, code, and paths never leave the device.",
+            "GET STARTED",
+            "  setup                    connect this device",
+            "  hooks uninstall <agent>",
+            "  otel <agent>",
+            "  relay [--port N]",
+            "Prompts, responses, code, and paths",
+            "Run `spendbranch <command> --help` for details.",
         ] {
             assert!(out.contains(line), "help lacks: {line}");
         }
+        assert!(
+            !out.contains('\x1b') && !out.contains('─'),
+            "piped help is plain"
+        );
     }
+}
+
+#[test]
+fn a_command_with_help_shows_its_own_help_and_runs_nothing() {
+    let dir = tempfile::tempdir().unwrap();
+    let (code, out) = run_in(dir.path(), &["setup", "--help"]);
+    assert_eq!(code, 0);
+    assert!(out.starts_with("spendbranch setup [--server URL]"), "{out}");
+    assert!(out.contains("--relogin"), "{out}");
+    assert!(!dir.path().join("state.db").exists(), "setup ran");
+    let (_, out) = run(&["logout", "-h"]);
+    assert!(out.starts_with("spendbranch logout\n"), "{out}");
 }
 
 #[test]
@@ -135,10 +174,16 @@ fn version_wins_over_everything() {
 }
 
 #[test]
-fn unknown_command_option_or_bad_value_is_a_usage_error() {
+fn unknown_command_option_or_bad_value_is_a_short_usage_error() {
+    let (code, out) = run(&["stauts"]);
+    assert_eq!(code, 2);
+    assert_eq!(
+        out,
+        "error: unknown command 'stauts'\n  Did you mean `spendbranch status`?\n\nRun `spendbranch --help` to see all commands.\n"
+    );
     let (code, out) = run(&["frobnicate"]);
     assert_eq!(code, 2);
-    assert!(out.starts_with("Unknown command: frobnicate.\n\nspendbranch "));
+    assert!(!out.contains("Did you mean"), "{out}");
     for args in [
         &["--nope"][..],
         &["login", "--server"],
@@ -147,7 +192,9 @@ fn unknown_command_option_or_bad_value_is_a_usage_error() {
     ] {
         let (code, out) = run(args);
         assert_eq!(code, 2, "{args:?}");
-        assert!(out.contains("Usage:"), "{args:?}: help follows the message");
+        assert!(out.starts_with("error: "), "{args:?}: {out}");
+        assert!(out.contains("`spendbranch --help`"), "{args:?}: {out}");
+        assert!(out.lines().count() <= 3, "{args:?}: the help is not dumped");
     }
 }
 

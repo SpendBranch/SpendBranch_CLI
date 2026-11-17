@@ -3,11 +3,13 @@ pub mod args;
 pub mod mascot;
 pub mod messages;
 pub mod render;
+pub mod screen;
 
 use crate::commands::{self, Ctx};
 use crate::env::Env;
 use crate::infra::system::System;
 use args::Parsed;
+use screen::Style;
 use std::{
     io::{BufRead, Write},
     time::Duration,
@@ -49,40 +51,50 @@ pub fn run_with(args: &[String], env: Env, io: &mut Io) -> i32 {
     }
 }
 
+fn ctx<'b>(env: Env<'b>, io: &'b mut Io) -> Ctx<'b> {
+    Ctx {
+        env,
+        out: &mut *io.out,
+        input: &mut *io.input,
+        sleep: io.sleep,
+        open_url: io.open_url,
+        interactive: io.interactive,
+        system: io.system,
+    }
+}
+
 fn dispatch(args: &[String], env: Env, io: &mut Io) -> Result<i32, Box<dyn std::error::Error>> {
-    let help = messages::help(VERSION);
+    // Borders and the owl only on a terminal; color only where truecolor is known to work.
+    let st = Style {
+        color: io.interactive && truecolor(env),
+        tty: io.interactive,
+    };
     let command = match args::parse(args) {
         Ok(c) => c,
-        Err(usage) => {
-            writeln!(io.out, "{usage}\n\n{help}")?;
+        Err(why) => {
+            writeln!(io.out, "{}", screen::usage_error(st, &why, None))?;
             return Ok(2);
         }
     };
-    match command {
-        Parsed::Version => writeln!(io.out, "{VERSION}")?,
-        Parsed::Help => {
-            // The owl only on a terminal: piped help stays plain text. Without color it keeps its shape.
-            if io.interactive {
-                writeln!(io.out, "{}", mascot::mascot(truecolor(env)))?;
-            }
-            writeln!(io.out, "{help}")?
-        }
+    let text = match command {
+        Parsed::Version => VERSION.to_owned(),
+        Parsed::Home if io.interactive => screen::home(st, &commands::home(&ctx(env, io))),
+        Parsed::Home | Parsed::Help => screen::help(st),
+        Parsed::CommandHelp(name) => match messages::command_help(name) {
+            Some(h) => screen::command_help(st, h),
+            None => screen::help(st),
+        },
         Parsed::Unknown(name) => {
-            writeln!(io.out, "Unknown command: {name}.\n\n{help}")?;
+            let what = messages::unknown_command(&name);
+            writeln!(
+                io.out,
+                "{}",
+                screen::usage_error(st, &what, args::suggest(&name))
+            )?;
             return Ok(2);
         }
-        Parsed::Run(command) => {
-            let mut ctx = Ctx {
-                env,
-                out: &mut *io.out,
-                input: &mut *io.input,
-                sleep: io.sleep,
-                open_url: io.open_url,
-                interactive: io.interactive,
-                system: io.system,
-            };
-            return commands::run(command, &mut ctx);
-        }
-    }
+        Parsed::Run(command) => return commands::run(command, &mut ctx(env, io)),
+    };
+    writeln!(io.out, "{text}")?;
     Ok(0)
 }

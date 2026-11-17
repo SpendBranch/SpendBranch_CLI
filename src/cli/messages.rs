@@ -15,33 +15,193 @@ pub const USAGE_HOOKS: &str = "Usage: spendbranch hooks install claude-code | sp
 pub const USAGE_OTEL: &str = "Usage: spendbranch otel <source>. Sources: claude_code, codex.";
 pub const OTEL_CODEX_REFUSED: &str = "Codex is not collected through OpenTelemetry: its telemetry lacks response IDs, so duplicate counting cannot be prevented. Use `spendbranch hooks install codex`.";
 
-pub fn help(version: &str) -> String {
-    format!(
-        "spendbranch {version}
+// --- help and the start screen ------------------------------------------------------
 
-Usage:
-  spendbranch setup [--server URL] [--source claude-code|codex] [--relogin]
-                                     connects the device, discovered agents, and hooks at once
-  spendbranch login [--server URL]   connects this device to your organization
-  spendbranch status                 shows the organization, device, collection, and local buffer
-  spendbranch sync                   reads installed sources, buffers data, and sends it to the server
-  spendbranch enable claude-code     enables reading Claude Code transcripts
-  spendbranch disable claude-code    stops reading while preserving the cursor
-  spendbranch hooks install claude-code   installs the Claude Code session-end hook
-  spendbranch hooks uninstall claude-code removes that hook, preserving others
-  spendbranch enable codex           enables reading Codex rollouts
-  spendbranch disable codex          stops reading Codex while preserving the cursor
-  spendbranch hooks install codex    installs the Codex session-end hook
-  spendbranch hooks uninstall codex  removes that hook, preserving others
-  spendbranch otel <source>          writes the agent OTLP configuration (local relay endpoint)
-  spendbranch relay [--port N]       filters agent OTLP on this machine and forwards it
-  spendbranch logout                 revokes the device and deletes local credentials
-  spendbranch --version
+pub const TAGLINE: &str = "· usage metadata for your organization";
+pub const PRIVACY: [&str; 3] = [
+    "Sends only company-authorized metadata: IDs, model, token counts,",
+    "normalized repository, and branch. Prompts, responses, code, and paths",
+    "never leave the device.",
+];
 
-The CLI sends only company-authorized metadata (IDs, model, token counts,
-normalized repository, and branch). Prompts, responses, code, and paths never leave the device."
-    )
+/// The grouped command list: (group, note, [(command, what it does)]). Order = order of use.
+pub type Group = (
+    &'static str,
+    &'static str,
+    &'static [(&'static str, &'static str)],
+);
+pub const HELP_GROUPS: [Group; 4] = [
+    (
+        "GET STARTED",
+        "",
+        &[
+            ("setup", "connect this device, find agents, install hooks"),
+            ("status", "what is connected and what is waiting"),
+        ],
+    ),
+    (
+        "AGENTS",
+        "<agent> = claude-code | codex",
+        &[
+            ("enable <agent>", "start reading this agent's sessions"),
+            ("disable <agent>", "stop reading (keeps your place)"),
+            ("hooks install <agent>", "send usage when a session ends"),
+            (
+                "hooks uninstall <agent>",
+                "remove that hook, others untouched",
+            ),
+        ],
+    ),
+    (
+        "ACCOUNT",
+        "",
+        &[
+            ("login [--server URL]", "connect to your organization"),
+            ("logout", "revoke this device, delete credentials"),
+        ],
+    ),
+    (
+        "ADVANCED",
+        "",
+        &[
+            ("sync", "read and upload now (hooks do this)"),
+            ("otel <agent>", "write the agent's OpenTelemetry settings"),
+            (
+                "relay [--port N]",
+                "filter OpenTelemetry locally and forward it",
+            ),
+        ],
+    ),
+];
+
+/// `spendbranch <name> --help`: what follows the name, what it does, its options.
+pub struct CommandHelp {
+    pub name: &'static str,
+    pub usage: &'static str,
+    pub about: &'static [&'static str],
+    pub options: &'static [(&'static str, &'static str)],
 }
+
+const AGENT_ARG: (&str, &str) = ("<agent>", "claude-code | codex");
+
+pub const COMMAND_HELP: [CommandHelp; 10] = [
+    CommandHelp {
+        name: "setup",
+        usage: "[--server URL] [--source AGENT] [--relogin]",
+        about: &[
+            "Connects this device, finds Claude Code and Codex, turns on reading",
+            "and installs their hooks, then schedules a sync. Safe to run again.",
+        ],
+        options: &[
+            (
+                "--server URL",
+                "the SpendBranch server (or SPENDBRANCH_SERVER)",
+            ),
+            (
+                "--source AGENT",
+                "only set up this agent (claude-code | codex)",
+            ),
+            ("--relogin", "connect again, even if already connected"),
+        ],
+    },
+    CommandHelp {
+        name: "login",
+        usage: "[--server URL]",
+        about: &[
+            "Connects this device to your organization: you approve a code in the",
+            "browser, and the device key is kept in the system keychain.",
+        ],
+        options: &[(
+            "--server URL",
+            "the SpendBranch server (or SPENDBRANCH_SERVER)",
+        )],
+    },
+    CommandHelp {
+        name: "status",
+        usage: "",
+        about: &[
+            "Shows the organization, this device, each agent and what is waiting",
+            "to upload. The local part shows even when the server is unreachable.",
+        ],
+        options: &[],
+    },
+    CommandHelp {
+        name: "sync",
+        usage: "",
+        about: &[
+            "Reads the agents that are turned on and uploads their usage now.",
+            "Hooks and the schedule run this for you.",
+        ],
+        options: &[],
+    },
+    CommandHelp {
+        name: "enable",
+        usage: "<agent>",
+        about: &["Starts reading this agent's sessions on this device."],
+        options: &[AGENT_ARG],
+    },
+    CommandHelp {
+        name: "disable",
+        usage: "<agent>",
+        about: &[
+            "Stops reading this agent. The reading position is kept, so `enable`",
+            "picks up where it stopped.",
+        ],
+        options: &[AGENT_ARG],
+    },
+    CommandHelp {
+        name: "hooks",
+        usage: "install|uninstall <agent>",
+        about: &[
+            "Adds or removes the session-end hook in the agent's own settings,",
+            "leaving its other hooks untouched.",
+        ],
+        options: &[AGENT_ARG],
+    },
+    CommandHelp {
+        name: "otel",
+        usage: "<agent>",
+        about: &[
+            "Writes the OpenTelemetry settings that point Claude Code at the local",
+            "relay. Only claude-code: Codex is collected through its hook.",
+        ],
+        options: &[AGENT_ARG],
+    },
+    CommandHelp {
+        name: "relay",
+        usage: "[--port N]",
+        about: &[
+            "Receives the agent's OpenTelemetry on this machine, keeps only the",
+            "authorized fields and forwards them. Runs until Ctrl+C.",
+        ],
+        options: &[("--port N", "listen here (default: the port `otel` chose)")],
+    },
+    CommandHelp {
+        name: "logout",
+        usage: "",
+        about: &["Revokes this device on the server and deletes its local credentials."],
+        options: &[],
+    },
+];
+
+pub fn command_help(name: &str) -> Option<&'static CommandHelp> {
+    COMMAND_HELP.iter().find(|h| h.name == name)
+}
+
+pub fn unknown_command(name: &str) -> String {
+    format!("unknown command '{name}'")
+}
+
+pub const HOME_NOT_CONNECTED: &str = "Not connected";
+pub const HOME_START: &str = "Start here";
+pub const HOME_SETUP_WHAT: &str = "connects, finds agents, adds hooks";
+pub const HOME_PRIVACY: [&str; 3] = [
+    "Privacy",
+    "Only company-authorized metadata.",
+    "Prompts and code never leave.",
+];
+pub const HOME_CONNECTED: &str = "this device is connected";
+pub const HOME_UNREADABLE: &str = "Could not read the local state";
 
 use crate::api::{ApiFailure, is_plain_code};
 
