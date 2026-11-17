@@ -227,6 +227,11 @@ pub fn scheduler_not_removed(why: &str) -> String {
 
 pub const OTEL_WARNING: &str = "Do not turn on OTEL_LOG_USER_PROMPTS, OTEL_LOG_TOOL_DETAILS or OTEL_LOG_RAW_API_BODIES. OpenTelemetry carries no history: `spendbranch sync` stays the source of the final numbers.";
 
+pub const NO_SERVER: &str =
+    "No server to pair with: pass `--server URL` or set SPENDBRANCH_SERVER.";
+
+pub const MEMBER_UNKNOWN: &str = "Member: unknown (the server did not say who). Whoever approved the code may not be you: answer yes only if you just approved it yourself.";
+
 pub const RELAY_NEEDS_OTEL: &str = "Run `spendbranch otel claude-code` first: it picks the port and the token the relay checks, and writes them where Claude Code reads them.";
 
 pub fn otel_written(file: &str, windows: bool) -> String {

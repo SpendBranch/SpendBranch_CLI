@@ -84,14 +84,21 @@ pub(super) fn failure(ctx: &mut Ctx, f: &ApiFailure) -> Result<i32> {
 }
 
 pub(super) fn status_of(c: &Connection) -> std::result::Result<StatusView, ApiFailure> {
+    raw_status(c, Client::new(c.server.clone(), VERSION))?
+        .checked()
+        .ok_or_else(|| ApiFailure::bad_response(200))
+}
+
+/// The status as the server sent it, before validation.
+pub(super) fn raw_status(
+    c: &Connection,
+    client: Client,
+) -> std::result::Result<CliStatus, ApiFailure> {
     let signer = Signer {
         device: &c.device,
         key: &c.key,
     };
-    Client::new(c.server.clone(), VERSION)
-        .get::<CliStatus>(STATUS, Some(&signer))?
-        .checked()
-        .ok_or_else(|| ApiFailure::bad_response(200))
+    client.get::<CliStatus>(STATUS, Some(&signer))
 }
 
 pub(super) fn fetch_status(c: &Connection) -> std::result::Result<StatusView, String> {

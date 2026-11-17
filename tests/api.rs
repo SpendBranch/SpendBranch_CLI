@@ -306,3 +306,16 @@ fn failures_do_not_print_server_text() {
     );
     assert!(!f.to_string().contains("secret detail"));
 }
+
+#[test]
+fn only_a_development_build_has_a_default_server() {
+    assert_eq!(
+        spendbranch::api::default_server(true),
+        Some("http://localhost:5173")
+    );
+    assert_eq!(
+        spendbranch::api::default_server(false),
+        None,
+        "a release pairs only with a server it was told"
+    );
+}

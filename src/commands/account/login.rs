@@ -1,10 +1,9 @@
 //! `login`: pair this device with the person's organization.
 use super::super::{Ctx, Result, say};
 use super::status::local_status;
-use super::{Account, Connection, failure, fetch_status, now, open, revoke};
+use super::{Account, Connection, failure, fetch_status, now, open, raw_status, revoke};
 use crate::api::{
-    ApiFailure, DEFAULT_SERVER, PairingStarted, PollOutcome, PollToken, Polled, ServerUrl,
-    StartPairing,
+    ApiFailure, PairingStarted, PollOutcome, PollToken, Polled, ServerUrl, StartPairing,
 };
 use crate::auth::{DeviceId, DeviceKey};
 use crate::cli::{VERSION, messages as m, render};
@@ -19,6 +18,8 @@ const MAX_INTERVAL_SECS: u64 = 120;
 /// A passing network or server trouble while polling is tried again this many times in a row.
 const POLL_RETRIES: u32 = 3;
 const LOCK_TRIES: u32 = 60;
+/// How long the question about the organization waits for the member's name.
+const NAME_WAIT: Duration = Duration::from_secs(5);
 
 enum Paired {
     Approved(crate::api::Approval),
@@ -27,9 +28,12 @@ enum Paired {
 }
 
 pub fn login(ctx: &mut Ctx, server: Option<String>) -> Result<i32> {
-    let text = server
+    let Some(text) = server
         .or_else(|| (ctx.env)("SPENDBRANCH_SERVER").filter(|s| !s.is_empty()))
-        .unwrap_or_else(|| DEFAULT_SERVER.into());
+        .or_else(|| crate::api::default_server(cfg!(debug_assertions)).map(Into::into))
+    else {
+        return say(ctx, m::NO_SERVER, 2);
+    };
     let server = match ServerUrl::parse(&text) {
         Ok(s) => s,
         Err(e) => return say(ctx, &format!("{}: {e}", m::INVALID_SERVER), 2),
@@ -59,8 +63,15 @@ fn connect(
         device: approval.device_id.clone(),
         key: DeviceKey::from_text(&key.to_text()).ok_or("the new key cannot be read back")?,
     };
-    // A status that fails here only means no name to show: the organization is still asked about.
-    let member = fetch_status(&new).ok().and_then(|v| v.member_name);
+    // One status, with a short wait: the person is looking at the prompt. Failing only means no
+    // name to show (and saying so); the organization is still asked about.
+    let raw = raw_status(
+        &new,
+        Client::with_timeout(server.clone(), VERSION, NAME_WAIT),
+    )
+    .ok();
+    let member = raw.as_ref().and_then(|r| r.member().map(str::to_owned));
+    let view = raw.and_then(crate::api::CliStatus::checked);
     if !confirmed(ctx, &approval.organization_name, member.as_deref())? {
         let _ = revoke(&new); // the server already made the device: take it back
         return say(ctx, m::LOGIN_CANCELLED, 1);
@@ -76,7 +87,7 @@ fn connect(
         say(ctx, m::BUFFER_DISCARDED, 0)?;
     }
     save(ctx, account, server, key, &approval)?;
-    show_status(ctx, account, server, &new)?;
+    show_status(ctx, account, server, &new, view)?;
     Ok(0)
 }
 
@@ -84,8 +95,9 @@ fn connect(
 /// sees whose membership the device is paired to (the approver may be someone else).
 fn confirmed(ctx: &mut Ctx, organization: &str, member: Option<&str>) -> Result<bool> {
     writeln!(ctx.out, "Organization: {organization}")?;
-    if let Some(member) = member {
-        writeln!(ctx.out, "Member: {member}")?;
+    match member {
+        Some(member) => writeln!(ctx.out, "Member: {member}")?,
+        None => writeln!(ctx.out, "{}", m::MEMBER_UNKNOWN)?,
     }
     write!(ctx.out, "{}", m::confirm_organization(organization))?;
     ctx.out.flush()?;
@@ -169,14 +181,16 @@ fn save(
     Ok(())
 }
 
-/// What the company authorized, as `status` shows it. A failure here does not undo the login.
+/// What the company authorized, as `status` shows it: the answer from before the question, else
+/// asked again. A failure here does not undo the login.
 fn show_status(
     ctx: &mut Ctx,
     account: &Account,
     server: &ServerUrl,
     new: &Connection,
+    view: Option<crate::api::StatusView>,
 ) -> Result<()> {
-    let Ok(view) = fetch_status(new) else {
+    let Some(view) = view.or_else(|| fetch_status(new).ok()) else {
         return Ok(());
     };
     let local = local_status(ctx, &account.store)?;

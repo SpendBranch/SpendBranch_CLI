@@ -57,6 +57,8 @@ pub struct State {
     polls: usize,
     /// The reply to `GET /api/cli/v1/status`, apart from the device (that one is computed).
     pub organization_name: String,
+    /// The next status answer leaves only after this long (a slow server, once).
+    pub delay_next_status: Option<std::time::Duration>,
     pub sources: Vec<serde_json::Value>,
     pub collection: Vec<serde_json::Value>,
     /// How `POST /api/ingest/v1/events` behaves, and what it was given.
@@ -244,7 +246,18 @@ fn serve(mut conn: TcpStream, state: &Mutex<State>) {
     let Some(req) = read_request(&mut conn) else {
         return;
     };
-    let reply = state.lock().map(|mut s| route(&mut s, req)).unwrap();
+    let (reply, delay) = state
+        .lock()
+        .map(|mut s| {
+            let delay = (req.path == "/api/cli/v1/status")
+                .then(|| s.delay_next_status.take())
+                .flatten();
+            (route(&mut s, req), delay)
+        })
+        .unwrap();
+    if let Some(d) = delay {
+        thread::sleep(d); // outside the lock: the rest of the server keeps answering
+    }
     let (status, headers, body) = reply;
     let mut out = format!(
         "HTTP/1.1 {status} X\r\nContent-Length: {}\r\nConnection: close\r\n",

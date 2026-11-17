@@ -203,6 +203,52 @@ fn the_confirmation_names_the_member_the_device_is_paired_to_before_asking() {
 }
 
 #[test]
+fn the_status_is_fetched_once_per_login() {
+    let rig = Rig::new();
+    authorize(&rig);
+    assert_eq!(rig.run(&["login"]).code, 0);
+    let asked = rig
+        .paths_seen()
+        .iter()
+        .filter(|p| *p == "/api/cli/v1/status")
+        .count();
+    assert_eq!(
+        asked, 1,
+        "the answer before the question is the one shown after"
+    );
+}
+
+#[test]
+fn a_slow_status_does_not_hold_the_question_and_says_the_member_is_unknown() {
+    let rig = Rig::new();
+    authorize(&rig);
+    rig.server
+        .configure(|s| s.delay_next_status = Some(std::time::Duration::from_secs(12)));
+    let started = std::time::Instant::now();
+    let out = rig.run_with(&["login"], "n\n", false, &[]);
+    assert!(
+        started.elapsed() < std::time::Duration::from_secs(9),
+        "waited {:?} for the name",
+        started.elapsed()
+    );
+    assert!(out.text.contains(messages::MEMBER_UNKNOWN), "{}", out.text);
+    assert!(out.text.contains("Is that your organization?"));
+}
+
+#[test]
+fn a_status_with_one_odd_part_still_names_the_member() {
+    // Too many sources makes the whole status unusable, but not the name of the member.
+    let rig = Rig::new();
+    rig.server.configure(|s| {
+        s.sources = (0..9)
+            .map(|_| json!({"source": "other", "state": "active", "parserVersion": "x/v1", "fields": []}))
+            .collect()
+    });
+    let out = rig.run_with(&["login"], "n\n", false, &[]);
+    assert!(out.text.contains("Member: Jane Doe"), "{}", out.text);
+}
+
+#[test]
 fn yes_in_any_case_confirms() {
     for answer in ["y\n", "Y\n", "yes\n", "YES\n", "  yes  \n"] {
         let rig = Rig::new();

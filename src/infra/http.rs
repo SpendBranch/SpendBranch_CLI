@@ -44,8 +44,22 @@ impl Client {
     }
 
     pub fn with_clock(server: ServerUrl, cli_version: &str, clock: Box<dyn Clock>) -> Self {
+        Self::build(server, cli_version, clock, TIMEOUT)
+    }
+
+    /// A client that gives up sooner than the usual 15 s: for a call someone is waiting on.
+    pub fn with_timeout(server: ServerUrl, cli_version: &str, timeout: Duration) -> Self {
+        Self::build(server, cli_version, Box::new(SystemClock), timeout)
+    }
+
+    fn build(
+        server: ServerUrl,
+        cli_version: &str,
+        clock: Box<dyn Clock>,
+        timeout: Duration,
+    ) -> Self {
         let config = Config::builder()
-            .timeout_global(Some(TIMEOUT))
+            .timeout_global(Some(timeout))
             // A redirect could carry the signed request to another host: never follow one.
             .max_redirects(0)
             // Errors are read from the body, not raised by the status line.
