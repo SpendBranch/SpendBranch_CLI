@@ -8,14 +8,45 @@ use std::{
 
 /// Makes sure the folder exists. A folder we create is 0700. A folder that already exists
 /// is never touched (it may be the user's home or a shared folder chosen by mistake), but it
-/// is refused if anybody could write in it: another user could plant the files we open.
-/// Group write is allowed: with a private group per user, the Debian default, it is normal.
+/// is refused unless only this user can write in it (`folder_is_private`): anyone else could
+/// plant the files we open, or swap the environment file the user loads.
 pub fn create_dir(path: &Path) -> io::Result<()> {
     match fs::metadata(path) {
         Ok(meta) => check_existing(path, &meta),
         Err(e) if e.kind() == io::ErrorKind::NotFound => create_new(path),
         Err(e) => Err(e),
     }
+}
+
+/// Only this user can write in a folder of this `mode`, `owner` and `group` (`me` is this
+/// process's user): it is ours, nobody else may write, and group write only with the user's
+/// own private group. That group is recognised by its number being the user's (the Debian,
+/// Ubuntu and Fedora convention).
+// ponytail: the private group is guessed from gid == uid; reading /etc/group would know for sure.
+pub fn folder_is_private(mode: u32, owner: u32, group: u32, me: u32) -> bool {
+    owner == me && mode & 0o002 == 0 && (mode & 0o020 == 0 || group == owner)
+}
+
+/// This process's effective user, without `unsafe`: the owner of `/proc/self` on Linux, else
+/// of a file just made in the user's temporary folder.
+#[cfg(unix)]
+fn my_uid() -> io::Result<u32> {
+    use std::os::unix::fs::MetadataExt;
+    if let Ok(meta) = fs::metadata("/proc/self") {
+        return Ok(meta.uid());
+    }
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| d.subsec_nanos());
+    let probe = std::env::temp_dir().join(format!(".spendbranch-{}-{nanos}", std::process::id()));
+    let uid = OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&probe)?
+        .metadata()?
+        .uid();
+    let _ = fs::remove_file(&probe);
+    Ok(uid)
 }
 
 fn create_new(path: &Path) -> io::Result<()> {
@@ -42,12 +73,12 @@ fn check_existing(path: &Path, meta: &fs::Metadata) -> io::Result<()> {
     }
     #[cfg(unix)]
     {
-        use std::os::unix::fs::PermissionsExt;
-        if meta.permissions().mode() & 0o002 != 0 {
+        use std::os::unix::fs::MetadataExt;
+        if !folder_is_private(meta.mode(), meta.uid(), meta.gid(), my_uid()?) {
             return Err(io::Error::new(
                 io::ErrorKind::PermissionDenied,
                 format!(
-                    "{} can be written by any user; make it private (chmod 700) or pick another folder with SPENDBRANCH_HOME",
+                    "{} can be written by other users or belongs to someone else; make it yours and private (chmod 700) or pick another folder with SPENDBRANCH_HOME",
                     path.display()
                 ),
             ));
@@ -68,7 +99,9 @@ pub fn open(path: &Path, append: bool) -> io::Result<File> {
     #[cfg(unix)]
     {
         use std::os::unix::fs::OpenOptionsExt;
-        options.mode(0o600);
+        // A symlink planted under one of our names is never followed: no file elsewhere is
+        // truncated, appended to or chmodded through it.
+        options.mode(0o600).custom_flags(libc::O_NOFOLLOW);
     }
     let file = options.open(path)?;
     #[cfg(unix)]

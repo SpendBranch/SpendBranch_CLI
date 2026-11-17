@@ -45,6 +45,10 @@ ureq = { version = "3.5", default-features = false, features = ["rustls", "platf
 # Direct, only to hand ureq a crypto provider that has TLS 1.3 suites and nothing older.
 rustls = { version = "0.23", default-features = false, features = ["ring", "std"] }
 
+# `O_NOFOLLOW`, which std does not expose. Already in the tree (ring, cc).
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+
 # The system credential store: one crate per platform, chosen at compile time.
 [target.'cfg(target_os = "macos")'.dependencies]
 apple-native-keyring-store = { version = "1", features = ["keychain"] }

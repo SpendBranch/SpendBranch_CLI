@@ -1771,6 +1771,7 @@ dependencies = [
  "jsonschema",
  "keyring-core",
  "lexopt",
+ "libc",
  "rcgen",
  "rusqlite",
  "rustls",

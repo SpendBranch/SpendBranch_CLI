@@ -321,6 +321,65 @@ mod folders {
     }
 
     #[test]
+    fn only_a_folder_this_user_alone_can_write_to_is_trusted() {
+        use private_fs::folder_is_private as private;
+        let me = 1000;
+        assert!(private(0o700, me, me, me));
+        assert!(private(0o755, me, 50, me));
+        assert!(
+            private(0o770, me, me, me),
+            "group write with the user's own group"
+        );
+        assert!(
+            !private(0o770, me, 100, me),
+            "group write with a shared group"
+        );
+        assert!(!private(0o775, me, 20, me));
+        assert!(!private(0o702, me, me, me), "anybody can write");
+        assert!(!private(0o700, 1001, 1001, me), "someone else's folder");
+        assert!(!private(0o700, 0, 0, me));
+    }
+
+    #[test]
+    fn a_folder_writable_by_a_shared_group_is_refused() {
+        use std::os::unix::fs::MetadataExt;
+        let tmp = tempfile::tempdir().unwrap();
+        let mine = fs::metadata(tmp.path()).unwrap().uid();
+        // A group this user belongs to that is not its private one, if there is any.
+        let ids = std::process::Command::new("id").arg("-G").output().unwrap();
+        let Some(shared) = String::from_utf8_lossy(&ids.stdout)
+            .split_whitespace()
+            .filter_map(|g| g.parse::<u32>().ok())
+            .find(|g| *g != mine)
+        else {
+            return;
+        };
+        let dir = tmp.path().join("shared");
+        fs::create_dir(&dir).unwrap();
+        std::os::unix::fs::chown(&dir, None, Some(shared)).unwrap();
+        set(&dir, 0o770);
+        let err = private_fs::create_dir(&dir).unwrap_err();
+        assert_eq!(err.kind(), std::io::ErrorKind::PermissionDenied);
+        assert_eq!(mode(&dir), 0o770, "left as it was");
+    }
+
+    #[test]
+    fn a_symlink_under_one_of_our_names_is_never_followed() {
+        let tmp = tempfile::tempdir().unwrap();
+        let data = tmp.path().join("data");
+        private_fs::create_dir(&data).unwrap();
+        let victim = tmp.path().join("victim.txt");
+        fs::write(&victim, "keep me").unwrap();
+        set(&victim, 0o644);
+        std::os::unix::fs::symlink(&victim, data.join("hook.log")).unwrap();
+        std::os::unix::fs::symlink(&victim, data.join("otel-claude_code.env")).unwrap();
+        assert!(spendbranch::infra::hook_log::append(&data, "{}").is_err());
+        assert!(private_fs::write(&data.join("otel-claude_code.env"), "evil").is_err());
+        assert_eq!(fs::read_to_string(&victim).unwrap(), "keep me");
+        assert_eq!(mode(&victim), 0o644, "not chmodded through the link");
+    }
+
+    #[test]
     fn a_file_where_the_folder_should_be_is_an_error() {
         let tmp = tempfile::tempdir().unwrap();
         let file = tmp.path().join("not-a-folder");
