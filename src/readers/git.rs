@@ -113,10 +113,14 @@ impl RepoResolver {
 
 /// Anything that may make this machine contact another one: `\\host\share`, `//host/share`
 /// and every verbatim or device form (`\\?\UNC\...` in any case, `\\?\GLOBALROOT\...`,
-/// `\\.\pipe\...`). The folder comes from a transcript, so only a plain drive passes:
-/// `C:\...`, `\\?\C:\...`, `\\.\C:\...`. Decided on the text, the same on every platform.
+/// `\\.\pipe\...`, an NT `\??\...`, a device path with `..`). The folder comes from a
+/// transcript, so only a plain drive passes: `C:\...`, `\\?\C:\...`, `\\.\C:\...`. Decided on
+/// the text, the same on every platform.
 pub fn is_network_path(path: &str) -> bool {
     let p = path.replace('/', "\\");
+    if p.starts_with("\\??\\") {
+        return true; // an NT path: Win32 passes it through as it is
+    }
     let Some(rest) = p.strip_prefix("\\\\") else {
         return false;
     };
@@ -126,5 +130,8 @@ pub fn is_network_path(path: &str) -> bool {
     else {
         return true;
     };
+    if device.split('\\').any(|part| part == "..") {
+        return true; // `\\.\C:\..\UNC\...` climbs out of the drive
+    }
     !matches!(device.as_bytes(), [d, b':'] | [d, b':', b'\\', ..] if d.is_ascii_alphabetic())
 }

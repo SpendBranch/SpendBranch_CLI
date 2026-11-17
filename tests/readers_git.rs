@@ -153,6 +153,11 @@ fn network_shares_are_recognized_in_every_spelling() {
         r"\\.\pipe\name",
         r"\\?\",
         r"\\?\C",
+        // NT paths Win32 passes through, and a drive that climbs out with `..`
+        r"\??\UNC\server\share",
+        "/??/UNC/server/share",
+        r"\\.\C:\..\UNC\server\share",
+        r"\\?\C:\work\..\..\UNC\server",
     ] {
         assert!(is_network_path(share), "{share}");
     }
