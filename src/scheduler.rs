@@ -15,6 +15,25 @@ pub struct Job<'a> {
     pub home: Option<&'a str>,
 }
 
+/// The path to write into hooks and schedules for the running executable. Homebrew keeps each
+/// version in `<prefix>/Cellar/<name>/<version>/` and deletes it on upgrade, but keeps
+/// `<prefix>/opt/<name>/` pointing at the current one: a path inside a version folder becomes
+/// the same path under `opt`. Any other path is returned as it is.
+pub fn stable_exe(path: &str) -> String {
+    let Some((prefix, tail)) = path.rsplit_once("/Cellar/") else {
+        return path.to_owned();
+    };
+    let mut parts = tail.splitn(3, '/');
+    match (parts.next(), parts.next(), parts.next()) {
+        (Some(name), Some(version), Some(rest))
+            if !name.is_empty() && !version.is_empty() && !rest.is_empty() =>
+        {
+            format!("{prefix}/opt/{name}/{rest}")
+        }
+        _ => path.to_owned(),
+    }
+}
+
 fn posix(text: &str) -> String {
     format!("'{}'", text.replace('\'', "'\\''"))
 }

@@ -95,3 +95,114 @@ jobs:
           size=$(wc -c < "$bin")
           echo "release binary: $size bytes"
           test "$size" -lt 10000000
+
+  # The install scripts and the package generators: lint, and the generators make valid files.
+  scripts:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: shellcheck
+        run: |
+          shellcheck --version
+          shellcheck -s sh install/install.sh .github/scripts/*.sh packaging/homebrew/formula.sh packaging/winget/manifests.sh
+      - name: The Homebrew formula and winget manifests are generated whole
+        run: |
+          sums="$RUNNER_TEMP/SHA256SUMS"
+          for t in linux-x64 linux-arm64 macos-x64 macos-arm64; do
+            echo "$(printf '%064d' 0)  spendbranch-1.2.3-$t.tar.gz"
+          done > "$sums"
+          for t in windows-x64 windows-arm64; do
+            echo "$(printf 'ab%062d' 0)  spendbranch-1.2.3-$t.zip"
+          done >> "$sums"
+          sh packaging/homebrew/formula.sh 1.2.3 "$sums" > "$RUNNER_TEMP/spendbranch.rb"
+          ruby -c "$RUNNER_TEMP/spendbranch.rb"
+          grep -c 'sha256 "0\{64\}"' "$RUNNER_TEMP/spendbranch.rb" | grep -qx 4
+          dir=$(sh packaging/winget/manifests.sh 1.2.3 "$sums" "$RUNNER_TEMP/winget")
+          for f in "$dir"/*.yaml; do ruby -ryaml -e 'YAML.load_file(ARGV[0])' "$f"; done
+          grep -c "InstallerSha256: AB0\{62\}" "$dir/SpendBranch.CLI.installer.yaml" | grep -qx 2
+          # A missing sum stops it, with nothing printed.
+          grep -v macos-x64 "$sums" > "$sums.short"
+          if sh packaging/homebrew/formula.sh 1.2.3 "$sums.short" > "$RUNNER_TEMP/short.rb"; then
+            echo "::error::formula.sh accepted SHA256SUMS without macos-x64"
+            exit 1
+          fi
+          test ! -s "$RUNNER_TEMP/short.rb"
+
+  # install.sh / install.ps1 end to end: package a build as the release does, install it from
+  # that folder (fresh HOME, Path put back), install over it, and refuse a wrong checksum.
+  installers:
+    name: installers ${{ matrix.name }}
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { name: linux-x64, os: ubuntu-latest }
+          - { name: macos-arm64, os: macos-latest }
+          - { name: windows-x64, os: windows-latest }
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Install Rust
+        run: rustup toolchain install stable --profile minimal --no-self-update && rustup default stable
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+        with:
+          key: installers-${{ matrix.name }}
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+      - run: cargo build --locked
+      - name: install.sh
+        if: runner.os != 'Windows'
+        run: sh .github/scripts/installer-test.sh target/debug/spendbranch ${{ matrix.name }}
+      - name: Package for install.ps1
+        if: runner.os == 'Windows'
+        shell: bash
+        run: sh .github/scripts/package.sh target/debug/spendbranch.exe 0.0.0-test ${{ matrix.name }} "$RUNNER_TEMP/pkg"
+      - name: install.ps1 (Windows PowerShell 5.1)
+        if: runner.os == 'Windows'
+        shell: powershell
+        run: .\.github\scripts\installer-test.ps1 -Package "$env:RUNNER_TEMP\pkg"
+      - name: PSScriptAnalyzer
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          Install-Module PSScriptAnalyzer -RequiredVersion 1.24.0 -Force -Scope CurrentUser
+          $found = 'install/install.ps1', '.github/scripts/installer-test.ps1' | ForEach-Object {
+            Invoke-ScriptAnalyzer -Path $_ -Severity Warning, Error -ExcludeRule PSAvoidUsingWriteHost
+          }
+          $found | Format-Table -AutoSize | Out-String | Write-Host
+          if ($found) { exit 1 }
+
+  # The release builds Linux static against musl: run the tests and the performance budget on
+  # that build, then the binary and install.sh on an old glibc (Debian 11) and on Alpine.
+  musl:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      TARGET: x86_64-unknown-linux-musl
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Install Rust, the musl target and C compiler
+        run: |
+          rustup toolchain install stable --profile minimal --no-self-update && rustup default stable
+          rustup target add "$TARGET"
+          sudo apt-get update -qq && sudo apt-get install -y -qq musl-tools
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+        with:
+          key: musl
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+      - run: cargo test --locked --no-fail-fast --target "$TARGET"
+      - name: Performance budget (musl)
+        run: cargo test --release --locked --target "$TARGET" --test perf -- --ignored --nocapture --test-threads=1
+      - name: Static binary
+        run: |
+          cargo build --release --locked --target "$TARGET"
+          bin="target/$TARGET/release/spendbranch"
+          file "$bin" | tee /dev/stderr | grep -Eq 'statically linked|static-pie linked'
+          test "$(wc -c < "$bin")" -lt 10000000
+      - name: Runs and installs on Debian 11 and Alpine
+        run: |
+          for image in debian:11 alpine:3.20; do
+            echo "== $image"
+            docker run --rm -v "$PWD:/src:ro" -w /src "$image" sh -c \
+              "./target/$TARGET/release/spendbranch --version && sh .github/scripts/installer-test.sh target/$TARGET/release/spendbranch linux-x64"
+          done

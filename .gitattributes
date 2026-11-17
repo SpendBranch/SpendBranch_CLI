@@ -1,2 +1,5 @@
 # Fixtures are byte-exact: parsers depend on every "\n", including the last one.
 tests/fixtures/** -text
+
+# Shell scripts run with sh/bash everywhere, Windows runners included: LF only.
+*.sh text eol=lf

@@ -96,6 +96,27 @@ fn an_existing_file_is_backed_up_keeps_its_mode_and_its_other_content() {
 }
 
 #[test]
+fn a_homebrew_install_writes_the_path_that_survives_an_upgrade() {
+    let mut rig = Rig::new();
+    rig.system.exe = "/opt/homebrew/Cellar/spendbranch/0.2.0/bin/spendbranch".into();
+    let out = rig.run(&["hooks", "install", "claude-code"]);
+    assert_eq!(out.code, 0, "{}", out.text);
+    let text = fs::read_to_string(claude_file(&rig)).unwrap();
+    assert!(
+        text.contains("'/opt/homebrew/opt/spendbranch/bin/spendbranch' hook claude-code"),
+        "{text}"
+    );
+    assert!(!text.contains("Cellar"), "{text}");
+    // After the upgrade the same stable path is found: nothing to change.
+    rig.system.exe = "/opt/homebrew/Cellar/spendbranch/0.3.0/bin/spendbranch".into();
+    let again = rig.run(&["hooks", "install", "claude-code"]);
+    assert_eq!(
+        (again.code, again.text.as_str()),
+        (0, "The Claude Code hook is already installed.\n")
+    );
+}
+
+#[test]
 fn a_file_that_is_not_valid_json_is_never_touched() {
     let rig = Rig::new();
     let file = codex_file(&rig);
