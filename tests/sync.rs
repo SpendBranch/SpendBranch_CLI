@@ -254,6 +254,25 @@ fn the_server_asking_for_a_long_pause_is_obeyed_without_waiting_for_it() {
 }
 
 #[test]
+fn a_next_attempt_further_out_than_any_server_may_ask_is_forgotten() {
+    // Saved while the clock ran a month ahead: once it is right again, uploads must not wait a month.
+    let rig = Rig::ready();
+    rig.buffer(now_ms(), events(2));
+    let month_ahead = Iso::from_millis(now_ms() + 30 * DAY).unwrap().to_string();
+    rig.store().sync_set("nextAttemptAt", &month_ahead).unwrap();
+    let out = rig.run(&["sync"]);
+    assert_eq!(out.code, 0, "{}", out.text);
+    assert_eq!(rig.buffered(), 0);
+    assert_eq!(rig.sync_state("nextAttemptAt"), None);
+    // ...while one within the server's own ceiling is still obeyed.
+    rig.buffer(now_ms(), events(1));
+    let hours = Iso::from_millis(now_ms() + 20 * HOUR).unwrap().to_string();
+    rig.store().sync_set("nextAttemptAt", &hours).unwrap();
+    assert!(rig.run(&["sync"]).text.contains("Upload deferred until"));
+    assert_eq!(rig.buffered(), 1);
+}
+
+#[test]
 fn a_repeat_of_what_the_server_already_has_is_deleted_quietly() {
     let rig = Rig::ready();
     rig.buffer(now_ms(), events(2));

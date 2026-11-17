@@ -16,6 +16,9 @@ pub const MAX_BODY_BYTES: usize = 1024 * 1024;
 pub const TRIES_PER_RUN: u32 = 3;
 /// A wait longer than this is not slept through: it is saved as `nextAttemptAt`.
 pub const MAX_SLEEP: Duration = Duration::from_secs(8);
+/// The furthest a saved `nextAttemptAt` may be: the server's longest `Retry-After` (24 h) and
+/// a margin. Anything past it is a clock that was wrong when it was saved.
+pub const MAX_DEFER_MS: i64 = (crate::api::MAX_RETRY_AFTER_SECS as i64 + 15 * 60) * 1000;
 
 /// A buffered observation that passed the contract again on the way out.
 #[derive(Clone, Debug)]

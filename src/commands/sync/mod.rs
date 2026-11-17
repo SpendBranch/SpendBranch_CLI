@@ -50,6 +50,11 @@ pub fn run(ctx: &mut Ctx) -> Result<i32> {
         return say(ctx, m::SYNC_RUNNING, 0);
     };
     let mut account = open(ctx)?;
+    // Before anything can end the run early: the hook's interval counts from the attempt, so a
+    // sync that keeps failing is not started again on every Stop.
+    account
+        .store
+        .sync_set("lastSyncAttemptAt", &now().to_string())?;
     let connection = match account::load(&account)? {
         Loaded::NotConnected => return say(ctx, m::NOT_CONNECTED, 1),
         Loaded::Broken(text) => return say(ctx, &text, 1),

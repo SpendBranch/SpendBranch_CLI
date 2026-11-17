@@ -298,15 +298,22 @@ enum Pass {
     Done(Option<i32>),
 }
 
-/// `true` (after saying so) while `nextAttemptAt` is still in the future.
+/// `true` (after saying so) while `nextAttemptAt` is still in the future. One further out than
+/// any server may ask for was saved under a clock that ran ahead: it is forgotten, or uploads
+/// would stop for as long as the clock was wrong.
 fn deferred(ctx: &mut Ctx, store: &Store) -> Result<bool> {
+    let now = ms();
     let Some(next) = store
         .sync_get("nextAttemptAt")?
         .and_then(|t| Iso::parse(&t))
-        .filter(|t| t.millis() > ms())
+        .filter(|t| t.millis() > now)
     else {
         return Ok(false);
     };
+    if next.millis() - now > rules::MAX_DEFER_MS {
+        store.sync_delete(&["nextAttemptAt"])?;
+        return Ok(false);
+    }
     let (waiting, _) = store.pending_counts()?;
     writeln!(
         ctx.out,

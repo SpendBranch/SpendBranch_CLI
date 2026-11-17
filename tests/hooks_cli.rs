@@ -254,6 +254,27 @@ fn a_stop_waits_ten_minutes_after_the_last_sync_but_a_session_end_does_not() {
 }
 
 #[test]
+fn a_sync_that_ended_early_still_holds_the_next_stop_back() {
+    let rig = Rig::ready();
+    let at = spendbranch::contract::Iso::from_millis(rig::now_ms())
+        .unwrap()
+        .to_string();
+    rig.buffer(
+        rig::now_ms(),
+        vec![rig::observation("claude_code", "s", "e1", &at)],
+    );
+    rig.server.configure(|s| {
+        s.ingest
+            .fail_next
+            .push_back((429, "RATE_LIMITED".into(), Some(600)))
+    });
+    assert_eq!(rig.run(&["sync"]).code, 1, "deferred: no sync finished");
+    rig.claude_event("Stop");
+    rig.run(&["hook", "claude-code"]);
+    assert_eq!(spawned(&rig), 0, "a sync was tried a moment ago");
+}
+
+#[test]
 fn codex_never_reads_stdin_and_logs_its_event() {
     let rig = Rig::ready();
     *rig.system.stdin.borrow_mut() = Some(b"{\"last_assistant_message\":\"PRIVATE\"}".to_vec());

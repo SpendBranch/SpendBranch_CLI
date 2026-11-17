@@ -22,7 +22,7 @@ pub struct ApiFailure {
 }
 
 /// A server cannot make the CLI sleep for longer than this.
-const MAX_RETRY_AFTER_SECS: u64 = 24 * 60 * 60;
+pub const MAX_RETRY_AFTER_SECS: u64 = 24 * 60 * 60;
 
 impl ApiFailure {
     pub fn network() -> Self {
