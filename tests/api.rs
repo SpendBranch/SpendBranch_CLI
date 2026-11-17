@@ -327,14 +327,17 @@ fn failures_do_not_print_server_text() {
 }
 
 #[test]
-fn only_a_development_build_has_a_default_server() {
+fn a_release_has_only_the_https_server_it_was_built_with() {
+    use spendbranch::api::default_server;
+    let prod = Some("https://api.example.com");
+    assert_eq!(default_server(true, prod), Some("http://localhost:5173"));
+    assert_eq!(default_server(false, prod), prod);
     assert_eq!(
-        spendbranch::api::default_server(true),
-        Some("http://localhost:5173")
-    );
-    assert_eq!(
-        spendbranch::api::default_server(false),
+        default_server(false, None),
         None,
-        "a release pairs only with a server it was told"
+        "a release built without one pairs only with a server it is told"
     );
+    for bad in ["http://api.example.com", "https://", "", "api.example.com"] {
+        assert_eq!(default_server(false, Some(bad)), None, "{bad}");
+    }
 }

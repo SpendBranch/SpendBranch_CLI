@@ -39,7 +39,7 @@ pub(in crate::commands) fn login_with(
 ) -> Result<i32> {
     let Some(text) = server
         .or_else(|| (ctx.env)("SPENDBRANCH_SERVER").filter(|s| !s.is_empty()))
-        .or_else(|| crate::api::default_server(cfg!(debug_assertions)).map(Into::into))
+        .or_else(|| crate::api::default_server(cfg!(debug_assertions), crate::api::RELEASE_SERVER).map(Into::into))
     else {
         return say(ctx, m::NO_SERVER, 2);
     };
