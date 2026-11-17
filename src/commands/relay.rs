@@ -3,6 +3,7 @@
 use super::{
     Ctx, Result,
     account::{self, Loaded},
+    otel::{PORT_KEY, TOKEN_KEY},
     say,
 };
 use crate::cli::{VERSION, messages as m};
@@ -29,13 +30,29 @@ pub(super) fn run(ctx: &mut Ctx, port: Option<u16>) -> Result<i32> {
         Loaded::Broken(text) => return say(ctx, &text, 1),
         Loaded::Ready(c) => c,
     };
-    let port = port.unwrap_or(relay::DEFAULT_PORT);
+    let store = &account.store;
+    let (Some(token), Some(agent_port)) = (
+        store.meta_get(TOKEN_KEY)?,
+        store
+            .meta_get(PORT_KEY)?
+            .and_then(|p| p.parse::<u16>().ok()),
+    ) else {
+        return say(ctx, m::RELAY_NEEDS_OTEL, 1);
+    };
+    let port = port.unwrap_or(agent_port);
     let listener = match relay_server::bind(port) {
         Ok(l) => l,
-        Err(e) => return say(ctx, &m::relay_port_busy(port, &e.kind().to_string()), 1),
+        Err(e) => {
+            let busy = m::relay_port_busy(port, port == agent_port, &e.kind().to_string());
+            return say(ctx, &busy, 1);
+        }
     };
     let port = listener.local_addr().map_or(port, |a| a.port());
-    say(ctx, &m::relay_listening(port, &connection.server.base()), 0)?;
+    say(
+        ctx,
+        &m::relay_listening(port, agent_port, &connection.server.base()),
+        0,
+    )?;
     ctx.out.flush()?;
 
     let (server, device, key) = (&connection.server, &connection.device, &connection.key);
@@ -49,10 +66,11 @@ pub(super) fn run(ctx: &mut Ctx, port: Option<u16>) -> Result<i32> {
     };
     let (events, seen) = mpsc::channel();
     let stop = AtomicBool::new(false);
-    let (listener_ref, stop_ref, forward_ref) = (&listener, &stop, &forward);
+    let (listener_ref, stop_ref, forward_ref, token) = (&listener, &stop, &forward, &token);
     let served = std::thread::scope(|scope| {
-        let worker =
-            scope.spawn(move || relay_server::serve(listener_ref, stop_ref, forward_ref, &events));
+        let worker = scope.spawn(move || {
+            relay_server::serve(listener_ref, stop_ref, token, forward_ref, &events)
+        });
         let shown = show_events(ctx, &seen, &stop, port);
         if shown.is_err() {
             stop.store(true, Ordering::Relaxed); // the screen is gone: do not serve on

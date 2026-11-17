@@ -45,9 +45,11 @@ pub fn wake(port: u16) {
 
 /// Serves until `stop` is set; after setting it, connect to the listener once, so the wait for
 /// the next connection ends. Connections are handled on their own threads, at most 32 at once.
+/// Only a request that carries `token` gets past the door.
 pub fn serve(
     listener: &TcpListener,
     stop: &AtomicBool,
+    token: &str,
     forward: Forward,
     events: &Sender<Event>,
 ) -> io::Result<()> {
@@ -67,7 +69,7 @@ pub fn serve(
                     }
                     let (limit, active, events) = (&limit, &active, events.clone());
                     scope.spawn(move || {
-                        let _ = handle(stream, peer, limit, forward, &events);
+                        let _ = handle(stream, peer, token, limit, forward, &events);
                         active.fetch_sub(1, Ordering::SeqCst);
                     });
                 }
@@ -100,8 +102,21 @@ fn reply_with(mut stream: &TcpStream, status: u16, body: &str) -> io::Result<()>
     )
 }
 
+/// One read that never waits past `deadline`: a client that trickles bytes cannot hold a slot
+/// longer than the request's whole allowance. `None` when gone, too slow or out of time.
+fn read_by(mut stream: &TcpStream, buf: &mut [u8], deadline: Instant) -> Option<usize> {
+    let left = deadline.checked_duration_since(Instant::now())?;
+    stream
+        .set_read_timeout(Some(left.min(READ_WAIT).max(Duration::from_millis(1))))
+        .ok()?;
+    match stream.read(buf) {
+        Ok(0) | Err(_) => None,
+        Ok(n) => Some(n),
+    }
+}
+
 /// The request line and headers as text, and the body bytes that came with them.
-fn read_head(mut stream: &TcpStream, deadline: Instant) -> Result<(String, Vec<u8>), u16> {
+fn read_head(stream: &TcpStream, deadline: Instant) -> Result<(String, Vec<u8>), u16> {
     let mut buf = Vec::new();
     let mut chunk = [0u8; 4096];
     loop {
@@ -109,13 +124,12 @@ fn read_head(mut stream: &TcpStream, deadline: Instant) -> Result<(String, Vec<u
             let head = String::from_utf8(buf[..end].to_vec()).map_err(|_| 400u16)?;
             return Ok((head, buf[end + 4..].to_vec()));
         }
-        if buf.len() > MAX_HEAD || Instant::now() > deadline {
+        if buf.len() > MAX_HEAD {
             return Err(400);
         }
-        match stream.read(&mut chunk) {
-            Ok(0) | Err(_) => return Err(0), // gone or too slow: nothing to answer
-            Ok(n) => buf.extend_from_slice(&chunk[..n]),
-        }
+        // Gone, too slow or out of time: nothing to answer.
+        let n = read_by(stream, &mut chunk, deadline).ok_or(0u16)?;
+        buf.extend_from_slice(&chunk[..n]);
     }
 }
 
@@ -146,6 +160,7 @@ impl Request {
         for name in [
             "host",
             "origin",
+            relay::TOKEN_HEADER,
             "content-type",
             "content-encoding",
             "content-length",
@@ -184,7 +199,7 @@ fn content_length(request: &Request) -> Result<Option<u64>, ()> {
 /// The announced body: what came with the head, then the rest. `None` if the client is gone
 /// or too slow.
 fn read_body(
-    mut stream: &TcpStream,
+    stream: &TcpStream,
     mut body: Vec<u8>,
     wanted: usize,
     deadline: Instant,
@@ -192,14 +207,9 @@ fn read_body(
     body.truncate(wanted); // bytes sent after the body (pipelining) are not ours
     let mut chunk = [0u8; 8192];
     while body.len() < wanted {
-        if Instant::now() > deadline {
-            return None;
-        }
         let room = (wanted - body.len()).min(chunk.len());
-        match stream.read(&mut chunk[..room]) {
-            Ok(0) | Err(_) => return None,
-            Ok(n) => body.extend_from_slice(&chunk[..n]),
-        }
+        let n = read_by(stream, &mut chunk[..room], deadline)?;
+        body.extend_from_slice(&chunk[..n]);
     }
     Some(body)
 }
@@ -207,11 +217,11 @@ fn read_body(
 fn handle(
     stream: TcpStream,
     peer: SocketAddr,
+    token: &str,
     limit: &Mutex<RateLimit>,
     forward: Forward,
     events: &Sender<Event>,
 ) -> io::Result<()> {
-    stream.set_read_timeout(Some(READ_WAIT))?;
     stream.set_write_timeout(Some(READ_WAIT))?;
     let deadline = Instant::now() + REQUEST_WAIT;
     let (head, body) = match read_head(&stream, deadline) {
@@ -222,7 +232,8 @@ fn handle(
     let Some(request) = Request::parse(&head) else {
         return reply(&stream, 400);
     };
-    let wanted = match screen(&request, peer) {
+    // The token is checked here, before the rate limit counts anything.
+    let wanted = match screen(&request, peer, token) {
         Ok(n) => n,
         Err(status) => return reply(&stream, status),
     };
@@ -258,17 +269,27 @@ fn handle(
 
 /// The request's head against the relay's table of answers: the length of the body to read, or
 /// the status to answer with.
-fn screen(request: &Request, peer: SocketAddr) -> Result<usize, u16> {
-    let content_length = content_length(request).map_err(|()| 400u16)?;
-    relay::check(&Head {
-        peer_is_loopback: peer.ip().to_canonical().is_loopback(),
-        method: &request.method,
-        path: &request.path,
-        host: request.get("host"),
-        origin: request.get("origin"),
-        content_type: request.get("content-type"),
-        content_encoding: request.get("content-encoding"),
-        transfer_encoding: request.get("transfer-encoding"),
-        content_length,
-    })
+fn screen(request: &Request, peer: SocketAddr, token: &str) -> Result<usize, u16> {
+    let length = content_length(request);
+    let checked = relay::check(
+        &Head {
+            peer_is_loopback: peer.ip().to_canonical().is_loopback(),
+            method: &request.method,
+            path: &request.path,
+            host: request.get("host"),
+            origin: request.get("origin"),
+            token: request.get(relay::TOKEN_HEADER),
+            content_type: request.get("content-type"),
+            content_encoding: request.get("content-encoding"),
+            transfer_encoding: request.get("transfer-encoding"),
+            content_length: length.unwrap_or(None),
+        },
+        token,
+    );
+    // A bad length is a 400, but only for a request that got past the door.
+    match (checked, length) {
+        (Err(403), _) => Err(403),
+        (_, Err(())) => Err(400),
+        (checked, _) => checked,
+    }
 }

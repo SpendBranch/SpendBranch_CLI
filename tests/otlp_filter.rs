@@ -97,19 +97,54 @@ fn the_name_comes_from_the_field_then_the_attribute_then_the_body() {
 }
 
 #[test]
-fn text_over_256_characters_is_dropped_and_256_stays() {
-    let long = "é".repeat(257);
-    let fine = "é".repeat(256);
-    let f = otlp::lenient(&payload(vec![record(
-        "api_request",
-        json!([{"key": "model", "value": {"stringValue": long}}, {"key": "query_source", "value": {"stringValue": fine}}]),
-    )]));
-    let attrs = f
-        .payload
-        .pointer("/resourceLogs/0/scopeLogs/0/logRecords/0/attributes")
-        .unwrap();
-    assert_eq!(attrs.as_array().unwrap().len(), 1);
-    assert_eq!(attrs[0]["key"], "query_source");
+fn text_is_kept_only_in_the_shape_its_key_promises() {
+    let attr = |k: &str, v: &str| json!({"key": k, "value": {"stringValue": v}});
+    let f = otlp::lenient(&payload(vec![
+        record(
+            "api_request",
+            json!([
+                // free text, a path, a line break, over 256: never forwarded
+                attr("model", &"é".repeat(257)),
+                attr("session.id", "/home/dev/secret-project"),
+                attr("request_id", "req 1\nSECRET"),
+                attr("query_source", "SECRET PROMPT TEXT"),
+                attr("organization.id", "org synth"),
+                attr("event.timestamp", "2026-01-01 10:00:00 <script>"),
+                attr("input_tokens", "SECRET"),
+                json!({"key": "output_tokens", "value": {"stringValue": "12"}}),
+            ]),
+        ),
+        record(
+            "api_request",
+            json!([
+                attr("model", "claude-test-1"),
+                attr("session.id", "sess_1"),
+                attr("request_id", "req_1"),
+                attr("query_source", "agent:explore"),
+                attr("organization.id", "org_synth_1"),
+                attr("event.timestamp", "2026-01-01T10:00:00-03:00"),
+            ]),
+        ),
+    ]));
+    let keys = |i: usize| -> Vec<String> {
+        f.payload
+            .pointer(&format!(
+                "/resourceLogs/0/scopeLogs/0/logRecords/{i}/attributes"
+            ))
+            .unwrap()
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|a| a["key"].as_str().unwrap().to_owned())
+            .collect()
+    };
+    assert_eq!(
+        keys(0),
+        ["output_tokens"],
+        "only the counter that is a number"
+    );
+    assert_eq!(keys(1).len(), 6, "{:?}", keys(1));
+    assert!(!f.payload.to_string().contains("SECRET"));
 }
 
 #[test]

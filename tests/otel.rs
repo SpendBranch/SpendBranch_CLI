@@ -32,14 +32,29 @@ fn otel_writes_a_private_environment_file_with_no_secret_in_it() {
             || text.contains("OTEL_METRICS_EXPORTER = 'none'"),
         "{text}"
     );
-    assert!(text.contains(&format!(
-        "http://127.0.0.1:{}{}",
-        spendbranch::relay::DEFAULT_PORT,
-        spendbranch::relay::PATH
-    )));
+    // The port and token the relay will check, picked for this install, never the well-known 4318.
+    let store = rig.store();
+    let port: u16 = store
+        .meta_get("relay_port")
+        .unwrap()
+        .unwrap()
+        .parse()
+        .unwrap();
+    let token = store.meta_get("relay_token").unwrap().unwrap();
+    assert!(spendbranch::relay::PORTS.contains(&port), "{port}");
     assert!(
-        !text.contains("OTEL_EXPORTER_OTLP_HEADERS"),
-        "no header, no credential: {text}"
+        text.contains(&format!("http://127.0.0.1:{port}/v1/logs")),
+        "{text}"
+    );
+    assert!(
+        token.len() == 64 && token.bytes().all(|b| b.is_ascii_hexdigit()),
+        "{token}"
+    );
+    assert!(
+        text.contains(&format!(
+            "export OTEL_EXPORTER_OTLP_HEADERS=x-spendbranch-token={token}\n"
+        )),
+        "{text}"
     );
     // The device key is nowhere in it.
     let key = fs::read_to_string(rig.dir.path().join("keys").join("active.key")).or_else(|_| {
@@ -74,10 +89,15 @@ fn otel_writes_a_private_environment_file_with_no_secret_in_it() {
         out.text
     );
     assert!(out.text.contains("OTEL_LOG_USER_PROMPTS"), "{}", out.text);
-    // Again, over a longer old file: rewritten whole, with no tail of the old one.
+    // Again, over a longer old file: rewritten whole, with no tail of the old one, and with a
+    // new token (running it again is how a squatted port or a leaked token is left behind).
     fs::write(&file, "x".repeat(5000)).unwrap();
     assert_eq!(rig.run(&["otel", "claude_code"]).code, 0);
-    assert_eq!(fs::read_to_string(&file).unwrap(), text);
+    let again = fs::read_to_string(&file).unwrap();
+    assert_eq!(again.lines().count(), text.lines().count(), "{again}");
+    let new_token = rig.store().meta_get("relay_token").unwrap().unwrap();
+    assert_ne!(new_token, token);
+    assert!(again.contains(&new_token) && !again.contains('x'.to_string().repeat(10).as_str()));
 }
 
 #[test]
@@ -90,6 +110,10 @@ fn on_windows_otel_writes_a_powershell_file() {
     assert_eq!(out.code, 0, "{}", out.text);
     let text = fs::read_to_string(rig.dir.path().join("otel-claude_code.ps1")).unwrap();
     assert!(text.contains("$env:OTEL_LOGS_EXPORTER = 'otlp'"), "{text}");
+    assert!(
+        text.contains("$env:OTEL_EXPORTER_OTLP_HEADERS = 'x-spendbranch-token="),
+        "{text}"
+    );
     assert!(out.text.contains("Invoke-Expression"), "{}", out.text);
 }
 
@@ -114,6 +138,7 @@ fn the_command_announces_the_address_and_ends_when_told_to_stop() {
     let rig = Rig::new();
     authorize(&rig);
     assert_eq!(rig.run(&["login"]).code, 0);
+    assert_eq!(rig.run(&["otel", "claude-code"]).code, 0);
     let port = free_port();
     let out = rig.run(&["relay", "--port", &port.to_string()]); // the fake system says: stop now
     assert_eq!(out.code, 0, "{}", out.text);
@@ -127,7 +152,7 @@ fn the_command_announces_the_address_and_ends_when_told_to_stop() {
     );
     assert!(
         out.text
-            .contains("point the agent's OTEL_EXPORTER_OTLP_LOGS_ENDPOINT at this port"),
+            .contains("point its OTEL_EXPORTER_OTLP_LOGS_ENDPOINT at this port"),
         "{}",
         out.text
     );

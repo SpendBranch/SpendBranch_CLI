@@ -3,8 +3,9 @@
 //! leaves the machine is only what the company authorized, even if the agent exports more.
 //!
 //! Kept: records of an `api_request` event, and of each record only its name, its time and the
-//! twelve declared attributes. Resource attributes, the record body, every other attribute and
-//! any text over 256 characters never pass. Not here: the mapping into observations, which the
+//! twelve declared attributes, each in the shape its key promises (counters as whole numbers,
+//! identifiers in the contract's patterns). Resource attributes, the record body, every other
+//! attribute, free text and any text over 256 characters never pass. Not here: the mapping into observations, which the
 //! server does.
 use serde_json::{Map, Value};
 
@@ -67,28 +68,61 @@ fn event_name(record: &Value) -> Option<&str> {
         .or_else(|| record.get("body").and_then(text_of))
 }
 
-/// A value that is text of at most 256 characters, or a whole number (as the number or as text).
-fn clean_value(value: &Value) -> Option<Value> {
+/// The keys whose value is a token count.
+const COUNTERS: [&str; 5] = [
+    "input_tokens",
+    "output_tokens",
+    "cache_read_tokens",
+    "cache_creation_tokens",
+    "cache_creation_1h_tokens",
+];
+
+/// A whole number of at most 19 digits, signed. Negative passes on purpose: the shared corpus
+/// forwards it and the server's strict mapping turns it into "unknown", so it never counts.
+fn is_int_text(s: &str) -> bool {
+    let digits = s.strip_prefix('-').unwrap_or(s);
+    (1..=19).contains(&digits.len()) && digits.bytes().all(|b| b.is_ascii_digit())
+}
+
+/// The value of `key`, if it has the shape that key promises: a counter is a whole number (as the
+/// number or as text), every other key is text matching the contract's pattern for what it names.
+/// Free text never passes, whatever writes to the relay.
+fn clean_value(key: &str, value: &Value) -> Option<Value> {
+    use crate::contract::{AccountRef, ExternalId, Model};
     let mut out = Map::new();
-    if let Some(text) = text_of(value) {
-        if text.chars().count() > MAX_TEXT {
-            return None;
-        }
-        out.insert("stringValue".into(), Value::String(text.to_owned()));
-    } else {
-        let int = value.get("intValue")?;
+    if COUNTERS.contains(&key) {
+        let (name, int) = match (value.get("intValue"), text_of(value)) {
+            (Some(int), _) => ("intValue", int),
+            (None, Some(_)) => ("stringValue", value.get("stringValue")?),
+            (None, None) => return None,
+        };
         let fine = match int {
-            Value::String(s) => {
-                let digits = s.strip_prefix('-').unwrap_or(s);
-                (1..=19).contains(&digits.len()) && digits.bytes().all(|b| b.is_ascii_digit())
-            }
-            Value::Number(n) => n.is_i64() || n.is_u64(),
+            Value::String(s) => is_int_text(s),
+            Value::Number(n) => name == "intValue" && (n.is_i64() || n.is_u64()),
             _ => false,
         };
         if !fine {
             return None;
         }
-        out.insert("intValue".into(), int.clone());
+        out.insert(name.into(), int.clone());
+    } else {
+        let text = text_of(value)?;
+        let fine = match key {
+            "event.name" => EVENTS.contains(&text),
+            "event.timestamp" => {
+                (1..=40).contains(&text.len())
+                    && text.bytes().all(|b| {
+                        b.is_ascii_alphanumeric() || matches!(b, b':' | b'.' | b'+' | b'-')
+                    })
+            }
+            "model" => Model::new(text).is_some(),
+            "organization.id" => AccountRef::new(text).is_some(),
+            _ => ExternalId::new(text).is_some(), // session.id, request_id, query_source
+        };
+        if !fine || text.chars().count() > MAX_TEXT {
+            return None;
+        }
+        out.insert("stringValue".into(), Value::String(text.to_owned()));
     }
     Some(Value::Object(out))
 }
@@ -115,7 +149,7 @@ fn rebuilt(record: &Value, name: &str) -> Value {
         if !KEYS.contains(&key) || seen.contains(&key) {
             continue; // the first of a repeated key is the one that counts
         }
-        if let Some(value) = clean_value(value) {
+        if let Some(value) = clean_value(key, value) {
             seen.push(key);
             let mut a = Map::new();
             a.insert("key".into(), Value::String(key.to_owned()));
@@ -131,15 +165,18 @@ fn rebuilt(record: &Value, name: &str) -> Value {
 pub fn lenient(body: &Value) -> Filtered {
     let mut records = Vec::new();
     let (mut dropped, mut ignored, mut seen) = (0, 0, 0usize);
-    let list = |v: &Value, key: &str| v.get(key).and_then(Value::as_array).cloned();
-    for resource in list(body, "resourceLogs").unwrap_or_default() {
-        for scope in list(&resource, "scopeLogs").unwrap_or_default() {
-            for record in list(&scope, "logRecords").unwrap_or_default() {
+    // By reference: a copy per level would cost many times the body.
+    fn list<'a>(v: &'a Value, key: &str) -> impl Iterator<Item = &'a Value> {
+        v.get(key).and_then(Value::as_array).into_iter().flatten()
+    }
+    for resource in list(body, "resourceLogs") {
+        for scope in list(resource, "scopeLogs") {
+            for record in list(scope, "logRecords") {
                 seen += 1;
                 if seen > MAX_RECORDS {
                     ignored += 1;
-                } else if let Some(name) = event_name(&record).filter(|n| EVENTS.contains(n)) {
-                    records.push(rebuilt(&record, name));
+                } else if let Some(name) = event_name(record).filter(|n| EVENTS.contains(n)) {
+                    records.push(rebuilt(record, name));
                 } else {
                     dropped += 1;
                 }

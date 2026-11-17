@@ -227,6 +227,8 @@ pub fn scheduler_not_removed(why: &str) -> String {
 
 pub const OTEL_WARNING: &str = "Do not turn on OTEL_LOG_USER_PROMPTS, OTEL_LOG_TOOL_DETAILS or OTEL_LOG_RAW_API_BODIES. OpenTelemetry carries no history: `spendbranch sync` stays the source of the final numbers.";
 
+pub const RELAY_NEEDS_OTEL: &str = "Run `spendbranch otel claude-code` first: it picks the port and the token the relay checks, and writes them where Claude Code reads them.";
+
 pub fn otel_written(file: &str, windows: bool) -> String {
     let load = if windows {
         format!(
@@ -237,26 +239,32 @@ pub fn otel_written(file: &str, windows: bool) -> String {
         format!("source '{}'", file.replace('\'', "'\\''"))
     };
     format!(
-        "Wrote {file}.\nLoad it in the terminal where you start Claude Code:\n  {load}\nand keep `spendbranch relay` running while you work. Nothing secret is in that file."
+        "Wrote {file}.\nLoad it in the terminal where you start Claude Code:\n  {load}\nand keep `spendbranch relay` running while you work. The file holds the relay's token, readable only by you: the relay signs nothing that comes without it. Running `otel` again picks a new port and token."
     )
 }
 
-pub fn relay_listening(port: u16, server: &str) -> String {
-    let default = crate::relay::DEFAULT_PORT;
+pub fn relay_listening(port: u16, agent_port: u16, server: &str) -> String {
     let mut text = format!(
         "Relay listening on http://127.0.0.1:{port}{} and forwarding to {server}. Press Ctrl+C to stop.",
         crate::relay::PATH
     );
-    if port != default {
+    if port != agent_port {
         text.push_str(&format!(
-            "\n`spendbranch otel` writes port {default}: point the agent's OTEL_EXPORTER_OTLP_LOGS_ENDPOINT at this port."
+            "\n`spendbranch otel` gave the agent port {agent_port}: point its OTEL_EXPORTER_OTLP_LOGS_ENDPOINT at this port."
         ));
     }
     text
 }
 
-pub fn relay_port_busy(port: u16, why: &str) -> String {
-    format!("Cannot listen on 127.0.0.1:{port}: {why}. Pick another port with `--port`.")
+/// `agents` when the busy port is the one the agent sends to: whoever holds it gets the export.
+pub fn relay_port_busy(port: u16, agents: bool, why: &str) -> String {
+    if agents {
+        format!(
+            "Cannot listen on 127.0.0.1:{port}: {why}. Another program holds the port Claude Code sends to, and it receives what Claude Code exports. Stop it, or run `spendbranch otel claude-code` again for a new port and token and reload the file where you start Claude Code."
+        )
+    } else {
+        format!("Cannot listen on 127.0.0.1:{port}: {why}. Pick another port with `--port`.")
+    }
 }
 
 /// Dropped batches are said on the first and then on every 50th, so a long outage stays readable.
