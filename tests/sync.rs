@@ -5,7 +5,7 @@ use crate::rig;
 use rig::{Rig, authorize, now_ms, observation};
 use serde_json::json;
 use spendbranch::cli::messages;
-use spendbranch::contract::Iso;
+use spendbranch::contract::{ExternalId, Iso};
 use std::collections::VecDeque;
 
 const HOUR: i64 = 3_600_000;
@@ -743,8 +743,15 @@ fn without_a_connection_or_a_source_it_says_what_to_do() {
 #[test]
 fn a_full_buffer_refuses_the_read_saves_nothing_and_records_a_gap() {
     let rig = Rig::ready();
+    // One observation built through the contract, then 100 000 copies that differ in the
+    // event id: going through JSON for each one took most of this test's time.
+    let template = observation("codex", "s1", "e000000", &at_now());
     let items: Vec<_> = (0..100_000)
-        .map(|i| observation("codex", "s1", &format!("e{i:06}"), &at_now()))
+        .map(|i| {
+            let mut item = template.clone();
+            item.external_event_id = ExternalId::new(&format!("e{i:06}")).unwrap();
+            item
+        })
         .collect();
     rig.buffer(now_ms(), items);
     // the device is revoked, so the run stops after reading and the gap stays where it can be seen

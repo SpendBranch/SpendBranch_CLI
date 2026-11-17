@@ -81,10 +81,3 @@ windows-native-keyring-store = "1"
 
 [target.'cfg(all(unix, not(target_os = "macos")))'.dependencies]
 zbus-secret-service-keyring-store = { version = "1", features = ["crypto-rust"] }
-
-# Tests build in the dev profile, where C and crypto code without optimization is slow (SQLite
-# most of all: a test that fills the 100 000-item buffer took 11 s). Optimizing these
-# dependencies costs only their first build, which the CI cache keeps; our own code stays
-# unoptimized and quick to rebuild.
-[profile.dev.package.libsqlite3-sys]
-opt-level = 3

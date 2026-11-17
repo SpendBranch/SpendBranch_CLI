@@ -17,6 +17,9 @@ permissions:
 
 env:
   CARGO_TERM_COLOR: always
+  # Test builds keep file and line for panics and backtraces, without full debug info: much less
+  # to write and link on every system.
+  CARGO_PROFILE_DEV_DEBUG: line-tables-only
 
 # Third-party actions are pinned to a commit: a tag can be moved, a commit cannot.
 # Dependabot proposes updates (see dependabot.yml).
@@ -50,33 +53,45 @@ jobs:
   check:
     name: ${{ matrix.name }}
     runs-on: ${{ matrix.os }}
+    # A normal run takes minutes; this stops a hung test from holding a runner for six hours.
+    timeout-minutes: 30
     strategy:
       fail-fast: false
       matrix:
+        # The code only differs by system, never by CPU: lint once per system.
         include:
-          - { name: linux-x64, os: ubuntu-latest }
+          - { name: linux-x64, os: ubuntu-latest, lint: true }
           - { name: linux-arm64, os: ubuntu-24.04-arm }
-          - { name: windows-x64, os: windows-latest }
+          - { name: windows-x64, os: windows-latest, lint: true }
           - { name: windows-arm64, os: windows-11-arm }
           - { name: macos-x64, os: macos-15-intel }
-          - { name: macos-arm64, os: macos-latest }
+          - { name: macos-arm64, os: macos-latest, lint: true }
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: Install Rust
         run: rustup toolchain install stable --profile minimal --component rustfmt,clippy --no-self-update && rustup default stable
-      - run: cargo fmt --check
-      - run: cargo clippy --all-targets --locked -- -D warnings
+      # Compiled dependencies, per system. Only main saves, so pull requests reuse its cache and
+      # cannot fill or change it.
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+        with:
+          key: ${{ matrix.name }}
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+      - if: matrix.lint
+        run: cargo fmt --check
+      - if: matrix.lint
+        run: cargo clippy --all-targets --locked -- -D warnings
       # A failure on one system should show every other failure of that system in the same run.
       - run: cargo test --locked --no-fail-fast
-      - run: cargo run --locked -q -- --version
       # The performance budget on the release build (tests/perf.rs): the hook under 200 ms, a
       # sync with nothing new under 300 ms, a first sync under 30 MB (Linux) and the read speed.
       - name: Performance budget
         # One at a time: a timing taken while the 200 MiB sync runs beside it measures the contention.
         run: cargo test --release --locked --test perf -- --ignored --nocapture --test-threads=1
-      - name: Release binary stays under 10 MB
+      - name: Release binary runs and stays under 10 MB
         shell: bash
         run: |
-          size=$(wc -c < "target/release/spendbranch${{ runner.os == 'Windows' && '.exe' || '' }}")
+          bin="target/release/spendbranch${{ runner.os == 'Windows' && '.exe' || '' }}"
+          "$bin" --version
+          size=$(wc -c < "$bin")
           echo "release binary: $size bytes"
           test "$size" -lt 10000000
