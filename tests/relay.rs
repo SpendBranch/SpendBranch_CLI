@@ -287,10 +287,15 @@ fn a_client_that_trickles_its_headers_gives_its_slot_back_within_seconds() {
             thread::sleep(Duration::from_millis(500));
         }
     });
-    slow.set_read_timeout(Some(Duration::from_secs(20))).unwrap();
+    slow.set_read_timeout(Some(Duration::from_secs(20)))
+        .unwrap();
     let started = Instant::now();
     let _ = slow.read(&mut [0u8; 64]);
-    assert!(started.elapsed() < Duration::from_secs(3), "{:?}", started.elapsed());
+    assert!(
+        started.elapsed() < Duration::from_secs(3),
+        "{:?}",
+        started.elapsed()
+    );
 }
 
 #[test]

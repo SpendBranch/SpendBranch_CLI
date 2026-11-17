@@ -89,7 +89,11 @@ fn otel_writes_a_private_environment_file_with_no_secret_in_it() {
         out.text
     );
     assert!(out.text.contains("OTEL_LOG_USER_PROMPTS"), "{}", out.text);
-    assert!(out.text.contains("restart a relay that is already running"), "{}", out.text);
+    assert!(
+        out.text.contains("restart a relay that is already running"),
+        "{}",
+        out.text
+    );
     assert!(
         !text.contains("OTEL_EXPORTER_OTLP_HEADERS="),
         "the token goes only to the logs exporter: {text}"

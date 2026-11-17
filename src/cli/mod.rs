@@ -27,12 +27,15 @@ pub struct Io<'a> {
 }
 
 /// Exit codes: 0 success, 1 failure, 2 wrong usage.
-/// The one place that decides color: only where the terminal says it shows truecolor, never
+/// The one place that decides color: only where the terminal says it shows truecolor
+/// (`COLORTERM`, or Windows Terminal's `WT_SESSION`), never
 /// with `NO_COLOR` or `TERM=dumb`.
 pub fn truecolor(env: Env) -> bool {
     env("NO_COLOR").is_none_or(|v| v.is_empty())
         && env("TERM").as_deref() != Some("dumb")
-        && matches!(env("COLORTERM").as_deref(), Some("truecolor" | "24bit"))
+        && (matches!(env("COLORTERM").as_deref(), Some("truecolor" | "24bit"))
+            // Windows Terminal shows truecolor but sets no COLORTERM.
+            || env("WT_SESSION").is_some_and(|v| !v.is_empty()))
 }
 
 pub fn run_with(args: &[String], env: Env, io: &mut Io) -> i32 {

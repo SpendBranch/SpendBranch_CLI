@@ -73,6 +73,7 @@ fn the_owl_on_a_terminal_is_colored_only_where_truecolor_is_known_to_work() {
         ("TERM", "xterm-256color")
     ]));
     assert!(!escapes(&[]), "no COLORTERM: no promise of truecolor");
+    assert!(escapes(&[("WT_SESSION", "0c1d2e3f")]), "Windows Terminal");
     assert!(!escapes(&[("COLORTERM", "truecolor"), ("TERM", "dumb")]));
     assert!(!escapes(&[("COLORTERM", "truecolor"), ("NO_COLOR", "1")]));
     let (_, plain) = run_env(&["--help"], &[], true);

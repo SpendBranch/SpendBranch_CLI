@@ -44,8 +44,8 @@ fn my_uid() -> io::Result<u32> {
             let nanos = std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
                 .map_or(0, |d| d.subsec_nanos());
-            let probe = std::env::temp_dir()
-                .join(format!(".spendbranch-{}-{nanos}", std::process::id()));
+            let probe =
+                std::env::temp_dir().join(format!(".spendbranch-{}-{nanos}", std::process::id()));
             let uid = OpenOptions::new()
                 .write(true)
                 .create_new(true)
