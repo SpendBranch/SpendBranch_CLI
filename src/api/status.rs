@@ -3,8 +3,12 @@ use super::pairing::printable;
 use crate::contract::Iso;
 use serde::Deserialize;
 
-/// Where the API is when no address is given: the product's own origin in development.
-pub const DEFAULT_SERVER: &str = "http://localhost:5173";
+/// Where the API is when no address is given: the product's own origin, in a development build
+/// only. A release has none until the production origin exists: plain http to whoever listens on
+/// this machine's port 5173 must never be where a real device pairs.
+pub fn default_server(debug_build: bool) -> Option<&'static str> {
+    debug_build.then_some("http://localhost:5173")
+}
 
 /// `GET /api/cli/v1/status`, as the server sent it. `checked` is the only way to use it.
 #[derive(Clone, Debug, Deserialize)]
@@ -196,6 +200,12 @@ fn collection_view(c: RawCollection) -> Option<Option<CollectionView>> {
 }
 
 impl CliStatus {
+    /// The member's name alone, when it is safe to print, whatever the rest of the answer holds:
+    /// the confirmation at login must not lose it to an odd field elsewhere.
+    pub fn member(&self) -> Option<&str> {
+        self.member_name.as_deref().filter(|n| printable(n, 200))
+    }
+
     /// `None` if any field is malformed. Sources this build does not know are left out.
     pub fn checked(self) -> Option<StatusView> {
         if self.sources.len() > MAX_LISTED || self.collection.len() > MAX_LISTED {

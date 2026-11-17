@@ -1,4 +1,4 @@
-//! The owl mascot above the help on a terminal. Pure: no I/O.
+//! The owl on the start screen, on a terminal. Pure: no I/O.
 //!
 //! Each art line has an ink line of the same length: one palette letter per character
 //! (a space means no color). Drawn with halftone dots and ASCII details.
@@ -73,44 +73,44 @@ const PALETTE: [(char, [u8; 3]); 27] = [
     ('{', [76, 170, 72]),
 ];
 
-/// Text beside the owl, by art row.
-const SIDE: [(usize, &str); 3] = [
-    (5, "SpendBranch CLI"),
-    (7, "Start with: spendbranch setup"),
-    (9, "Or: spendbranch --help for all commands"),
-];
-const ART_WIDTH: usize = 36;
-
-/// The owl with its side text; truecolor when `color`, plain characters otherwise.
-pub fn mascot(color: bool) -> String {
-    let mut out = String::new();
-    for (row, (art, ink)) in OWL.iter().zip(OWL_INK).enumerate() {
-        let mut width = 0;
+/// The owl, one string per row; truecolor when `color`, plain characters otherwise. A color
+/// code goes out only where the color changes, and one reset ends each colored run.
+pub fn owl_lines(color: bool) -> Vec<String> {
+    use std::fmt::Write;
+    let mut lines = Vec::new();
+    for (art, ink) in OWL.iter().zip(OWL_INK) {
+        let mut out = String::new();
+        let mut current: Option<&[u8; 3]> = None;
         for (ch, key) in art.chars().zip(ink.chars()) {
-            match PALETTE.iter().find(|(k, _)| *k == key) {
-                Some((_, [r, g, b])) if color && ch != ' ' => {
-                    out.push_str(&format!("\x1b[38;2;{r};{g};{b}m{ch}\x1b[0m"));
+            let want = match PALETTE.iter().find(|(k, _)| *k == key) {
+                Some((_, rgb)) if color && ch != ' ' => Some(rgb),
+                // A space shows no color, so it never breaks a run.
+                _ if ch == ' ' => current,
+                _ => None,
+            };
+            if want != current {
+                match want {
+                    Some([r, g, b]) => _ = write!(out, "\x1b[38;2;{r};{g};{b}m"),
+                    None => out.push_str("\x1b[0m"),
                 }
-                _ => out.push(ch),
+                current = want;
             }
-            width += 1;
+            out.push(ch);
         }
-        if let Some((_, text)) = SIDE.iter().find(|(r, _)| *r == row) {
-            out.push_str(&" ".repeat(ART_WIDTH + 4 - width));
-            if color {
-                out.push_str(&format!("\x1b[1m{text}\x1b[0m"));
-            } else {
-                out.push_str(text);
-            }
+        if current.is_some() {
+            out.push_str("\x1b[0m");
         }
-        out.push('\n');
+        lines.push(out);
     }
-    out
+    lines
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The owl's pane on the start screen is 40 columns, with a 2-column margin each side.
+    const ART_WIDTH: usize = 36;
 
     #[test]
     fn every_art_line_has_a_matching_ink_line_with_known_colors() {
@@ -125,10 +125,24 @@ mod tests {
     }
 
     #[test]
-    fn plain_mascot_has_no_escape_codes() {
-        let plain = mascot(false);
+    fn plain_owl_has_no_escape_codes() {
+        let plain = owl_lines(false).concat();
         assert!(!plain.contains('\x1b'));
-        assert!(plain.contains("( @ )") && plain.contains("SpendBranch CLI"));
-        assert!(mascot(true).contains("\x1b[38;2;"));
+        assert!(plain.contains("( @ )"));
+        assert_eq!(owl_lines(false), OWL.map(str::to_owned));
+    }
+
+    #[test]
+    fn the_colored_owl_sends_a_color_only_when_it_changes() {
+        let colored = owl_lines(true).concat();
+        let codes = colored.matches("\x1b[38;2;").count();
+        let inked: usize = OWL
+            .iter()
+            .map(|l| l.chars().filter(|c| *c != ' ').count())
+            .sum();
+        assert!(
+            codes * 2 < inked,
+            "{codes} color codes for {inked} characters"
+        );
     }
 }

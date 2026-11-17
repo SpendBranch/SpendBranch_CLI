@@ -9,7 +9,7 @@ use spendbranch::api::{
 };
 use spendbranch::auth::{DeviceId, DeviceKey, sign_request};
 use spendbranch::infra::{
-    clock::{Clock, SystemClock},
+    clock::{self, Clock},
     http::{Client, Signer},
     keys,
 };
@@ -22,31 +22,11 @@ use std::{
 const VERSION: &str = "1.2.3";
 
 fn real_now() -> i64 {
-    SystemClock.now_ms()
+    clock::now_ms()
 }
 
-/// The real time moved by a fixed amount: a computer whose clock is wrong.
-struct Skewed(i64);
-impl Clock for Skewed {
-    fn now_ms(&self) -> i64 {
-        real_now() + self.0
-    }
-}
-
-/// A clock that never moves, so two attempts get the same timestamp.
-struct Frozen(AtomicI64);
-impl Clock for Frozen {
-    fn now_ms(&self) -> i64 {
-        self.0.load(Ordering::SeqCst)
-    }
-}
-
-fn client(server: &FakeServer, clock: impl Clock + 'static) -> Client {
-    Client::with_clock(
-        ServerUrl::parse(&server.base).unwrap(),
-        VERSION,
-        Box::new(clock),
-    )
+fn client(server: &FakeServer, clock: Clock) -> Client {
+    Client::with_clock(ServerUrl::parse(&server.base).unwrap(), VERSION, clock)
 }
 
 /// A server with one registered device, and the key and id to sign as it.
@@ -133,7 +113,7 @@ impl Raw {
 #[test]
 fn a_device_pairs_signs_and_logs_out() {
     let server = FakeServer::start();
-    let c = client(&server, SystemClock);
+    let c = client(&server, Box::new(clock::now_ms));
     let key = keys::generate().unwrap();
 
     let started: PairingStarted = c
@@ -193,7 +173,7 @@ fn a_device_pairs_signs_and_logs_out() {
 fn the_pairing_request_carries_the_public_key_and_nothing_secret() {
     let server = FakeServer::start();
     let key = keys::generate().unwrap();
-    let c = client(&server, SystemClock);
+    let c = client(&server, Box::new(clock::now_ms));
     let _: Value = c
         .post(
             "/api/cli/v1/device-codes",
@@ -229,7 +209,7 @@ fn the_pairing_request_carries_the_public_key_and_nothing_secret() {
 #[test]
 fn no_request_ever_carries_the_private_key() {
     let (server, key, id) = paired();
-    let c = client(&server, SystemClock);
+    let c = client(&server, Box::new(clock::now_ms));
     status(&c, &key, &id).unwrap();
     let batch = json!({"contractVersion": "ingest/v1", "observations": [],
         "coverage": [{"source": "codex", "from": "2026-06-01T00:00:00.000Z",
@@ -364,7 +344,8 @@ fn the_checks_run_in_the_order_of_the_spec() {
 #[test]
 fn a_skewed_clock_is_reported_with_the_servers_time() {
     let (server, key, id) = paired();
-    let c = client(&server, Skewed(3_600_000));
+    // a computer whose clock is wrong
+    let c = client(&server, Box::new(|| real_now() + 3_600_000));
     let err = status(&c, &key, &id).unwrap_err();
     assert_eq!((err.status, err.code.as_str()), (401, "CLOCK_SKEW"));
     assert!((err.server_time_ms.unwrap() - real_now()).abs() < 5_000);
@@ -374,7 +355,10 @@ fn a_skewed_clock_is_reported_with_the_servers_time() {
 #[test]
 fn every_attempt_has_a_new_nonce_even_with_the_same_timestamp() {
     let (server, key, id) = paired();
-    let c = client(&server, Frozen(AtomicI64::new(real_now())));
+    let c = {
+        let frozen = real_now(); // never moves: two attempts get the same timestamp
+        client(&server, Box::new(move || frozen))
+    };
     for _ in 0..3 {
         status(&c, &key, &id).unwrap(); // a retry is just the same call again
     }
@@ -391,13 +375,8 @@ fn every_attempt_has_a_new_nonce_even_with_the_same_timestamp() {
 fn every_attempt_has_a_new_timestamp_from_the_clock() {
     let (server, key, id) = paired();
     let clock = std::sync::Arc::new(AtomicI64::new(real_now()));
-    struct Shared(std::sync::Arc<AtomicI64>);
-    impl Clock for Shared {
-        fn now_ms(&self) -> i64 {
-            self.0.load(Ordering::SeqCst)
-        }
-    }
-    let c = client(&server, Shared(clock.clone()));
+    let shared = clock.clone();
+    let c = client(&server, Box::new(move || shared.load(Ordering::SeqCst)));
     status(&c, &key, &id).unwrap();
     let first = real_now();
     clock.store(first + 1_000, Ordering::SeqCst);
@@ -418,7 +397,7 @@ fn a_redirect_is_never_followed() {
     let server = FakeServer::start();
     server.state.lock().unwrap().redirect_to =
         format!("http://{}/steal", elsewhere.local_addr().unwrap());
-    let c = client(&server, SystemClock);
+    let c = client(&server, Box::new(clock::now_ms));
     let err = c.get::<Value>("/redirect", None).unwrap_err();
     assert_eq!((err.status, err.code.as_str()), (302, "INTERNAL"));
     assert!(
@@ -450,7 +429,7 @@ fn http_to_a_remote_host_is_refused_before_any_connection() {
 #[test]
 fn failures_on_the_wire_become_api_failures() {
     let server = FakeServer::start();
-    let c = client(&server, SystemClock);
+    let c = client(&server, Box::new(clock::now_ms));
     let get = |p: &str| c.get::<Value>(p, None).unwrap_err();
 
     let f = get("/limited");
@@ -489,5 +468,5 @@ fn the_clock_is_the_real_one_by_default() {
         .duration_since(UNIX_EPOCH)
         .unwrap()
         .as_millis() as i64;
-    assert!((SystemClock.now_ms() - now).abs() < 5_000);
+    assert!((clock::now_ms() - now).abs() < 5_000);
 }

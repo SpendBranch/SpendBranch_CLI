@@ -92,6 +92,16 @@ fn systemd_usable(sys: &dyn System) -> bool {
 
 pub fn install(sys: &dyn System, env: Env, platform: Platform, exe: &str) -> Result<Method> {
     let home_dir = env("SPENDBRANCH_HOME").filter(|h| !h.is_empty());
+    if !text::fits_a_command(exe, platform == Platform::Windows)
+        || home_dir
+            .as_deref()
+            .is_some_and(|h| !text::fits_a_command(h, platform == Platform::Windows))
+    {
+        return Err(
+            "the path of this program or SPENDBRANCH_HOME has a line break or a character the system would expand"
+                .into(),
+        );
+    }
     let job = Job {
         exe,
         home: home_dir.as_deref(),

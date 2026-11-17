@@ -51,7 +51,7 @@ mod batch;
 mod counters;
 mod coverage;
 mod observation;
-mod text;
+pub(crate) mod text;
 mod time;
 
 pub use batch::*;

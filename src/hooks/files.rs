@@ -57,21 +57,79 @@ pub fn command(exe: &str, windows: bool, args: &str) -> String {
     }
 }
 
-/// Our entry, including the one the TypeScript CLI wrote (`node '<script>' hook claude-code`).
-pub fn is_ours(source: Source, command: &str) -> bool {
-    let command = command.trim_end();
-    command.contains("spendbranch")
-        && match source {
-            Source::ClaudeCode => command.ends_with(" hook claude-code"),
-            Source::Codex => command.contains(" hook codex "),
+/// The words of a command line as `command` writes it: `'...'` and `"..."` quote, `\` outside
+/// quotes takes the next character as it is (so `'\''` is a quote inside a quoted word), and
+/// whitespace separates. `None` for an unterminated quote.
+fn words(command: &str) -> Option<Vec<String>> {
+    let (mut out, mut word, mut quote, mut started) = (Vec::new(), String::new(), None, false);
+    let mut chars = command.chars();
+    while let Some(c) = chars.next() {
+        match (quote, c) {
+            (None, '\\') => {
+                word.push(chars.next()?);
+                started = true;
+            }
+            (Some(q), c) if c == q => quote = None,
+            (Some(_), c) => word.push(c),
+            (None, '\'' | '"') => (quote, started) = (Some(c), true),
+            (None, c) if c.is_whitespace() => {
+                if started {
+                    out.push(std::mem::take(&mut word));
+                }
+                started = false;
+            }
+            (None, c) => {
+                word.push(c);
+                started = true;
+            }
         }
+    }
+    if quote.is_some() {
+        return None;
+    }
+    if started {
+        out.push(word);
+    }
+    Some(out)
 }
 
-fn ours(source: Source, entry: &Value) -> bool {
-    entry
-        .get("command")
-        .and_then(Value::as_str)
-        .is_some_and(|c| is_ours(source, c))
+/// Our entry: a program whose file name starts with `spendbranch` (any folder, any suffix such
+/// as `spendbranch-x86_64-linux`: another install of ours is replaced) followed by exactly our
+/// arguments, or the line the TypeScript CLI wrote (`node '<.../spendbranch/...>' hook
+/// claude-code`). A command that only mentions `spendbranch` somewhere is someone else's.
+/// `install` also owns the exact line it writes, whatever the binary is called.
+pub fn is_ours(source: Source, command: &str) -> bool {
+    let Some(words) = words(command) else {
+        return false;
+    };
+    let name = |p: &str| {
+        p.rsplit(['/', '\\'])
+            .next()
+            .unwrap_or(p)
+            .to_ascii_lowercase()
+    };
+    let args = match words.as_slice() {
+        [program, args @ ..] if name(program).starts_with("spendbranch") => args,
+        [node, script, args @ ..]
+            if matches!(name(node).as_str(), "node" | "node.exe")
+                && script.contains("spendbranch") =>
+        {
+            args
+        }
+        _ => return false,
+    };
+    match source {
+        Source::ClaudeCode => args == ["hook", "claude-code"],
+        Source::Codex => matches!(args, [h, c, _] if h == "hook" && c == "codex"),
+    }
+}
+
+/// Ours by its shape, or the very line `keep` holds (a binary under any name).
+fn ours(source: Source, entry: &Value, keep: Option<&Value>) -> bool {
+    let command = |e: &Value| e.get("command").and_then(Value::as_str).map(str::to_owned);
+    let line = command(entry);
+    line.as_deref().is_some_and(|c| is_ours(source, c))
+        || (line.is_some() && keep.and_then(command) == line)
 }
 
 fn parse(original: Option<&str>) -> Result<Value, Problem> {
@@ -99,6 +157,7 @@ fn finish(before: &Value, after: Value, existed: bool) -> Plan {
 /// Removes our entries from the groups of one event. With `keep`, the first one found is
 /// replaced by it instead (and the rest go). Groups we emptied are dropped; others stay.
 fn strip(source: Source, groups: &mut Vec<Value>, mut keep: Option<&Value>) -> bool {
+    let wanted = keep;
     let mut placed = false;
     groups.retain_mut(|group| {
         let Some(list) = group.get_mut("hooks").and_then(Value::as_array_mut) else {
@@ -106,7 +165,7 @@ fn strip(source: Source, groups: &mut Vec<Value>, mut keep: Option<&Value>) -> b
         };
         let before = list.len();
         list.retain_mut(|entry| {
-            if !ours(source, entry) {
+            if !ours(source, entry, wanted) {
                 return true;
             }
             match keep.take() {

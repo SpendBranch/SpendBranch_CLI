@@ -9,6 +9,12 @@ use spendbranch::relay::{self, Head, RateLimit};
 
 // --- the rules ------------------------------------------------------------------------
 
+const TOKEN: &str = "5f1d7c0a9b3e4f2a8c6d1e0f7a9b3c5d5f1d7c0a9b3e4f2a8c6d1e0f7a9b3c5d";
+
+fn check(head: &Head) -> Result<usize, u16> {
+    relay::check(head, TOKEN)
+}
+
 fn good<'a>() -> Head<'a> {
     Head {
         peer_is_loopback: true,
@@ -16,6 +22,7 @@ fn good<'a>() -> Head<'a> {
         path: "/v1/logs",
         host: Some("127.0.0.1:4318"),
         origin: None,
+        token: Some(TOKEN),
         content_type: Some("application/json"),
         content_encoding: None,
         transfer_encoding: None,
@@ -25,7 +32,7 @@ fn good<'a>() -> Head<'a> {
 
 #[test]
 fn each_row_of_the_table_has_its_status() {
-    assert_eq!(relay::check(&good()), Ok(10));
+    assert_eq!(check(&good()), Ok(10));
     let cases: Vec<(&str, Head, u16)> = vec![
         (
             "remote",
@@ -149,6 +156,40 @@ fn each_row_of_the_table_has_its_status() {
             411,
         ),
         (
+            "no token",
+            Head {
+                token: None,
+                ..good()
+            },
+            403,
+        ),
+        (
+            "wrong token",
+            Head {
+                token: Some("5f1d7c0a9b3e4f2a8c6d1e0f7a9b3c5d5f1d7c0a9b3e4f2a8c6d1e0f7a9b3c5e"),
+                ..good()
+            },
+            403,
+        ),
+        (
+            "a prefix of the token",
+            Head {
+                token: Some(&TOKEN[..32]),
+                ..good()
+            },
+            403,
+        ),
+        (
+            "no token comes before everything else",
+            Head {
+                token: None,
+                method: "GET",
+                content_length: None,
+                ..good()
+            },
+            403,
+        ),
+        (
             "too big",
             Head {
                 content_length: Some(1024 * 1024 + 1),
@@ -158,7 +199,7 @@ fn each_row_of_the_table_has_its_status() {
         ),
     ];
     for (name, head, status) in cases {
-        assert_eq!(relay::check(&head), Err(status), "{name}");
+        assert_eq!(check(&head), Err(status), "{name}");
     }
     for host in [
         "127.0.0.1",
@@ -168,7 +209,7 @@ fn each_row_of_the_table_has_its_status() {
         "[::1]",
     ] {
         assert!(
-            relay::check(&Head {
+            check(&Head {
                 host: Some(host),
                 ..good()
             })
@@ -182,7 +223,7 @@ fn each_row_of_the_table_has_its_status() {
         "Application/JSON",
     ] {
         assert!(
-            relay::check(&Head {
+            check(&Head {
                 content_type: Some(ct),
                 ..good()
             })
@@ -191,7 +232,7 @@ fn each_row_of_the_table_has_its_status() {
         );
     }
     assert_eq!(
-        relay::check(&Head {
+        check(&Head {
             content_length: Some(1024 * 1024),
             ..good()
         }),
@@ -199,13 +240,25 @@ fn each_row_of_the_table_has_its_status() {
     );
     for host in ["localhost:", "localhost:12a", "[::1", "[::1]x"] {
         assert_eq!(
-            relay::check(&Head {
+            check(&Head {
                 host: Some(host),
                 ..good()
             }),
             Err(403),
             "{host}"
         );
+    }
+}
+
+#[test]
+fn otel_picks_a_hex_token_and_a_port_in_the_range() {
+    let (token, port) = relay::new_endpoint([0xab; 34]);
+    assert_eq!(token, "ab".repeat(32));
+    assert!(relay::PORTS.contains(&port) && port != 4318);
+    for b in [[0u8; 2], [0xff; 2], [0x12, 0x34]] {
+        let mut random = [0; 34];
+        random[32..].copy_from_slice(&b);
+        assert!(relay::PORTS.contains(&relay::new_endpoint(random).1));
     }
 }
 
@@ -243,4 +296,26 @@ fn the_answer_counts_what_was_refused() {
         relay::refused_by_server(&json!({"partialSuccess": {"rejectedLogRecords": -1}})),
         0
     );
+}
+
+#[test]
+fn the_owner_of_the_clients_end_is_read_from_the_kernels_table() {
+    let lo = |port: u16| ([127, 0, 0, 1], port);
+    let word = format!("{:08X}", u32::from_ne_bytes([127, 0, 0, 1]));
+    let table = format!(
+        "  sl  local_address rem_address   st tx_queue rx_queue tr tm->when retrnsmt   uid  timeout inode\n\
+         \x20  0: {word}:5208 00000000:0000 0A 00000000:00000000 00:00000000 00000000  1000        0 1 1\n\
+         \x20  1: {word}:C2EA {word}:5208 01 00000000:00000000 00:00000000 00000000 100001        0 2 1\n\
+         \x20  2: {word}:5208 {word}:C2EA 01 00000000:00000000 00:00000000 00000000  1000        0 3 1\n"
+    );
+    assert_eq!(
+        relay::peer_uid(&table, lo(0xC2EA), lo(0x5208)),
+        Some(100_001)
+    );
+    assert_eq!(
+        relay::peer_uid(&table, lo(0xC2EB), lo(0x5208)),
+        None,
+        "not in the table"
+    );
+    assert_eq!(relay::peer_uid("", lo(1), lo(2)), None);
 }

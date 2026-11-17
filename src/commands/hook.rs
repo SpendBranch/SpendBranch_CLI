@@ -46,7 +46,12 @@ fn fire(ctx: &Ctx, source: Source, argv_event: Option<&str>, at: Iso) -> Result<
     if !store.is_connected()? {
         return Ok(());
     }
-    let last = store.sync_get("lastSyncAt")?.and_then(|t| Iso::parse(&t));
+    // The last attempt, finished or not (a database from before it was kept: the last success).
+    let last = match store.sync_get("lastSyncAttemptAt")? {
+        Some(t) => Some(t),
+        None => store.sync_get("lastSyncAt")?,
+    }
+    .and_then(|t| Iso::parse(&t));
     let bare = event
         .as_deref()
         .map(|e| e.strip_prefix("codex:").unwrap_or(e));

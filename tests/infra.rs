@@ -266,7 +266,7 @@ fn a_newer_database_is_a_typed_error() {
 mod folders {
     use super::*;
     use spendbranch::infra::private_fs;
-    use std::os::unix::fs::PermissionsExt;
+    use std::os::unix::fs::{MetadataExt, PermissionsExt};
 
     fn set(path: &Path, mode: u32) {
         fs::set_permissions(path, fs::Permissions::from_mode(mode)).unwrap();
@@ -289,7 +289,17 @@ mod folders {
             let dir = tmp.path().join(format!("d{existing:o}"));
             fs::create_dir(&dir).unwrap();
             set(&dir, existing);
-            private_fs::create_dir(&dir).unwrap();
+            // Group write is ours only with the user's private group; on macOS a temporary
+            // folder's group is the shared `staff`, so there it is refused (and still untouched).
+            let meta = fs::metadata(&dir).unwrap();
+            let shared = existing & 0o020 != 0 && meta.gid() != meta.uid();
+            match private_fs::create_dir(&dir) {
+                Ok(()) => assert!(!shared, "{existing:o} with a shared group was accepted"),
+                Err(e) => {
+                    assert!(shared, "{existing:o}: {e}");
+                    assert_eq!(e.kind(), std::io::ErrorKind::PermissionDenied);
+                }
+            }
             assert_eq!(mode(&dir), existing, "must stay {existing:o}");
         }
     }
@@ -318,6 +328,107 @@ mod folders {
             );
             assert!(!dir.join("state.db").exists());
         }
+    }
+
+    #[test]
+    fn only_a_folder_this_user_alone_can_write_to_is_trusted() {
+        use private_fs::folder_is_private as private;
+        let me = 1000;
+        assert!(private(0o700, me, me, me));
+        assert!(private(0o755, me, 50, me));
+        assert!(
+            private(0o770, me, me, me),
+            "group write with the user's own group"
+        );
+        assert!(
+            !private(0o770, me, 100, me),
+            "group write with a shared group"
+        );
+        assert!(!private(0o775, me, 20, me));
+        assert!(!private(0o702, me, me, me), "anybody can write");
+        assert!(!private(0o700, 1001, 1001, me), "someone else's folder");
+        assert!(!private(0o700, 0, 0, me));
+    }
+
+    #[test]
+    fn a_folder_writable_by_a_shared_group_is_refused() {
+        use std::os::unix::fs::MetadataExt;
+        let tmp = tempfile::tempdir().unwrap();
+        let mine = fs::metadata(tmp.path()).unwrap().uid();
+        // A group this user belongs to that is not its private one, if there is any.
+        let ids = std::process::Command::new("id").arg("-G").output().unwrap();
+        let Some(shared) = String::from_utf8_lossy(&ids.stdout)
+            .split_whitespace()
+            .filter_map(|g| g.parse::<u32>().ok())
+            .find(|g| *g != mine)
+        else {
+            return;
+        };
+        let dir = tmp.path().join("shared");
+        fs::create_dir(&dir).unwrap();
+        std::os::unix::fs::chown(&dir, None, Some(shared)).unwrap();
+        set(&dir, 0o770);
+        let err = private_fs::create_dir(&dir).unwrap_err();
+        assert_eq!(err.kind(), std::io::ErrorKind::PermissionDenied);
+        assert_eq!(mode(&dir), 0o770, "left as it was");
+    }
+
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn a_folder_that_belongs_to_another_account_is_refused() {
+        // The other account: this user's subordinate ids, through a user namespace.
+        // Made by this user (root in the namespace) and handed to the other uid, so the other
+        // account needs no way into the parent folders.
+        use std::os::unix::fs::MetadataExt;
+        let tmp = tempfile::tempdir().unwrap();
+        let theirs = tmp.path().join("theirs");
+        let me = fs::metadata(tmp.path()).unwrap().uid();
+        let name = std::process::Command::new("id")
+            .arg("-un")
+            .output()
+            .unwrap();
+        let name = String::from_utf8_lossy(&name.stdout).trim().to_owned();
+        let Some(first) = fs::read_to_string("/etc/subuid").ok().and_then(|t| {
+            t.lines().find_map(|l| {
+                l.strip_prefix(&format!("{name}:"))?
+                    .split(':')
+                    .next()
+                    .map(str::to_owned)
+            })
+        }) else {
+            return; // no subordinate ids on this machine
+        };
+        let made = std::process::Command::new("unshare")
+            .arg("--user")
+            .arg(format!("--map-users=0:{me}:1"))
+            .arg(format!("--map-groups=0:{me}:1"))
+            .arg(format!("--map-users=1:{first}:1"))
+            .arg(format!("--map-groups=1:{first}:1"))
+            .args(["sh", "-c", "mkdir -m 700 \"$0\" && chown 1:1 \"$0\""])
+            .arg(&theirs)
+            .status();
+        if !made.is_ok_and(|s| s.success()) {
+            return; // no subordinate ids on this machine
+        }
+        let err = private_fs::create_dir(&theirs).unwrap_err();
+        assert_eq!(err.kind(), std::io::ErrorKind::PermissionDenied);
+        assert!(err.to_string().contains("belongs to someone else"), "{err}");
+    }
+
+    #[test]
+    fn a_symlink_under_one_of_our_names_is_never_followed() {
+        let tmp = tempfile::tempdir().unwrap();
+        let data = tmp.path().join("data");
+        private_fs::create_dir(&data).unwrap();
+        let victim = tmp.path().join("victim.txt");
+        fs::write(&victim, "keep me").unwrap();
+        set(&victim, 0o644);
+        std::os::unix::fs::symlink(&victim, data.join("hook.log")).unwrap();
+        std::os::unix::fs::symlink(&victim, data.join("otel-claude_code.env")).unwrap();
+        assert!(spendbranch::infra::hook_log::append(&data, "{}").is_err());
+        assert!(private_fs::write(&data.join("otel-claude_code.env"), "evil").is_err());
+        assert_eq!(fs::read_to_string(&victim).unwrap(), "keep me");
+        assert_eq!(mode(&victim), 0o644, "not chmodded through the link");
     }
 
     #[test]

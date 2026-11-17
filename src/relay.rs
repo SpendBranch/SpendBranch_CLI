@@ -3,13 +3,19 @@
 //!
 //! The relay trusts nothing that reaches it: only this machine, only a `Host` that names this
 //! machine (a web page cannot make the browser lie about it: DNS rebinding), no `Origin` at
-//! all (a browser sends one, an exporter does not), small bodies, and a ceiling on batches.
+//! all (a browser sends one, an exporter does not), the token `otel` wrote for the agent (any
+//! other process, another account included, gets nothing signed), small bodies, and a ceiling
+//! on batches.
 use crate::sources::otlp;
 use serde_json::Value;
 
 pub const PATH: &str = "/v1/logs";
-/// Where the agent's exporter is pointed (`otel` writes it) and where `relay` listens by default.
-pub const DEFAULT_PORT: u16 = 4318;
+/// The header that carries the token. Plain hex in a plain header: no OTLP header encoding to
+/// get wrong (`OTEL_EXPORTER_OTLP_HEADERS` is `name=value`).
+pub const TOKEN_HEADER: &str = "x-spendbranch-token";
+/// The ports `otel` picks from: under every system's ephemeral range (Linux 32768+, Windows and
+/// macOS 49152+), so no outgoing connection holds one by chance, and never the well-known 4318.
+pub const PORTS: std::ops::RangeInclusive<u16> = 20_000..=32_767;
 pub const MAX_BODY: u64 = 1024 * 1024;
 /// The same ceiling the server keeps for these routes: more would only come back refused.
 pub const MAX_PER_MINUTE: u32 = 60;
@@ -22,6 +28,7 @@ pub struct Head<'a> {
     pub path: &'a str,
     pub host: Option<&'a str>,
     pub origin: Option<&'a str>,
+    pub token: Option<&'a str>,
     pub content_type: Option<&'a str>,
     pub content_encoding: Option<&'a str>,
     pub transfer_encoding: Option<&'a str>,
@@ -48,10 +55,45 @@ fn host_is_local(host: &str) -> bool {
     port_ok && matches!(name.as_str(), "127.0.0.1" | "localhost" | "[::1]")
 }
 
+/// The token and port `otel` hands the agent, from 34 random bytes: 32 for the token, 2 for
+/// the port.
+pub fn new_endpoint(random: [u8; 34]) -> (String, u16) {
+    let token = random[..32].iter().map(|b| format!("{b:02x}")).collect();
+    let span = PORTS.end() - PORTS.start() + 1;
+    (
+        token,
+        PORTS.start() + u16::from_le_bytes([random[32], random[33]]) % span,
+    )
+}
+
+/// Who owns the client's end of a loopback connection, read from Linux's `/proc/net/tcp`: the
+/// line whose local address is the client (`peer`) and whose remote address is the relay (`us`),
+/// each an IPv4 address and a port. Addresses there are the raw network-order word printed in
+/// host order, ports in hex.
+pub fn peer_uid(table: &str, peer: ([u8; 4], u16), us: ([u8; 4], u16)) -> Option<u32> {
+    let hex = |(ip, port): ([u8; 4], u16)| format!("{:08X}:{port:04X}", u32::from_ne_bytes(ip));
+    let (peer, us) = (hex(peer), hex(us));
+    table.lines().skip(1).find_map(|line| {
+        let f: Vec<&str> = line.split_whitespace().collect();
+        (f.get(1) == Some(&peer.as_str()) && f.get(2) == Some(&us.as_str()))
+            .then(|| f.get(7)?.parse().ok())?
+    })
+}
+
+/// Equal in time that does not depend on where they differ.
+fn same(a: &str, b: &str) -> bool {
+    a.len() == b.len() && a.bytes().zip(b.bytes()).fold(0, |d, (x, y)| d | (x ^ y)) == 0
+}
+
 /// The first failing check, in the order of the plan's table, as a status code. `Ok` is the
-/// length of the body to read.
-pub fn check(head: &Head) -> Result<usize, u16> {
-    if !head.peer_is_loopback || head.origin.is_some() || !head.host.is_some_and(host_is_local) {
+/// length of the body to read. Everything that answers 403 comes before any other answer, so
+/// nothing else is learned (or counted) without the token.
+pub fn check(head: &Head, token: &str) -> Result<usize, u16> {
+    if !head.peer_is_loopback
+        || head.origin.is_some()
+        || !head.host.is_some_and(host_is_local)
+        || !head.token.is_some_and(|t| same(t, token))
+    {
         return Err(403);
     }
     if head.method != "POST" {
@@ -102,9 +144,9 @@ pub struct Prepared {
     pub refused: u64,
 }
 
+/// Walked as it is parsed: what the body holds is never kept, only what passes.
 pub fn prepare(body: &[u8]) -> Result<Prepared, u16> {
-    let value: Value = serde_json::from_slice(body).map_err(|_| 400u16)?;
-    let f = otlp::lenient(&value);
+    let f = otlp::lenient_bytes(body).ok_or(400u16)?;
     Ok(Prepared {
         payload: f.payload,
         kept: f.kept,

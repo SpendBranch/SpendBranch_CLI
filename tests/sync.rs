@@ -254,6 +254,25 @@ fn the_server_asking_for_a_long_pause_is_obeyed_without_waiting_for_it() {
 }
 
 #[test]
+fn a_next_attempt_further_out_than_any_server_may_ask_is_forgotten() {
+    // Saved while the clock ran a month ahead: once it is right again, uploads must not wait a month.
+    let rig = Rig::ready();
+    rig.buffer(now_ms(), events(2));
+    let month_ahead = Iso::from_millis(now_ms() + 30 * DAY).unwrap().to_string();
+    rig.store().sync_set("nextAttemptAt", &month_ahead).unwrap();
+    let out = rig.run(&["sync"]);
+    assert_eq!(out.code, 0, "{}", out.text);
+    assert_eq!(rig.buffered(), 0);
+    assert_eq!(rig.sync_state("nextAttemptAt"), None);
+    // ...while one within the server's own ceiling is still obeyed.
+    rig.buffer(now_ms(), events(1));
+    let hours = Iso::from_millis(now_ms() + 20 * HOUR).unwrap().to_string();
+    rig.store().sync_set("nextAttemptAt", &hours).unwrap();
+    assert!(rig.run(&["sync"]).text.contains("Upload deferred until"));
+    assert_eq!(rig.buffered(), 1);
+}
+
+#[test]
 fn a_repeat_of_what_the_server_already_has_is_deleted_quietly() {
     let rig = Rig::ready();
     rig.buffer(now_ms(), events(2));
@@ -550,6 +569,80 @@ fn a_coverage_report_alone_is_sent_and_then_forgotten() {
     let s = rig.server.state.lock().unwrap();
     assert_eq!(s.batches, [(0, 1, s.batches[0].2)]);
     assert_eq!(s.stored_coverage.len(), 1);
+}
+
+#[test]
+fn coverage_alone_that_the_server_finds_too_big_is_dropped_not_a_crash() {
+    let rig = Rig::ready();
+    let db = rusqlite::Connection::open(rig.dir.path().join("state.db")).unwrap();
+    coverage(
+        &db,
+        "codex",
+        "2026-06-01T00:00:00.000Z",
+        "2026-06-01T01:00:00.000Z",
+        "unavailable",
+        Some("adapter_error"),
+    );
+    rig.server.configure(|s| s.ingest.max_plain = Some(10));
+    let out = rig.run(&["sync"]);
+    assert_eq!(out.code, 0, "{}", out.text);
+    assert_eq!(
+        rig.store().pending_counts().unwrap(),
+        (0, 0),
+        "a report that can never fit is not kept to fail every run"
+    );
+}
+
+#[test]
+fn a_batch_too_big_because_of_its_coverage_sends_the_coverage_alone_and_keeps_every_event() {
+    use spendbranch::sync::{self, Item};
+    let rig = Rig::ready();
+    let row = |i: usize| {
+        json!({"source": "claude_code", "from": format!("2026-06-01T{:02}:00:00.000Z", i % 24),
+               "to": format!("2026-06-01T{:02}:30:00.000Z", i % 24), "state": "unavailable",
+               "reason": "adapter_error"})
+        .to_string()
+    };
+    let reports: Vec<_> = sync::parse_coverage((0..50).map(|i| (i as i64, row(i)))).0;
+    let items: Vec<Item> = events(5)
+        .into_iter()
+        .enumerate()
+        .map(|(i, observation)| Item {
+            id: i as i64,
+            queued_at: 0,
+            payload: String::new(),
+            observation,
+        })
+        .collect();
+    let size = |n: usize, c: usize| {
+        let id = uuid::Uuid::new_v4();
+        sync::pack(id, &items[..n], &reports[..c], 500)
+            .unwrap()
+            .json
+            .len()
+    };
+    let limit = size(5, 0).max(size(0, 50));
+    assert!(
+        size(1, 50) > limit,
+        "one event with the coverage must not fit"
+    );
+    rig.server.configure(|s| s.ingest.max_plain = Some(limit));
+    let db = rusqlite::Connection::open(rig.dir.path().join("state.db")).unwrap();
+    for i in 0..50 {
+        db.execute("INSERT INTO pending_coverage(payload) VALUES(?1)", [row(i)])
+            .unwrap();
+    }
+    rig.buffer(now_ms(), events(5));
+    let out = rig.run(&["sync"]);
+    assert_eq!(out.code, 0, "{}", out.text);
+    assert!(
+        !out.text.contains("did not pass"),
+        "valid events blamed: {}",
+        out.text
+    );
+    let s = rig.server.state.lock().unwrap();
+    assert_eq!(s.stored.len(), 5, "every event reached the server");
+    assert_eq!(s.stored_coverage.len(), 50);
 }
 
 #[test]

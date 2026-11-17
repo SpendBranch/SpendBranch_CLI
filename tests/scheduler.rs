@@ -274,3 +274,54 @@ fn real_systemd_runs_the_sync_and_removal_leaves_nothing() {
         after.stdout
     );
 }
+
+#[test]
+fn a_line_break_or_an_expanding_character_never_reaches_a_scheduler_or_hook_line() {
+    use spendbranch::scheduler::fits_a_command;
+    for bad in ["/opt/x\nExecStartPre=/bin/evil", "/opt/x\r", "/opt/x\0"] {
+        assert!(!fits_a_command(bad, false), "{bad:?}");
+        assert!(!fits_a_command(bad, true), "{bad:?}");
+    }
+    for windows_only in [
+        r"C:\$(calc)\spendbranch.exe",
+        r"C:\%APPDATA%\x",
+        "C:\\a\"b",
+        "C:\\`x`",
+    ] {
+        assert!(fits_a_command(windows_only, false));
+        assert!(!fits_a_command(windows_only, true), "{windows_only}");
+    }
+    assert!(fits_a_command(
+        "/opt/spend branch/o'neil/spendbranch",
+        false
+    ));
+    assert!(fits_a_command(
+        r"C:\Program Files\SpendBranch\spendbranch.exe",
+        true
+    ));
+
+    let rig = Rig::new();
+    let refused = rig.install_schedule(
+        Platform::Linux,
+        &[("SPENDBRANCH_HOME", "/data\nExecStartPre=/bin/evil")],
+    );
+    assert!(refused.is_err(), "{refused:?}");
+    assert!(!rig.unit_dir().join("spendbranch-sync.service").exists());
+    assert!(rig.system.tool_calls("crontab").is_empty());
+}
+
+#[test]
+fn a_home_with_a_dollar_is_written_as_it_is_in_the_systemd_environment() {
+    let unit = spendbranch::scheduler::systemd_service(&spendbranch::scheduler::Job {
+        exe: "/opt/a$b/spendbranch",
+        home: Some("/data/$HOME-ish"),
+    });
+    assert!(
+        unit.contains("ExecStart=\"/opt/a$$b/spendbranch\" sync"),
+        "{unit}"
+    );
+    assert!(
+        unit.contains("Environment=\"SPENDBRANCH_HOME=/data/$HOME-ish\""),
+        "Environment= does not expand `$`: doubling it would change the folder\n{unit}"
+    );
+}

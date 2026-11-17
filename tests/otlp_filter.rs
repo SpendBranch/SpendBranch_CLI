@@ -97,19 +97,68 @@ fn the_name_comes_from_the_field_then_the_attribute_then_the_body() {
 }
 
 #[test]
-fn text_over_256_characters_is_dropped_and_256_stays() {
-    let long = "é".repeat(257);
-    let fine = "é".repeat(256);
-    let f = otlp::lenient(&payload(vec![record(
+fn text_is_kept_only_in_the_shape_its_key_promises() {
+    let attr = |k: &str, v: &str| json!({"key": k, "value": {"stringValue": v}});
+    let f = otlp::lenient(&payload(vec![
+        record(
+            "api_request",
+            json!([
+                // free text, a path, a line break, over 256: never forwarded
+                attr("model", &"é".repeat(257)),
+                attr("session.id", "/home/dev/secret-project"),
+                attr("request_id", "req 1\nSECRET"),
+                attr("query_source", "SECRET PROMPT TEXT"),
+                attr("organization.id", "org synth"),
+                attr("event.timestamp", "2026-01-01 10:00:00 <script>"),
+                attr("input_tokens", "SECRET"),
+                json!({"key": "output_tokens", "value": {"stringValue": "12"}}),
+            ]),
+        ),
+        record(
+            "api_request",
+            json!([
+                attr("model", "claude-test-1"),
+                attr("session.id", "sess_1"),
+                attr("request_id", "req_1"),
+                attr("query_source", "agent:explore"),
+                attr("organization.id", "org_synth_1"),
+                attr("event.timestamp", "2026-01-01T10:00:00-03:00"),
+            ]),
+        ),
+    ]));
+    let keys = |i: usize| -> Vec<String> {
+        f.payload
+            .pointer(&format!(
+                "/resourceLogs/0/scopeLogs/0/logRecords/{i}/attributes"
+            ))
+            .unwrap()
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|a| a["key"].as_str().unwrap().to_owned())
+            .collect()
+    };
+    assert_eq!(
+        keys(0),
+        ["output_tokens"],
+        "only the counter that is a number"
+    );
+    assert_eq!(keys(1).len(), 6, "{:?}", keys(1));
+    // past the contract's ceiling for one counter (10^12), as text or as a number
+    let over = otlp::lenient(&payload(vec![record(
         "api_request",
-        json!([{"key": "model", "value": {"stringValue": long}}, {"key": "query_source", "value": {"stringValue": fine}}]),
+        json!([
+            {"key": "input_tokens", "value": {"intValue": "1000000000001"}},
+            {"key": "output_tokens", "value": {"intValue": 9_000_000_000_000_000u64}},
+            {"key": "cache_read_tokens", "value": {"intValue": "1000000000000"}},
+        ]),
     )]));
-    let attrs = f
-        .payload
-        .pointer("/resourceLogs/0/scopeLogs/0/logRecords/0/attributes")
-        .unwrap();
-    assert_eq!(attrs.as_array().unwrap().len(), 1);
-    assert_eq!(attrs[0]["key"], "query_source");
+    let kept = over.payload["resourceLogs"][0]["scopeLogs"][0]["logRecords"][0]["attributes"]
+        .as_array()
+        .unwrap()
+        .len();
+    assert_eq!(kept, 1, "only the counter at the ceiling stays");
+    assert!(!f.payload.to_string().contains("SECRET"));
 }
 
 #[test]
@@ -172,4 +221,62 @@ fn the_relay_filter_keeps_exactly_the_otlp_fields_the_owner_authorizes() {
         .filter_map(|f| f.strip_prefix("otlp:"))
         .collect();
     assert_eq!(otlp::KEYS.to_vec(), declared);
+}
+
+#[test]
+fn walking_the_bytes_gives_exactly_what_walking_the_parsed_body_gives() {
+    let mut bodies: Vec<String> = fixtures()
+        .iter()
+        .map(|d| fs::read_to_string(d.join("input.json")).unwrap())
+        .collect();
+    let rec = |extra: &str| {
+        format!(r#"{{"resourceLogs":[{{"scopeLogs":[{{"logRecords":[{extra}]}}]}}]}}"#)
+    };
+    for odd in [
+        "0, null, \"x\", [1,[2]], {}",
+        r#"{"eventName":"","body":{"stringValue":"api_request"},"attributes":[{"key":"model","value":{"stringValue":"m1"}}]}"#,
+        r#"{"eventName":7,"attributes":[{"key":"event.name","value":5},{"key":"event.name","value":{"stringValue":"api_request"}}]}"#,
+        r#"{"attributes":[{"key":"event.name","value":{"stringValue":"api_request"}},{"key":"input_tokens","value":{"intValue":1.5}},{"key":"input_tokens","value":{"intValue":"7"}},{"key":"output_tokens","value":{"stringValue":"9","intValue":null}}]}"#,
+        r#"{"eventName":"api_request","timeUnixNano":-5,"attributes":{"key":"model"}}"#,
+        r#"{"eventName":"api_request","timeUnixNano":12,"attributes":[null,1,{"key":3,"value":{}},{"value":{"stringValue":"no key"}},{"key":"model"},{"key":"model","value":{"stringValue":"ok-model","x":[1,2,{"y":3}]}}]}"#,
+        r#"{"eventName":"claude_code.api_request","attributes":[{"key":"session.id","value":{"stringValue":"s","stringValue":7}},{"key":"request_id","key":"model","value":{"stringValue":"r1"}}]}"#,
+    ] {
+        bodies.push(rec(odd));
+    }
+    bodies.push(rec(&vec![r#"{"eventName":"api_request"}"#; 2100].join(",")));
+    bodies.push(format!(
+        r#"{{"resourceLogs":[{{"scopeLogs":[{{"logRecords":[{}]}},{{"logRecords":[{}]}}]}},7,{{"scopeLogs":{{}}}}]}}"#,
+        vec!["0"; 1999].join(","),
+        [r#"{"eventName":"api_request"}"#; 3].join(",")
+    ));
+    for garbage in [
+        "[]",
+        "7",
+        "\"x\"",
+        "null",
+        r#"{"resourceLogs":{}}"#,
+        r#"{"resourceLogs":[[],{"scopeLogs":[[{}]]}]}"#,
+    ] {
+        bodies.push(garbage.into());
+    }
+    for body in &bodies {
+        let parsed = otlp::lenient(&serde_json::from_str(body).unwrap());
+        let walked = otlp::lenient_bytes(body.as_bytes()).expect(body);
+        assert_eq!(walked.payload, parsed.payload, "{body}");
+        assert_eq!(
+            (walked.kept, walked.dropped, walked.ignored),
+            (parsed.kept, parsed.dropped, parsed.ignored),
+            "{body}"
+        );
+    }
+    // Not JSON, something after it, or a list key given twice in one object: refused.
+    for bad in [
+        "{nope",
+        "{} {}",
+        r#"{"resourceLogs":[],"resourceLogs":[]}"#,
+        r#"{"resourceLogs":[{"scopeLogs":[],"scopeLogs":[]}]}"#,
+        r#"{"resourceLogs":[{"scopeLogs":[{"logRecords":[],"logRecords":[]}]}]}"#,
+    ] {
+        assert!(otlp::lenient_bytes(bad.as_bytes()).is_none(), "{bad}");
+    }
 }
