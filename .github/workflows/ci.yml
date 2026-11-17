@@ -72,7 +72,8 @@ jobs:
       # The performance budget on the release build (tests/perf.rs): the hook under 200 ms, a
       # sync with nothing new under 300 ms, a first sync under 30 MB (Linux) and the read speed.
       - name: Performance budget
-        run: cargo test --release --locked --test perf -- --ignored --nocapture
+        # One at a time: a timing taken while the 200 MiB sync runs beside it measures the contention.
+        run: cargo test --release --locked --test perf -- --ignored --nocapture --test-threads=1
       - name: Release binary stays under 10 MB
         shell: bash
         run: |

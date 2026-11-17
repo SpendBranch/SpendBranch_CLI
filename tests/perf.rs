@@ -1,7 +1,7 @@
 //! Performance budget. Slow, so ignored by default; run it in release mode:
 //!
 //! ```text
-//! cargo test --release --test perf -- --ignored --nocapture
+//! cargo test --release --test perf -- --ignored --nocapture --test-threads=1
 //! ```
 //!
 //! The thresholds are a safety net against gross regressions (they only apply to release

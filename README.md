@@ -26,7 +26,7 @@ cargo deny check
 
 - `schema/ingest-v1.json`: JSON Schema of the upload contract (`ingest/v1`).
 - `tests/fixtures/`: synthetic fixture corpus; see its README.
-- `cargo test --release --test perf -- --ignored --nocapture`: performance budget.
+- `cargo test --release --test perf -- --ignored --nocapture --test-threads=1`: performance budget.
 
 ## Release
 
