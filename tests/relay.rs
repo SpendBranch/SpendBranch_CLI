@@ -1,8 +1,5 @@
 //! The relay over a real socket, and the real program forwarding, signed, to the fake server.
-#[path = "common/fake_server.rs"]
-mod fake_server;
-#[path = "common/rig.rs"]
-mod rig;
+use crate::rig;
 
 use rig::{Rig, authorize, free_port, payload, record};
 use serde_json::{Value, json};

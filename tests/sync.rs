@@ -1,9 +1,6 @@
 //! `sync` end to end against the fake server: what is sent, what an answer deletes, and what
 //! it does when the server is away, strict or unhappy.
-#[path = "common/fake_server.rs"]
-mod fake_server;
-#[path = "common/rig.rs"]
-mod rig;
+use crate::rig;
 
 use rig::{Rig, authorize, now_ms, observation};
 use serde_json::json;

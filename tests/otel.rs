@@ -1,8 +1,5 @@
 //! `otel claude-code`: the environment file that points the agent at the relay.
-#[path = "common/fake_server.rs"]
-mod fake_server;
-#[path = "common/rig.rs"]
-mod rig;
+use crate::rig;
 
 use rig::{Rig, authorize, free_port};
 use std::fs;

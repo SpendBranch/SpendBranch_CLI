@@ -1,10 +1,8 @@
 //! The account journeys: login, status, enable, disable and logout, in-process, against the
 //! fake server. Nothing here waits, opens a browser or touches the real keychain.
-#[path = "common/fake_server.rs"]
-mod fake_server;
+use crate::fake_server;
 
-#[path = "common/rig.rs"]
-mod rig;
+use crate::rig;
 
 use rig::{Rig, authorize};
 use serde_json::{Value, json};

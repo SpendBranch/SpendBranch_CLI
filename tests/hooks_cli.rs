@@ -1,9 +1,6 @@
 //! `hooks install|uninstall` and the hook the agents run, against a fake `System` (no process
 //! is ever started).
-#[path = "common/fake_server.rs"]
-mod fake_server;
-#[path = "common/rig.rs"]
-mod rig;
+use crate::rig;
 
 use rig::{EXE, Rig};
 use serde_json::{Value, json};

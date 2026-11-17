@@ -168,7 +168,7 @@ fn lock_holder_child() {
 fn another_process_holds_the_lock_and_its_death_releases_it() {
     let dir = tempfile::tempdir().unwrap();
     let mut child = Command::new(std::env::current_exe().unwrap())
-        .args(["lock_holder_child", "--exact", "--nocapture"])
+        .args(["infra::lock_holder_child", "--exact", "--nocapture"])
         .env("SPENDBRANCH_TEST_LOCK_DIR", dir.path())
         .stdout(Stdio::null())
         .stderr(Stdio::null())

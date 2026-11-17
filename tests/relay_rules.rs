@@ -1,8 +1,4 @@
 //! The relay's table of answers, one row at a time, as pure rules.
-#[path = "common/fake_server.rs"]
-mod fake_server;
-#[path = "common/rig.rs"]
-mod rig;
 
 use serde_json::json;
 use spendbranch::relay::{self, Head, RateLimit};

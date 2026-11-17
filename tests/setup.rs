@@ -1,8 +1,5 @@
 //! `setup`, and how `status`, `enable` and `logout` report the hook and the schedule.
-#[path = "common/fake_server.rs"]
-mod fake_server;
-#[path = "common/rig.rs"]
-mod rig;
+use crate::rig;
 
 use rig::{FakeSystem, Rig, authorize};
 use serde_json::Value;
