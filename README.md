@@ -6,7 +6,7 @@ Status: under development (foundation phase).
 
 ## License
 
-This repository is **source-available for auditing, not open source**. It is public so anyone can see exactly what the CLI does before installing it. You may read the code, and build it unmodified to verify an official binary. Commercial use, forks, modification and redistribution are not allowed. See [LICENSE](LICENSE).
+This repository is **source-available for auditing, not open source**. It is public so anyone can see exactly what the CLI does before installing it. You may read the code, and build it unmodified to verify an official binary. Copying or reusing any part of it, commercial use, forks, modification and redistribution are not allowed, and the code may not be used to train or improve any AI or machine learning model. See [LICENSE](LICENSE).
 
 ## Develop
 
