@@ -124,10 +124,10 @@ fn parser_versions_match_the_contract() {
 fn tested_version_ranges() {
     for (v, ok) in [
         ("2.1.290", true),
-        ("2.1.320", true),
+        ("2.1.326", true),
         ("2.1.300-beta", true),
         ("2.1.289", false),
-        ("2.1.321", false),
+        ("2.1.327", false),
         ("2.2.0", false),
         ("3.0.0", false),
         ("garbage", false),
