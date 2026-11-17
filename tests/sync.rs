@@ -1,14 +1,11 @@
 //! `sync` end to end against the fake server: what is sent, what an answer deletes, and what
 //! it does when the server is away, strict or unhappy.
-#[path = "common/fake_server.rs"]
-mod fake_server;
-#[path = "common/rig.rs"]
-mod rig;
+use crate::rig;
 
 use rig::{Rig, authorize, now_ms, observation};
 use serde_json::json;
 use spendbranch::cli::messages;
-use spendbranch::contract::Iso;
+use spendbranch::contract::{ExternalId, Iso};
 use std::collections::VecDeque;
 
 const HOUR: i64 = 3_600_000;
@@ -198,6 +195,12 @@ fn a_server_that_is_away_leaves_everything_in_the_buffer_and_the_next_run_sends_
     assert_eq!(out.code, 1, "{}", out.text);
     assert!(
         out.text
+            .contains("The server is temporarily unavailable. Try again later."),
+        "{}",
+        out.text
+    );
+    assert!(
+        out.text
             .contains("3 items remain buffered for the next upload."),
         "{}",
         out.text
@@ -307,7 +310,7 @@ fn errors_that_need_the_person_stop_the_run_and_keep_the_buffer() {
         (
             415,
             "UNSUPPORTED_MEDIA_TYPE",
-            "The server rejected the request (UNSUPPORTED_MEDIA_TYPE).".to_owned(),
+            "The server did not accept the upload format. A proxy in between may be changing requests; check the server address (--server).".to_owned(),
         ),
     ] {
         let rig = Rig::ready();
@@ -346,7 +349,11 @@ fn a_device_the_server_revoked_stops_at_the_first_call() {
     });
     let out = rig.run(&["sync"]);
     assert_eq!(out.code, 1);
-    assert!(out.text.contains("revoked or expired"), "{}", out.text);
+    assert!(
+        out.text.contains("revoked, expired, or lost access"),
+        "{}",
+        out.text
+    );
     assert_eq!(rig.buffered(), 2);
 }
 
@@ -736,8 +743,15 @@ fn without_a_connection_or_a_source_it_says_what_to_do() {
 #[test]
 fn a_full_buffer_refuses_the_read_saves_nothing_and_records_a_gap() {
     let rig = Rig::ready();
+    // One observation built through the contract, then 100 000 copies that differ in the
+    // event id: going through JSON for each one took most of this test's time.
+    let template = observation("codex", "s1", "e000000", &at_now());
     let items: Vec<_> = (0..100_000)
-        .map(|i| observation("codex", "s1", &format!("e{i:06}"), &at_now()))
+        .map(|i| {
+            let mut item = template.clone();
+            item.external_event_id = ExternalId::new(&format!("e{i:06}")).unwrap();
+            item
+        })
         .collect();
     rig.buffer(now_ms(), items);
     // the device is revoked, so the run stops after reading and the gap stays where it can be seen

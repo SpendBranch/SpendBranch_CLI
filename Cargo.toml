@@ -6,10 +6,33 @@ rust-version = "1.89" # File::try_lock (stable in 1.89)
 description = "SpendBranch CLI: collects only authorized AI agent session metadata"
 publish = false
 license-file = "LICENSE"
+# Test binaries are listed below: one for all integration tests (tests/integration.rs), and one
+# each for the tests that need a process of their own (a global allocation counter, timings).
+autotests = false
 
 [[bin]]
 name = "spendbranch"
 path = "src/main.rs"
+
+[[test]]
+name = "integration"
+path = "tests/integration.rs"
+
+[[test]]
+name = "memory"
+path = "tests/memory.rs"
+
+[[test]]
+name = "memory_readers"
+path = "tests/memory_readers.rs"
+
+[[test]]
+name = "memory_relay"
+path = "tests/memory_relay.rs"
+
+[[test]]
+name = "perf"
+path = "tests/perf.rs"
 
 [dev-dependencies]
 jsonschema = { version = "0.60", default-features = false }

@@ -157,3 +157,24 @@ fn commands_reach_files_sockets_processes_and_sqlite_only_through_infra() {
         }
     }
 }
+
+#[test]
+fn every_test_file_is_built() {
+    // `autotests = false`: a file in tests/ runs only if tests/integration.rs lists it as a
+    // module or Cargo.toml gives it a `[[test]]`. A forgotten file would pass by never running.
+    let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let listed = fs::read_to_string(root.join("tests/integration.rs")).unwrap()
+        + &fs::read_to_string(root.join("Cargo.toml")).unwrap();
+    let mut missing = Vec::new();
+    for entry in fs::read_dir(root.join("tests")).unwrap() {
+        let name = entry.unwrap().file_name().into_string().unwrap();
+        if name.ends_with(".rs")
+            && name != "integration.rs"
+            && !listed.contains(&format!("#[path = \"{name}\"]"))
+            && !listed.contains(&format!("path = \"tests/{name}\""))
+        {
+            missing.push(name);
+        }
+    }
+    assert!(missing.is_empty(), "test files that never run: {missing:?}");
+}

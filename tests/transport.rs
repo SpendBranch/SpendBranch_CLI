@@ -1,6 +1,5 @@
 //! The client against a real local server that checks signatures like the API does.
-#[path = "common/fake_server.rs"]
-mod fake_server;
+use crate::fake_server;
 
 use fake_server::{FakeServer, WINDOW_MS};
 use serde_json::{Value, json};

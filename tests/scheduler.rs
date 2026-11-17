@@ -1,9 +1,6 @@
 //! The system schedule `setup` installs and `logout` removes, against a fake `System`; one
 //! ignored test uses the real systemd.
-#[path = "common/fake_server.rs"]
-mod fake_server;
-#[path = "common/rig.rs"]
-mod rig;
+use crate::rig;
 
 use rig::Rig;
 use spendbranch::infra::scheduler::{self, Method, Platform};

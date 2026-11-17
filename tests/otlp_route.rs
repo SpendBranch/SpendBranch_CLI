@@ -1,7 +1,6 @@
 //! The fake server's OTLP route against the contract: the strict filter, and the route's own
 //! ceiling. The relay's filter never lets these cases through, so they are posted directly.
-#[path = "common/fake_server.rs"]
-mod fake_server;
+use crate::fake_server;
 
 use fake_server::FakeServer;
 use serde_json::{Value, json};

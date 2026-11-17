@@ -208,7 +208,7 @@ use crate::api::{ApiFailure, is_plain_code};
 pub fn failure_message(code: &str) -> String {
     match code {
         "NETWORK" => "Could not reach the server. Check your network and server address (--server).".into(),
-        "UNAUTHENTICATED" => "This device was revoked or expired. Run `spendbranch login`.".into(),
+        "UNAUTHENTICATED" => "This device was revoked, expired, or lost access. Run `spendbranch login`.".into(),
         "COLLECTION_NOT_AUTHORIZED" => "The company has not authorized collection. Ask the organization owner.".into(),
         "FIELDS_NOT_AUTHORIZED" => "The company authorized a different field list for this source. Ask the owner to renew authorization.".into(),
         "PLAN_REQUIRED" => "The organization has no active plan.".into(),
@@ -218,6 +218,10 @@ pub fn failure_message(code: &str) -> String {
         "BEFORE_COLLECTION_WINDOW" => "Events precede the month when the company authorized collection.".into(),
         "SESSION_OWNED" => "This session already belongs to another member. Only the person who ran it can send its usage.".into(),
         "INTERNAL" => "The server failed to receive the data.".into(),
+        "VALIDATION_FAILED" => "The server refused the data as out of contract. Install the latest spendbranch; if it keeps happening, report it.".into(),
+        "PAYLOAD_TOO_LARGE" => "The data sent was too large for the server.".into(),
+        "UNSUPPORTED_MEDIA_TYPE" => "The server did not accept the upload format. A proxy in between may be changing requests; check the server address (--server).".into(),
+        "UNAVAILABLE" => "The server is temporarily unavailable. Try again later.".into(),
         other if is_plain_code(other) => format!("The server rejected the request ({other})."),
         _ => "The server rejected the request.".into(),
     }
@@ -249,7 +253,8 @@ pub const LOGIN_LOCK_BUSY: &str = "The new access was approved, but another `spe
 pub const OLD_DEVICE_NOT_REVOKED: &str = "The previous device could not be revoked on the server. Revoke it in \"My devices\" on the web.";
 pub const BUFFER_DISCARDED: &str = "This is a different organization: the buffer from the previous one was discarded, and collection was turned off. Run `spendbranch enable <source>` again.";
 pub const LOGOUT_REVOKED: &str = "Device revoked on the server.";
-pub const LOGOUT_ALREADY_REVOKED: &str = "The device was already revoked or expired.";
+pub const LOGOUT_ALREADY_REVOKED: &str =
+    "The device was already revoked, expired, or without access.";
 pub const LOGOUT_NOT_REVOKED: &str =
     "The device could not be revoked on the server. Revoke it in \"My devices\" on the web.";
 pub const LOGOUT_LOCAL_DELETED: &str = "Local credentials deleted.";
@@ -305,7 +310,7 @@ pub const NO_HOME: &str = "Cannot locate your home folder.";
 pub const CODEX_TRUST: &str = "Open Codex and trust the hook under /hooks; Codex ignores new or changed hooks until they are reviewed.";
 pub const HOME_NOT_CARRIED: &str = "Note: SPENDBRANCH_HOME is set here, but the agent starts the hook with its own environment. Set it there too if you use a custom data folder.";
 pub const SETUP_NO_AGENT: &str = "No supported agent was found (Claude Code or Codex). Install one, then run `spendbranch setup` again.";
-pub const SETUP_RECONNECT: &str = "This device was revoked or expired; reconnecting.";
+pub const SETUP_RECONNECT: &str = "This device was revoked, expired, or lost access; reconnecting.";
 pub const SCHEDULER_REMOVED: &str = "Scheduled sync removed.";
 
 pub fn hook_file_problem(file: &str, layout: bool) -> String {
