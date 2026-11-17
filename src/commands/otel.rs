@@ -22,7 +22,9 @@ fn settings(port: u16, token: &str) -> [(&'static str, String); 7] {
             format!("http://127.0.0.1:{port}{}", relay::PATH),
         ),
         (
-            "OTEL_EXPORTER_OTLP_HEADERS",
+            // The logs exporter's own variable: the token never goes to a collector the person
+            // exports traces or metrics to, and headers they set for those stay theirs.
+            "OTEL_EXPORTER_OTLP_LOGS_HEADERS",
             format!("{}={token}", relay::TOKEN_HEADER),
         ),
     ]
@@ -57,9 +59,11 @@ pub(super) fn run(ctx: &mut Ctx) -> Result<i32> {
     } else {
         "otel-claude_code.env"
     });
-    private_fs::write(&file, &render(windows, port, &token))?;
+    // What the relay checks first: a file written after a failed save would point the agent
+    // at a token no relay knows.
     account.store.meta_set(PORT_KEY, &port.to_string())?;
     account.store.meta_set(TOKEN_KEY, &token)?;
+    private_fs::write(&file, &render(windows, port, &token))?;
     say(
         ctx,
         &m::otel_written(&file.display().to_string(), windows),

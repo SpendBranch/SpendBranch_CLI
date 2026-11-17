@@ -246,7 +246,7 @@ pub fn otel_written(file: &str, windows: bool) -> String {
         format!("source '{}'", file.replace('\'', "'\\''"))
     };
     format!(
-        "Wrote {file}.\nLoad it in the terminal where you start Claude Code:\n  {load}\nand keep `spendbranch relay` running while you work. The file holds the relay's token, readable only by you: the relay signs nothing that comes without it. Running `otel` again picks a new port and token."
+        "Wrote {file}.\nLoad it in the terminal where you start Claude Code:\n  {load}\nand keep `spendbranch relay` running while you work. The file holds the relay's token, readable only by you: the relay signs nothing that comes without it. Running `otel` again picks a new port and token: restart a relay that is already running, and reload the file where you start Claude Code."
     )
 }
 

@@ -52,7 +52,7 @@ fn otel_writes_a_private_environment_file_with_no_secret_in_it() {
     );
     assert!(
         text.contains(&format!(
-            "export OTEL_EXPORTER_OTLP_HEADERS=x-spendbranch-token={token}\n"
+            "export OTEL_EXPORTER_OTLP_LOGS_HEADERS=x-spendbranch-token={token}\n"
         )),
         "{text}"
     );
@@ -89,6 +89,11 @@ fn otel_writes_a_private_environment_file_with_no_secret_in_it() {
         out.text
     );
     assert!(out.text.contains("OTEL_LOG_USER_PROMPTS"), "{}", out.text);
+    assert!(out.text.contains("restart a relay that is already running"), "{}", out.text);
+    assert!(
+        !text.contains("OTEL_EXPORTER_OTLP_HEADERS="),
+        "the token goes only to the logs exporter: {text}"
+    );
     // Again, over a longer old file: rewritten whole, with no tail of the old one, and with a
     // new token (running it again is how a squatted port or a leaked token is left behind).
     fs::write(&file, "x".repeat(5000)).unwrap();
@@ -111,7 +116,7 @@ fn on_windows_otel_writes_a_powershell_file() {
     let text = fs::read_to_string(rig.dir.path().join("otel-claude_code.ps1")).unwrap();
     assert!(text.contains("$env:OTEL_LOGS_EXPORTER = 'otlp'"), "{text}");
     assert!(
-        text.contains("$env:OTEL_EXPORTER_OTLP_HEADERS = 'x-spendbranch-token="),
+        text.contains("$env:OTEL_EXPORTER_OTLP_LOGS_HEADERS = 'x-spendbranch-token="),
         "{text}"
     );
     assert!(out.text.contains("Invoke-Expression"), "{}", out.text);
