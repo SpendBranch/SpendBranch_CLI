@@ -1,6 +1,6 @@
 [package]
 name = "spendbranch"
-version = "0.1.0"
+version = "0.1.1"
 edition = "2024"
 rust-version = "1.89" # File::try_lock (stable in 1.89)
 description = "SpendBranch CLI: collects only authorized AI agent session metadata"
