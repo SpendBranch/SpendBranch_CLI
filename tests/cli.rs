@@ -1,16 +1,107 @@
 //! Command line behaviour: help, exit codes and the answers that need no network.
 //! Everything runs against a temporary data folder, never the real one.
-use spendbranch::cli::{self, messages};
+use spendbranch::cli::{self, Io, messages};
+use spendbranch::infra::system::{Platform, Ran, System};
 use spendbranch::infra::{lock, paths, store::Store};
-use std::{path::Path, process::Command};
+use std::{
+    io,
+    path::{Path, PathBuf},
+    process::Command,
+};
+
+/// A system that never starts anything: no tools, no executable path, no keyboard.
+struct Inert;
+
+impl System for Inert {
+    fn platform(&self) -> Platform {
+        Platform::current()
+    }
+    fn exe(&self) -> io::Result<PathBuf> {
+        Err(io::Error::other("no executable path in this mode"))
+    }
+    fn stdin_brief(&self) -> Option<Vec<u8>> {
+        None
+    }
+    fn spawn_detached(&self, _: &Path, _: &[&str], _: &Path) -> io::Result<()> {
+        Ok(())
+    }
+    fn run(&self, _: &str, _: &[&str], _: Option<&str>) -> io::Result<Ran> {
+        Err(io::Error::new(
+            io::ErrorKind::NotFound,
+            "no tools in this mode",
+        ))
+    }
+    fn stopped(&self) -> bool {
+        true
+    }
+}
+
+/// Runs the command line with only these variables set; `tty` says whether it is a terminal.
+fn run_env(args: &[&str], vars: &[(&str, &str)], tty: bool) -> (i32, String) {
+    let args: Vec<String> = args.iter().map(|a| a.to_string()).collect();
+    let vars: Vec<(String, String)> = vars
+        .iter()
+        .map(|(k, v)| (k.to_string(), v.to_string()))
+        .collect();
+    let env = move |k: &str| vars.iter().find(|(n, _)| n == k).map(|(_, v)| v.clone());
+    let mut out = Vec::new();
+    let code = cli::run_with(
+        &args,
+        &env,
+        &mut Io {
+            out: &mut out,
+            input: &mut io::empty(),
+            sleep: &|_| {},
+            open_url: &|_| {},
+            interactive: tty,
+            system: &Inert,
+        },
+    );
+    (code, String::from_utf8(out).unwrap())
+}
 
 fn run_in(home: &Path, args: &[&str]) -> (i32, String) {
-    let args: Vec<String> = args.iter().map(|a| a.to_string()).collect();
-    let home = home.to_str().unwrap().to_string();
-    let env = move |k: &str| (k == "SPENDBRANCH_HOME").then(|| home.clone());
-    let mut out = Vec::new();
-    let code = cli::run(&args, &env, &mut out);
-    (code, String::from_utf8(out).unwrap())
+    run_env(args, &[("SPENDBRANCH_HOME", home.to_str().unwrap())], false)
+}
+
+#[test]
+fn the_owl_on_a_terminal_is_colored_only_where_truecolor_is_known_to_work() {
+    let escapes = |vars: &[(&str, &str)]| run_env(&["--help"], vars, true).1.contains('\x1b');
+    assert!(escapes(&[("COLORTERM", "truecolor")]));
+    assert!(escapes(&[
+        ("COLORTERM", "24bit"),
+        ("TERM", "xterm-256color")
+    ]));
+    assert!(!escapes(&[]), "no COLORTERM: no promise of truecolor");
+    assert!(!escapes(&[("COLORTERM", "truecolor"), ("TERM", "dumb")]));
+    assert!(!escapes(&[("COLORTERM", "truecolor"), ("NO_COLOR", "1")]));
+    let (_, plain) = run_env(&["--help"], &[], true);
+    assert!(
+        plain.contains("( @ )"),
+        "the owl keeps its shape without color"
+    );
+}
+
+#[test]
+fn the_help_does_not_point_to_itself() {
+    let (_, out) = run_env(&["--help"], &[("COLORTERM", "truecolor")], true);
+    assert!(!out.contains("--help for all commands"), "{out}");
+}
+
+#[test]
+fn the_colored_owl_sends_a_color_only_when_it_changes() {
+    let (_, out) = run_env(&["--help"], &[("COLORTERM", "truecolor")], true);
+    let codes = out.matches("\x1b[38;2;").count();
+    let inked: usize = out
+        .lines()
+        .take(18)
+        .map(|l| l.chars().filter(|c| !c.is_whitespace()).count())
+        .sum();
+    assert!(
+        codes * 2 < inked,
+        "{codes} color codes for {inked} characters"
+    );
+    assert!(out.len() < 6_000, "{} bytes", out.len());
 }
 
 fn run(args: &[&str]) -> (i32, String) {

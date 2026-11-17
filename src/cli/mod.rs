@@ -6,7 +6,7 @@ pub mod render;
 
 use crate::commands::{self, Ctx};
 use crate::env::Env;
-use crate::infra::system::{Inert, System};
+use crate::infra::system::System;
 use args::Parsed;
 use std::{
     io::{BufRead, Write},
@@ -16,7 +16,7 @@ use std::{
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
 
 /// What a run needs from the outside world besides the environment. The real ones are made
-/// in `main`; `run` gives inert ones, so nothing waits, reads the keyboard or opens a browser.
+/// in `main`; tests pass their own.
 pub struct Io<'a> {
     pub out: &'a mut dyn Write,
     pub input: &'a mut dyn BufRead,
@@ -27,16 +27,12 @@ pub struct Io<'a> {
 }
 
 /// Exit codes: 0 success, 1 failure, 2 wrong usage.
-pub fn run(args: &[String], env: Env, out: &mut dyn Write) -> i32 {
-    let mut io = Io {
-        out,
-        input: &mut std::io::empty(),
-        sleep: &|_| {},
-        open_url: &|_| {},
-        interactive: false,
-        system: &Inert,
-    };
-    run_with(args, env, &mut io)
+/// The one place that decides color: only where the terminal says it shows truecolor, never
+/// with `NO_COLOR` or `TERM=dumb`.
+pub fn truecolor(env: Env) -> bool {
+    env("NO_COLOR").is_none_or(|v| v.is_empty())
+        && env("TERM").as_deref() != Some("dumb")
+        && matches!(env("COLORTERM").as_deref(), Some("truecolor" | "24bit"))
 }
 
 pub fn run_with(args: &[String], env: Env, io: &mut Io) -> i32 {
@@ -62,10 +58,9 @@ fn dispatch(args: &[String], env: Env, io: &mut Io) -> Result<i32, Box<dyn std::
     match command {
         Parsed::Version => writeln!(io.out, "{VERSION}")?,
         Parsed::Help => {
-            // The owl only on a terminal: piped help stays plain text. NO_COLOR keeps its shape.
+            // The owl only on a terminal: piped help stays plain text. Without color it keeps its shape.
             if io.interactive {
-                let color = env("NO_COLOR").is_none_or(|v| v.is_empty());
-                writeln!(io.out, "{}", mascot::mascot(color))?;
+                writeln!(io.out, "{}", mascot::mascot(truecolor(env)))?;
             }
             writeln!(io.out, "{help}")?
         }

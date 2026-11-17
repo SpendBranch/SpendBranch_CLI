@@ -74,31 +74,41 @@ const PALETTE: [(char, [u8; 3]); 27] = [
 ];
 
 /// Text beside the owl, by art row.
-const SIDE: [(usize, &str); 3] = [
-    (5, "SpendBranch CLI"),
-    (7, "Start with: spendbranch setup"),
-    (9, "Or: spendbranch --help for all commands"),
-];
+const SIDE: [(usize, &str); 2] = [(5, "SpendBranch CLI"), (7, "Start with: spendbranch setup")];
 const ART_WIDTH: usize = 36;
 
-/// The owl with its side text; truecolor when `color`, plain characters otherwise.
+/// The owl with its side text; truecolor when `color`, plain characters otherwise. A color code
+/// goes out only where the color changes, and one reset ends each colored run.
 pub fn mascot(color: bool) -> String {
+    use std::fmt::Write;
     let mut out = String::new();
     for (row, (art, ink)) in OWL.iter().zip(OWL_INK).enumerate() {
+        let mut current: Option<&[u8; 3]> = None;
         let mut width = 0;
         for (ch, key) in art.chars().zip(ink.chars()) {
-            match PALETTE.iter().find(|(k, _)| *k == key) {
-                Some((_, [r, g, b])) if color && ch != ' ' => {
-                    out.push_str(&format!("\x1b[38;2;{r};{g};{b}m{ch}\x1b[0m"));
+            let want = match PALETTE.iter().find(|(k, _)| *k == key) {
+                Some((_, rgb)) if color && ch != ' ' => Some(rgb),
+                // A space shows no color, so it never breaks a run.
+                _ if ch == ' ' => current,
+                _ => None,
+            };
+            if want != current {
+                match want {
+                    Some([r, g, b]) => _ = write!(out, "\x1b[38;2;{r};{g};{b}m"),
+                    None => out.push_str("\x1b[0m"),
                 }
-                _ => out.push(ch),
+                current = want;
             }
+            out.push(ch);
             width += 1;
+        }
+        if current.is_some() {
+            out.push_str("\x1b[0m");
         }
         if let Some((_, text)) = SIDE.iter().find(|(r, _)| *r == row) {
             out.push_str(&" ".repeat(ART_WIDTH + 4 - width));
             if color {
-                out.push_str(&format!("\x1b[1m{text}\x1b[0m"));
+                _ = write!(out, "\x1b[1m{text}\x1b[0m");
             } else {
                 out.push_str(text);
             }
