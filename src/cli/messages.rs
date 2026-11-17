@@ -263,7 +263,7 @@ pub fn ready(organization: &str) -> String {
 
 pub fn confirm_organization(organization: &str) -> String {
     format!(
-        "This device will send usage metadata to \"{organization}\". Is that your organization? [y/N] "
+        "This device will send usage metadata to \"{organization}\".\nIs that your organization? [y/N] "
     )
 }
 
@@ -350,30 +350,24 @@ pub fn setup_already(organization: &str) -> String {
     format!("Already connected to {organization}. Use --relogin to switch.")
 }
 
-pub fn agent_found(agent: &str, found: bool) -> String {
-    format!("{agent}: {}", if found { "found" } else { "not found" })
-}
-
-/// One agent's line of the `setup` summary.
-pub fn setup_part(agent: &str, on: bool, hooked: bool) -> String {
-    let how = match (on, hooked) {
-        (true, true) => "connected, with the hook",
-        (true, false) => "connected, without the hook",
-        _ => "not connected",
-    };
-    format!("{agent}: {how}")
-}
-
-pub fn setup_summary(parts: &[String]) -> String {
-    format!("Summary: {}.", parts.join("; "))
-}
-
-pub fn scheduler_installed(method: &str) -> String {
+/// The fields on one line: how many, and where the whole list is.
+pub fn fields_line(agent: &str, arg: &str, fields: &[&str]) -> String {
     format!(
-        "Scheduled sync: every {} minutes and at login ({method}).",
+        "Reads {} fields from {agent} sessions, all on the company's list (`spendbranch enable {arg}` names them).",
+        fields.len()
+    )
+}
+
+pub fn schedule_every(method: &str) -> String {
+    format!(
+        "every {} minutes and at login ({method})",
         crate::scheduler::INTERVAL_MIN
     )
 }
+
+pub const SETUP_READY: &str = "Ready. Run `spendbranch status` anytime.";
+pub const SETUP_PROBLEMS: &str =
+    "Finished with problems: see the marks above, then run `spendbranch status`.";
 
 pub fn scheduler_failed(why: &str) -> String {
     format!("Scheduled sync: not installed ({why}). Hooks still send usage when a session ends.")

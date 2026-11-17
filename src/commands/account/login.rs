@@ -28,6 +28,15 @@ enum Paired {
 }
 
 pub fn login(ctx: &mut Ctx, server: Option<String>) -> Result<i32> {
+    login_with(ctx, server, true)
+}
+
+/// `show_status`: end with the status screen (`setup` shows its own steps instead).
+pub(in crate::commands) fn login_with(
+    ctx: &mut Ctx,
+    server: Option<String>,
+    show_status: bool,
+) -> Result<i32> {
     let Some(text) = server
         .or_else(|| (ctx.env)("SPENDBRANCH_SERVER").filter(|s| !s.is_empty()))
         .or_else(|| crate::api::default_server(cfg!(debug_assertions)).map(Into::into))
@@ -42,7 +51,7 @@ pub fn login(ctx: &mut Ctx, server: Option<String>) -> Result<i32> {
     // The new key waits in its own slot: a login that fails leaves the working key alone.
     let key = keys::generate()?;
     account.keys.save(Slot::Pending, &key)?;
-    let result = connect(ctx, &mut account, &server, &key);
+    let result = connect(ctx, &mut account, &server, &key, show_status);
     let _ = account.keys.delete(Slot::Pending);
     result
 }
@@ -52,6 +61,7 @@ fn connect(
     account: &mut Account,
     server: &ServerUrl,
     key: &DeviceKey,
+    show: bool,
 ) -> Result<i32> {
     let installation_id = account.store.installation_id()?;
     let approval = match pair(ctx, server, key, &installation_id)? {
@@ -87,7 +97,9 @@ fn connect(
         say(ctx, m::BUFFER_DISCARDED, 0)?;
     }
     save(ctx, account, server, key, &approval)?;
-    show_status(ctx, account, server, &new, view)?;
+    if show {
+        show_status(ctx, account, server, &new, view)?;
+    }
     Ok(0)
 }
 
@@ -194,16 +206,14 @@ fn show_status(
         return Ok(());
     };
     let local = local_status(ctx, &account.store)?;
-    for line in render::remote_lines(
-        &view,
-        &server.base(),
-        &new.key.fingerprint(),
-        account.keys.backend() == Backend::File,
-        &local,
-        now(),
-    ) {
-        writeln!(ctx.out, "{line}")?;
-    }
+    let remote = render::Remote {
+        view: &view,
+        server: &server.base(),
+        local_fingerprint: &new.key.fingerprint(),
+        key_in_file: account.keys.backend() == Backend::File,
+    };
+    let screen = render::status(ctx.style, Some(&remote), &local, now());
+    writeln!(ctx.out, "{screen}")?;
     Ok(())
 }
 

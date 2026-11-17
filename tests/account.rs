@@ -83,13 +83,12 @@ fn login_status_and_logout_work_end_to_end() {
     let status = rig.run(&["status"]);
     assert_eq!(status.code, 0, "{}", status.text);
     for line in [
-        "Organization: Acme Inc.",
-        "Member: Jane Doe",
-        "Device: test-laptop (",
-        "(reachable)",
-        "Claude Code: active since 2026-11-01 (claude-code/v2)",
-        "Local buffer: 0 items awaiting upload",
-        "Claude Code: collection off here",
+        "Organization   Acme Inc.",
+        "Member         Jane Doe",
+        "Device         [ok] test-laptop · valid to ",
+        "Server         [ok] http://",
+        "Claude Code    [-] off       [!] no hook   [ok] authorized",
+        "Upload         0 waiting",
     ] {
         assert!(
             status.text.contains(line),
@@ -98,7 +97,7 @@ fn login_status_and_logout_work_end_to_end() {
         );
     }
     assert!(
-        !status.text.contains("WARNING: this device's key"),
+        !status.text.contains("this device's key"),
         "the fingerprints agree"
     );
 
@@ -128,7 +127,7 @@ fn login_status_and_logout_work_end_to_end() {
 }
 
 #[test]
-fn the_status_shows_the_fingerprint_of_the_local_key_next_to_the_servers() {
+fn the_status_names_the_device_and_shows_its_key_only_when_the_server_disagrees() {
     let rig = Rig::new();
     rig.run(&["login"]);
     let key = KeyFiles::new(rig.dir.path())
@@ -136,11 +135,10 @@ fn the_status_shows_the_fingerprint_of_the_local_key_next_to_the_servers() {
         .unwrap()
         .unwrap();
     let status = rig.run(&["status"]);
+    assert!(status.text.contains("test-laptop"), "{}", status.text);
     assert!(
-        status
-            .text
-            .contains(&format!("Device: test-laptop ({})", key.fingerprint())),
-        "{}",
+        !status.text.contains(&key.fingerprint()),
+        "the keys agree: nothing to show\n{}",
         status.text
     );
 }
@@ -539,7 +537,7 @@ fn status_says_what_went_wrong_and_still_shows_the_local_part() {
         messages::failure_message("UNAUTHENTICATED")
     )));
     assert!(
-        out.text.contains("Local buffer: 1 items awaiting upload"),
+        out.text.contains("Upload         1 waiting"),
         "{}",
         out.text
     );
@@ -748,7 +746,7 @@ fn status_warns_about_a_source_that_is_on_here_but_not_authorized() {
     let out = rig.run(&["status"]);
     assert!(
         out.text
-            .contains("WARNING: Claude Code is on here but the company has not authorized it"),
+            .contains("[!] Claude Code is on here but the company has not authorized it"),
         "{}",
         out.text
     );
@@ -775,7 +773,7 @@ fn status_warns_when_the_servers_fingerprint_is_not_this_devices_key() {
     let out = rig.run(&["status"]);
     assert_eq!(out.code, 0, "the call itself worked");
     assert!(
-        out.text.contains("WARNING: this device's key is "),
+        out.text.contains("[!] This device's key is "),
         "{}",
         out.text
     );

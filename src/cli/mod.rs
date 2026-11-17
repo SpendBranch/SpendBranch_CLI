@@ -51,8 +51,9 @@ pub fn run_with(args: &[String], env: Env, io: &mut Io) -> i32 {
     }
 }
 
-fn ctx<'b>(env: Env<'b>, io: &'b mut Io) -> Ctx<'b> {
+fn ctx<'b>(env: Env<'b>, io: &'b mut Io, style: Style) -> Ctx<'b> {
     Ctx {
+        style,
         env,
         out: &mut *io.out,
         input: &mut *io.input,
@@ -78,7 +79,7 @@ fn dispatch(args: &[String], env: Env, io: &mut Io) -> Result<i32, Box<dyn std::
     };
     let text = match command {
         Parsed::Version => VERSION.to_owned(),
-        Parsed::Home if io.interactive => screen::home(st, &commands::home(&ctx(env, io))),
+        Parsed::Home if io.interactive => screen::home(st, &commands::home(&ctx(env, io, st))),
         Parsed::Home | Parsed::Help => screen::help(st),
         Parsed::CommandHelp(name) => match messages::command_help(name) {
             Some(h) => screen::command_help(st, h),
@@ -93,7 +94,7 @@ fn dispatch(args: &[String], env: Env, io: &mut Io) -> Result<i32, Box<dyn std::
             )?;
             return Ok(2);
         }
-        Parsed::Run(command) => return commands::run(command, &mut ctx(env, io)),
+        Parsed::Run(command) => return commands::run(command, &mut ctx(env, io, st)),
     };
     writeln!(io.out, "{text}")?;
     Ok(0)

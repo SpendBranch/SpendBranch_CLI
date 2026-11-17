@@ -18,7 +18,8 @@ pub fn enable(ctx: &mut Ctx, source: Source) -> Result<i32> {
     enable_with(ctx, source, true)
 }
 
-/// `hint`: say how to install the hook. `setup` installs it right after, so it asks for none.
+/// `hint`: say how to install the hook, and list the fields one per line. `setup` installs the
+/// hook right after and lists the fields on one line.
 pub(in crate::commands) fn enable_with(ctx: &mut Ctx, source: Source, hint: bool) -> Result<i32> {
     let account = open(ctx)?;
     let connection = match load(&account)? {
@@ -50,9 +51,13 @@ pub(in crate::commands) fn enable_with(ctx: &mut Ctx, source: Source, hint: bool
     {
         return say(ctx, &m::different_fields(agent), 1);
     }
-    writeln!(ctx.out, "Fields read from {agent} sessions:")?;
-    for field in fields {
-        writeln!(ctx.out, "  {field}")?;
+    if hint {
+        writeln!(ctx.out, "Fields read from {agent} sessions:")?;
+        for field in fields {
+            writeln!(ctx.out, "  {field}")?;
+        }
+    } else {
+        writeln!(ctx.out, "{}", m::fields_line(agent, source.arg(), fields))?;
     }
     // Already on: keep the date it started, or the first days would fall out of the window.
     if account.store.source_facts(source)?.enabled_since.is_none() {

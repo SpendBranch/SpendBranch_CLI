@@ -31,6 +31,8 @@ pub struct Ctx<'a> {
     pub interactive: bool,
     /// Processes and system tools.
     pub system: &'a dyn System,
+    /// How screens are drawn: color, borders and marks.
+    pub style: crate::cli::screen::Style,
 }
 
 pub use home::home;

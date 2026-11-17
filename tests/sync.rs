@@ -329,7 +329,7 @@ fn errors_that_need_the_person_stop_the_run_and_keep_the_buffer() {
         assert!(
             rig.run(&["status"])
                 .text
-                .contains(&format!("Last error: {text}")),
+                .contains(&format!("[!] Last upload failed: {text}")),
             "{code}"
         );
     }
@@ -879,11 +879,7 @@ fn coverage(
 fn the_status_shows_what_the_server_has_seen_and_the_gaps_still_open() {
     let rig = Rig::ready();
     // nothing sent yet: the list is empty
-    assert!(
-        !rig.run(&["status"])
-            .text
-            .contains("Collection (what the server has received)")
-    );
+    assert!(!rig.run(&["status"]).text.contains("last contact"));
     rig.buffer(now_ms(), events(2));
     let db = rusqlite::Connection::open(rig.dir.path().join("state.db")).unwrap();
     coverage(
@@ -913,18 +909,13 @@ fn the_status_shows_what_the_server_has_seen_and_the_gaps_still_open() {
     assert_eq!(rig.run(&["sync"]).code, 0);
     let text = rig.run(&["status"]).text;
     assert!(
-        text.contains("Collection (what the server has received):"),
+        text.contains("last contact less than an hour ago")
+            && text.contains("observed until 2026-11-12T09:00:00"),
         "{text}"
     );
     assert!(
-        text.contains(
-            "Codex: last contact less than an hour ago, observed until 2026-11-12T09:00:00"
-        ),
-        "{text}"
-    );
-    assert!(
-        text.contains("open gap 2026-11-11T10:00:00")
-            && text.contains("(buffer_full): this is not zero spending"),
+        text.contains("[!] Codex: open gap 2026-11-11T10:00:00")
+            && text.contains("(buffer_full): this is not zero spending."),
         "{text}"
     );
     assert!(
