@@ -283,6 +283,39 @@ fn only_our_command_lines_are_recognised() {
     assert!(!is_ours(CLAUDE, "'/x/spendbranch' hook codex Stop"));
     assert!(is_ours(CODEX, "'/x/spendbranch' hook codex Stop"));
     assert!(!is_ours(CODEX, "'/x/spendbranch' hook claude-code"));
+    // other people's hooks that only mention the name
+    assert!(!is_ours(
+        CLAUDE,
+        "notify-send spendbranch-done hook claude-code"
+    ));
+    assert!(!is_ours(CODEX, "audit --tag spendbranch hook codex Stop"));
+    assert!(!is_ours(
+        CLAUDE,
+        "'/x/spendbranch' hook claude-code; rm -rf ~"
+    ));
+    assert!(!is_ours(CLAUDE, "'/x/spendbranch-helper' hook claude-code"));
+    assert!(!is_ours(CLAUDE, "'/x/spendbranch hook claude-code"));
+    // ours, as every system's `command` writes it
+    assert!(is_ours(
+        CLAUDE,
+        &command(
+            "/home/o'neil/spend branch/spendbranch",
+            false,
+            "hook claude-code"
+        )
+    ));
+    assert!(is_ours(
+        CLAUDE,
+        &command(
+            r"C:\Program Files\SpendBranch\spendbranch.exe",
+            true,
+            "hook claude-code"
+        )
+    ));
+    assert!(is_ours(
+        CODEX,
+        &command("/x/spendbranch", false, "hook codex SessionEnd")
+    ));
 }
 
 #[test]

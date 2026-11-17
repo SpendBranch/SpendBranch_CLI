@@ -101,7 +101,7 @@ fn is_branch_char(c: char) -> bool {
 }
 
 /// Unicode general category Cf. Std has no such table; this is the Unicode 16 list.
-fn is_format_char(c: char) -> bool {
+pub(crate) fn is_format_char(c: char) -> bool {
     matches!(u32::from(c),
         0xAD | 0x600..=0x605 | 0x61C | 0x6DD | 0x70F | 0x890..=0x891 | 0x8E2 | 0x180E
         | 0x200B..=0x200F | 0x202A..=0x202E | 0x2060..=0x2064 | 0x2066..=0x206F | 0xFEFF

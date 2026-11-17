@@ -57,14 +57,74 @@ pub fn command(exe: &str, windows: bool, args: &str) -> String {
     }
 }
 
-/// Our entry, including the one the TypeScript CLI wrote (`node '<script>' hook claude-code`).
-pub fn is_ours(source: Source, command: &str) -> bool {
-    let command = command.trim_end();
-    command.contains("spendbranch")
-        && match source {
-            Source::ClaudeCode => command.ends_with(" hook claude-code"),
-            Source::Codex => command.contains(" hook codex "),
+/// The words of a command line as `command` writes it: `'...'` and `"..."` quote, `\` outside
+/// quotes takes the next character as it is (so `'\''` is a quote inside a quoted word), and
+/// whitespace separates. `None` for an unterminated quote.
+fn words(command: &str) -> Option<Vec<String>> {
+    let (mut out, mut word, mut quote, mut started) = (Vec::new(), String::new(), None, false);
+    let mut chars = command.chars();
+    while let Some(c) = chars.next() {
+        match (quote, c) {
+            (None, '\\') => {
+                word.push(chars.next()?);
+                started = true;
+            }
+            (Some(q), c) if c == q => quote = None,
+            (Some(_), c) => word.push(c),
+            (None, '\'' | '"') => (quote, started) = (Some(c), true),
+            (None, c) if c.is_whitespace() => {
+                if started {
+                    out.push(std::mem::take(&mut word));
+                }
+                started = false;
+            }
+            (None, c) => {
+                word.push(c);
+                started = true;
+            }
         }
+    }
+    if quote.is_some() {
+        return None;
+    }
+    if started {
+        out.push(word);
+    }
+    Some(out)
+}
+
+/// Our entry: a program named `spendbranch` (any folder: another install of ours is replaced)
+/// followed by exactly our arguments, or the line the TypeScript CLI wrote
+/// (`node '<.../spendbranch/...>' hook claude-code`). A command that only mentions
+/// `spendbranch` somewhere is someone else's.
+pub fn is_ours(source: Source, command: &str) -> bool {
+    let Some(words) = words(command) else {
+        return false;
+    };
+    let name = |p: &str| {
+        p.rsplit(['/', '\\'])
+            .next()
+            .unwrap_or(p)
+            .to_ascii_lowercase()
+    };
+    let args = match words.as_slice() {
+        [program, args @ ..]
+            if matches!(name(program).as_str(), "spendbranch" | "spendbranch.exe") =>
+        {
+            args
+        }
+        [node, script, args @ ..]
+            if matches!(name(node).as_str(), "node" | "node.exe")
+                && script.contains("spendbranch") =>
+        {
+            args
+        }
+        _ => return false,
+    };
+    match source {
+        Source::ClaudeCode => args == ["hook", "claude-code"],
+        Source::Codex => matches!(args, [h, c, _] if h == "hook" && c == "codex"),
+    }
 }
 
 fn ours(source: Source, entry: &Value) -> bool {
