@@ -77,11 +77,18 @@ const COUNTERS: [&str; 5] = [
     "cache_creation_1h_tokens",
 ];
 
-/// A whole number of at most 19 digits, signed. Negative passes on purpose: the shared corpus
-/// forwards it and the server's strict mapping turns it into "unknown", so it never counts.
+/// A whole number no larger than the contract's ceiling for a counter. Negative passes on
+/// purpose: the shared corpus forwards it and the server's strict mapping turns it into
+/// "unknown", so it never counts.
+fn fits_counter(n: i128) -> bool {
+    n <= i128::from(crate::contract::MAX_TOKENS_PER_COUNTER) && n >= i128::from(i64::MIN)
+}
+
 fn is_int_text(s: &str) -> bool {
     let digits = s.strip_prefix('-').unwrap_or(s);
-    (1..=19).contains(&digits.len()) && digits.bytes().all(|b| b.is_ascii_digit())
+    (1..=19).contains(&digits.len())
+        && digits.bytes().all(|b| b.is_ascii_digit())
+        && s.parse::<i128>().is_ok_and(fits_counter)
 }
 
 /// The value of `key`, if it has the shape that key promises: a counter is a whole number (as the
@@ -98,7 +105,10 @@ fn clean_value(key: &str, value: &Value) -> Option<Value> {
         };
         let fine = match int {
             Value::String(s) => is_int_text(s),
-            Value::Number(n) => name == "intValue" && (n.is_i64() || n.is_u64()),
+            Value::Number(n) => {
+                let whole = n.as_i64().map(i128::from).or(n.as_u64().map(i128::from));
+                name == "intValue" && whole.is_some_and(fits_counter)
+            }
             _ => false,
         };
         if !fine {

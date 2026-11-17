@@ -144,6 +144,20 @@ fn text_is_kept_only_in_the_shape_its_key_promises() {
         "only the counter that is a number"
     );
     assert_eq!(keys(1).len(), 6, "{:?}", keys(1));
+    // past the contract's ceiling for one counter (10^12), as text or as a number
+    let over = otlp::lenient(&payload(vec![record(
+        "api_request",
+        json!([
+            {"key": "input_tokens", "value": {"intValue": "1000000000001"}},
+            {"key": "output_tokens", "value": {"intValue": 9_000_000_000_000_000u64}},
+            {"key": "cache_read_tokens", "value": {"intValue": "1000000000000"}},
+        ]),
+    )]));
+    let kept = over.payload["resourceLogs"][0]["scopeLogs"][0]["logRecords"][0]["attributes"]
+        .as_array()
+        .unwrap()
+        .len();
+    assert_eq!(kept, 1, "only the counter at the ceiling stays");
     assert!(!f.payload.to_string().contains("SECRET"));
 }
 
