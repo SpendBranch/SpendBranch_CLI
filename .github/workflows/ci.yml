@@ -96,7 +96,7 @@ jobs:
           echo "release binary: $size bytes"
           test "$size" -lt 10000000
 
-  # The install scripts and the package generators: lint, and the generators make valid files.
+  # The install scripts and the packaging script pass shellcheck.
   scripts:
     runs-on: ubuntu-latest
     steps:
@@ -104,29 +104,7 @@ jobs:
       - name: shellcheck
         run: |
           shellcheck --version
-          shellcheck -s sh install/install.sh .github/scripts/*.sh packaging/homebrew/formula.sh packaging/winget/manifests.sh
-      - name: The Homebrew formula and winget manifests are generated whole
-        run: |
-          sums="$RUNNER_TEMP/SHA256SUMS"
-          for t in linux-x64 linux-arm64 macos-x64 macos-arm64; do
-            echo "$(printf '%064d' 0)  spendbranch-1.2.3-$t.tar.gz"
-          done > "$sums"
-          for t in windows-x64 windows-arm64; do
-            echo "$(printf 'ab%062d' 0)  spendbranch-1.2.3-$t.zip"
-          done >> "$sums"
-          sh packaging/homebrew/formula.sh 1.2.3 "$sums" > "$RUNNER_TEMP/spendbranch.rb"
-          ruby -c "$RUNNER_TEMP/spendbranch.rb"
-          grep -c 'sha256 "0\{64\}"' "$RUNNER_TEMP/spendbranch.rb" | grep -qx 4
-          dir=$(sh packaging/winget/manifests.sh 1.2.3 "$sums" "$RUNNER_TEMP/winget")
-          for f in "$dir"/*.yaml; do ruby -ryaml -e 'YAML.load_file(ARGV[0])' "$f"; done
-          grep -c "InstallerSha256: AB0\{62\}" "$dir/SpendBranch.CLI.installer.yaml" | grep -qx 2
-          # A missing sum stops it, with nothing printed.
-          grep -v macos-x64 "$sums" > "$sums.short"
-          if sh packaging/homebrew/formula.sh 1.2.3 "$sums.short" > "$RUNNER_TEMP/short.rb"; then
-            echo "::error::formula.sh accepted SHA256SUMS without macos-x64"
-            exit 1
-          fi
-          test ! -s "$RUNNER_TEMP/short.rb"
+          shellcheck -s sh install/install.sh .github/scripts/*.sh
 
   # install.sh / install.ps1 end to end: package a build as the release does, install it from
   # that folder (fresh HOME, Path put back), install over it, and refuse a wrong checksum.

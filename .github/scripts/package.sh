@@ -4,9 +4,9 @@
 # installers are tested against the very layout they download.
 #
 # - Linux and macOS: <out>/spendbranch-<version>-<target>.tar.gz, with one folder of that name
-#   inside (Homebrew enters it on its own; install.sh knows the path).
+#   inside (install.sh knows the path).
 # - Windows: <out>/spendbranch-<version>-<target>.zip, flat: spendbranch.exe at the root, so a
-#   winget portable install keeps no version in its path (the hooks and schedule hold that path).
+#   folder installed into keeps no version in its path (the hooks and schedule hold that path).
 set -eu
 
 bin=$1 version=$2 target=$3 out=$4

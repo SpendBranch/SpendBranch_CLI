@@ -71,25 +71,6 @@ notepad install.ps1
 powershell -ExecutionPolicy Bypass -File .\install.ps1
 ```
 
-## Install with a package manager
-
-**Homebrew** (macOS and Linux):
-
-```sh
-brew install spendbranch/tap/spendbranch
-spendbranch setup
-```
-
-**winget** (Windows 10 and 11):
-
-```powershell
-winget install SpendBranch.CLI
-```
-
-Then open a new terminal and run `spendbranch setup`.
-
-Update with `brew upgrade spendbranch` or `winget upgrade SpendBranch.CLI`.
-
 ## Check what you downloaded
 
 Every release publishes `SHA256SUMS` and a **build provenance attestation** for each file. The
@@ -153,8 +134,8 @@ Open a new terminal, run `spendbranch --version`, then `spendbranch setup`.
 
 If a release note says a build is **unsigned**, a program downloaded with the browser may be
 stopped the first time it runs: on macOS, run `xattr -d com.apple.quarantine ~/.local/bin/spendbranch`
-once; on Windows, choose "More info" then "Run anyway" in SmartScreen. The install script, Homebrew
-and winget are not affected.
+once; on Windows, choose "More info" then "Run anyway" in SmartScreen. The install script is not
+affected.
 
 ## After installing
 
@@ -184,14 +165,12 @@ Codex runs a new hook only after you trust it: open Codex and review it under `/
    spendbranch hooks uninstall codex
    ```
 
-3. Remove the program, the way you installed it:
+3. Remove the program:
 
-   | Installed with | Remove |
+   | System | Remove |
    | --- | --- |
-   | the script or by hand, macOS/Linux | delete `~/.local/bin/spendbranch`, and the line marked `# added by the SpendBranch CLI installer` from `~/.profile`, `~/.bashrc`, `~/.bash_profile`, `~/.zshrc` (and `~/.config/fish/conf.d/spendbranch.fish`) |
-   | the script or by hand, Windows | delete `%LOCALAPPDATA%\Programs\spendbranch`, and take that folder out of your user `Path` |
-   | Homebrew | `brew uninstall spendbranch` |
-   | winget | `winget uninstall SpendBranch.CLI` |
+   | macOS, Linux | delete `~/.local/bin/spendbranch`, and the line marked `# added by the SpendBranch CLI installer` from `~/.profile`, `~/.bashrc`, `~/.bash_profile`, `~/.zshrc` (and `~/.config/fish/conf.d/spendbranch.fish`) |
+   | Windows | delete `%LOCALAPPDATA%\Programs\spendbranch`, and take that folder out of your user `Path` |
 
 4. Delete the data folder: `~/.config/spendbranch` (or `$XDG_CONFIG_HOME/spendbranch`) on macOS and
    Linux, `%APPDATA%\spendbranch` on Windows. If you set `SPENDBRANCH_HOME`, the data is there

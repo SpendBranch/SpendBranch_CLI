@@ -3,7 +3,7 @@ name: Release
 # Push a tag like v0.2.0 (equal to the version in Cargo.toml): the tests run on the 6 systems,
 # then the 6 binaries are built (signed when the certificates are set up), and the release is
 # published with the archives, the install scripts, their SHA-256 sums and a build provenance
-# attestation. A release (not a pre-release) then updates the Homebrew tap and winget.
+# attestation.
 on:
   push:
     tags: ['v*']
@@ -184,75 +184,3 @@ jobs:
             --repo "$GITHUB_REPOSITORY" \
             --title "SpendBranch CLI $GITHUB_REF_NAME" \
             --generate-notes --verify-tag $pre
-
-  # brew install spendbranch/tap/spendbranch: the formula in SpendBranch/homebrew-tap points at
-  # this release's archives. Needs HOMEBREW_TAP_TOKEN (fine-grained, contents: write on that
-  # repository only); without it the step says so and the release stays as it is.
-  homebrew:
-    needs: [version, release]
-    if: ${{ !contains(github.ref_name, '-') }}
-    runs-on: ubuntu-latest
-    env:
-      VERSION: ${{ needs.version.outputs.version }}
-      HAS_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN != '' }}
-    steps:
-      - name: Say when the tap is not set up
-        if: env.HAS_TOKEN != 'true'
-        run: echo "::warning::Homebrew tap not updated (no HOMEBREW_TAP_TOKEN in the repository secrets)"
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        if: env.HAS_TOKEN == 'true'
-      - name: Write the formula and push it to the tap
-        if: env.HAS_TOKEN == 'true'
-        env:
-          GH_TOKEN: ${{ github.token }}
-          TAP_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
-        run: |
-          gh release download "v$VERSION" --repo "$GITHUB_REPOSITORY" --pattern SHA256SUMS --dir "$RUNNER_TEMP"
-          sh packaging/homebrew/formula.sh "$VERSION" "$RUNNER_TEMP/SHA256SUMS" > "$RUNNER_TEMP/spendbranch.rb"
-          ruby -c "$RUNNER_TEMP/spendbranch.rb"
-          git clone --depth 1 "https://x-access-token:${TAP_TOKEN}@github.com/SpendBranch/homebrew-tap.git" "$RUNNER_TEMP/tap"
-          cd "$RUNNER_TEMP/tap"
-          mkdir -p Formula
-          cp "$RUNNER_TEMP/spendbranch.rb" Formula/spendbranch.rb
-          git add Formula/spendbranch.rb
-          if git diff --cached --quiet; then
-            echo "the tap already has v$VERSION"
-            exit 0
-          fi
-          git -c user.name="github-actions[bot]" -c user.email="41898282+github-actions[bot]@users.noreply.github.com" \
-            commit -m "spendbranch $VERSION"
-          git push origin HEAD
-
-  # winget install SpendBranch.CLI: komac opens the pull request for this version in
-  # microsoft/winget-pkgs (the first version was submitted by hand). Needs WINGET_TOKEN (classic,
-  # public_repo) of the account that has the winget-pkgs fork. komac is a fixed version, checked
-  # against its SHA-256, so no unpinned code runs next to the token.
-  winget:
-    needs: [version, release]
-    if: ${{ !contains(github.ref_name, '-') }}
-    runs-on: ubuntu-latest
-    env:
-      VERSION: ${{ needs.version.outputs.version }}
-      HAS_TOKEN: ${{ secrets.WINGET_TOKEN != '' }}
-      KOMAC_VERSION: 2.17.2
-      KOMAC_SHA256: b03b020eec98acfb0b53e284a6e21815b884be33de6785b97e7a120f0e748966
-    steps:
-      - name: Say when winget is not set up
-        if: env.HAS_TOKEN != 'true'
-        run: echo "::warning::winget not updated (no WINGET_TOKEN in the repository secrets)"
-      - name: Submit the new version
-        if: env.HAS_TOKEN == 'true'
-        env:
-          GITHUB_TOKEN: ${{ secrets.WINGET_TOKEN }}
-        run: |
-          cd "$RUNNER_TEMP"
-          archive="komac-$KOMAC_VERSION-x86_64-unknown-linux-gnu.tar.gz"
-          curl --proto '=https' -fsSLO "https://github.com/russellbanks/Komac/releases/download/v$KOMAC_VERSION/$archive"
-          echo "$KOMAC_SHA256  $archive" | sha256sum -c -
-          mkdir komac && tar -xzf "$archive" -C komac
-          komac=$(find komac -type f -name komac | head -n 1)
-          url="https://github.com/$GITHUB_REPOSITORY/releases/download/v$VERSION"
-          "$komac" update SpendBranch.CLI --version "$VERSION" \
-            --urls "$url/spendbranch-$VERSION-windows-x64.zip" "$url/spendbranch-$VERSION-windows-arm64.zip" \
-            --release-notes-url "https://github.com/$GITHUB_REPOSITORY/releases/tag/v$VERSION" \
-            --submit
