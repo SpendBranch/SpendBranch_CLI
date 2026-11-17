@@ -22,6 +22,8 @@ const MAX_CONNECTIONS: usize = 32;
 const READ_WAIT: Duration = Duration::from_secs(5);
 /// A client that has not sent its whole request by now is cut off.
 const REQUEST_WAIT: Duration = Duration::from_secs(10);
+/// The headers come at once from an exporter; whoever trickles them gives the slot back soon.
+const HEAD_WAIT: Duration = Duration::from_secs(2);
 
 /// What happened to a batch, for the screen.
 pub enum Event {
@@ -223,8 +225,9 @@ fn handle(
     events: &Sender<Event>,
 ) -> io::Result<()> {
     stream.set_write_timeout(Some(READ_WAIT))?;
-    let deadline = Instant::now() + REQUEST_WAIT;
-    let (head, body) = match read_head(&stream, deadline) {
+    let started = Instant::now();
+    let deadline = started + REQUEST_WAIT;
+    let (head, body) = match read_head(&stream, started + HEAD_WAIT) {
         Ok(h) => h,
         Err(0) => return Ok(()),
         Err(status) => return reply(&stream, status),

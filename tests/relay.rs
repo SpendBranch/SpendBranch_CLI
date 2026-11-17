@@ -278,6 +278,22 @@ fn a_client_that_trickles_is_cut_off_when_its_time_is_up() {
 }
 
 #[test]
+fn a_client_that_trickles_its_headers_gives_its_slot_back_within_seconds() {
+    let relay = Relay::start(|_| Ok(0));
+    let mut slow = TcpStream::connect(("127.0.0.1", relay.port)).unwrap();
+    let mut writer = slow.try_clone().unwrap();
+    thread::spawn(move || {
+        while writer.write_all(b"X").is_ok() {
+            thread::sleep(Duration::from_millis(500));
+        }
+    });
+    slow.set_read_timeout(Some(Duration::from_secs(20))).unwrap();
+    let started = Instant::now();
+    let _ = slow.read(&mut [0u8; 64]);
+    assert!(started.elapsed() < Duration::from_secs(3), "{:?}", started.elapsed());
+}
+
+#[test]
 fn a_client_that_stalls_does_not_block_the_others() {
     let relay = Relay::start(|_| Ok(0));
     let mut slow = TcpStream::connect(("127.0.0.1", relay.port)).unwrap();

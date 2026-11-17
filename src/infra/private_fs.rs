@@ -28,25 +28,35 @@ pub fn folder_is_private(mode: u32, owner: u32, group: u32, me: u32) -> bool {
 }
 
 /// This process's effective user, without `unsafe`: the owner of `/proc/self` on Linux, else
-/// of a file just made in the user's temporary folder.
+/// of a file just made in the user's temporary folder. `/proc/self` of a process that is not
+/// dumpable belongs to root, so root from there is checked with the file. Worked out once.
 #[cfg(unix)]
 fn my_uid() -> io::Result<u32> {
     use std::os::unix::fs::MetadataExt;
-    if let Ok(meta) = fs::metadata("/proc/self") {
-        return Ok(meta.uid());
+    static UID: std::sync::OnceLock<u32> = std::sync::OnceLock::new();
+    if let Some(uid) = UID.get() {
+        return Ok(*uid);
     }
-    let nanos = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map_or(0, |d| d.subsec_nanos());
-    let probe = std::env::temp_dir().join(format!(".spendbranch-{}-{nanos}", std::process::id()));
-    let uid = OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .open(&probe)?
-        .metadata()?
-        .uid();
-    let _ = fs::remove_file(&probe);
-    Ok(uid)
+    let from_proc = fs::metadata("/proc/self").map(|m| m.uid()).ok();
+    let uid = match from_proc {
+        Some(uid) if uid != 0 => uid,
+        _ => {
+            let nanos = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map_or(0, |d| d.subsec_nanos());
+            let probe = std::env::temp_dir()
+                .join(format!(".spendbranch-{}-{nanos}", std::process::id()));
+            let uid = OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .open(&probe)?
+                .metadata()?
+                .uid();
+            let _ = fs::remove_file(&probe);
+            uid
+        }
+    };
+    Ok(*UID.get_or_init(|| uid))
 }
 
 fn create_new(path: &Path) -> io::Result<()> {
