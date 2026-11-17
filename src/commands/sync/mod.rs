@@ -4,10 +4,7 @@ use super::account::{self, Loaded, now, open};
 use super::{Ctx, Result, say};
 use crate::cli::messages as m;
 use crate::contract::Source;
-use crate::infra::{
-    clock::{Clock, SystemClock},
-    lock,
-};
+use crate::infra::{clock, lock};
 use std::collections::BTreeMap;
 
 pub(super) const INGEST: &str = "/api/ingest/v1/events";
@@ -41,7 +38,7 @@ pub(super) fn random() -> f64 {
 }
 
 pub(super) fn ms() -> i64 {
-    SystemClock.now_ms()
+    clock::now_ms()
 }
 
 pub fn run(ctx: &mut Ctx) -> Result<i32> {

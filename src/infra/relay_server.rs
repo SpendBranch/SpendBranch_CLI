@@ -1,7 +1,7 @@
 //! The relay's sockets: a small HTTP/1.1 server for one path on this machine. It reads a
 //! bounded head and a bounded body, asks `relay` what to do, and answers. Nothing it reads is
 //! written to disk or to a log; it hands the filtered payload to `forward` and forgets it.
-use super::clock::{Clock, SystemClock};
+use super::clock;
 use crate::relay::{self, Head, RateLimit};
 use serde_json::Value;
 use std::{
@@ -240,7 +240,7 @@ fn handle(
     if !limit
         .lock()
         .unwrap_or_else(PoisonError::into_inner)
-        .allow(SystemClock.now_ms())
+        .allow(clock::now_ms())
     {
         return reply(&stream, 429);
     }

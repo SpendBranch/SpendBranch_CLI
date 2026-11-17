@@ -5,7 +5,7 @@ use crate::auth::{DeviceId, DeviceKey};
 use crate::cli::{VERSION, messages as m};
 use crate::contract::Iso;
 use crate::infra::{
-    clock::{Clock, SystemClock},
+    clock,
     http::{Client, Signer},
     keys::{self, KeyStore, Slot},
     store::Store,
@@ -16,7 +16,7 @@ const LOGOUT: &str = "/api/cli/v1/logout";
 const STATUS: &str = "/api/cli/v1/status";
 
 pub(super) fn now() -> Iso {
-    Iso::from_millis(SystemClock.now_ms()).unwrap_or(Iso::EPOCH)
+    Iso::from_millis(clock::now_ms()).unwrap_or(Iso::EPOCH)
 }
 
 /// The data folder, the database and the key store, opened.
@@ -80,7 +80,7 @@ pub(super) fn load(account: &Account) -> Result<Loaded> {
 }
 
 pub(super) fn failure(ctx: &mut Ctx, f: &ApiFailure) -> Result<i32> {
-    say(ctx, &m::failure_text(f, SystemClock.now_ms()), 1)
+    say(ctx, &m::failure_text(f, clock::now_ms()), 1)
 }
 
 pub(super) fn status_of(c: &Connection) -> std::result::Result<StatusView, ApiFailure> {
@@ -106,7 +106,7 @@ pub(super) fn fetch_status(c: &Connection) -> std::result::Result<StatusView, St
         if f.code == "BAD_RESPONSE" {
             m::BAD_STATUS.to_owned()
         } else {
-            m::failure_text(&f, SystemClock.now_ms())
+            m::failure_text(&f, clock::now_ms())
         }
     })
 }

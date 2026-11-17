@@ -1,6 +1,6 @@
 //! The HTTP client: HTTPS only (plain `http://` just for this machine), no redirects, a 15 s
 //! timeout, and every authenticated request signed afresh.
-use super::clock::{Clock, SystemClock};
+use super::clock::{Clock, now_ms};
 use crate::api::{ApiFailure, ServerUrl};
 use crate::auth::{DeviceId, DeviceKey, sign_request};
 use flate2::{Compression, write::GzEncoder};
@@ -35,29 +35,24 @@ fn tls13_only() -> Arc<rustls::crypto::CryptoProvider> {
 pub struct Client {
     agent: Agent,
     server: ServerUrl,
-    clock: Box<dyn Clock>,
+    clock: Clock,
 }
 
 impl Client {
     pub fn new(server: ServerUrl, cli_version: &str) -> Self {
-        Self::with_clock(server, cli_version, Box::new(SystemClock))
+        Self::with_clock(server, cli_version, Box::new(now_ms))
     }
 
-    pub fn with_clock(server: ServerUrl, cli_version: &str, clock: Box<dyn Clock>) -> Self {
+    pub fn with_clock(server: ServerUrl, cli_version: &str, clock: Clock) -> Self {
         Self::build(server, cli_version, clock, TIMEOUT)
     }
 
     /// A client that gives up sooner than the usual 15 s: for a call someone is waiting on.
     pub fn with_timeout(server: ServerUrl, cli_version: &str, timeout: Duration) -> Self {
-        Self::build(server, cli_version, Box::new(SystemClock), timeout)
+        Self::build(server, cli_version, Box::new(now_ms), timeout)
     }
 
-    fn build(
-        server: ServerUrl,
-        cli_version: &str,
-        clock: Box<dyn Clock>,
-        timeout: Duration,
-    ) -> Self {
+    fn build(server: ServerUrl, cli_version: &str, clock: Clock, timeout: Duration) -> Self {
         let config = Config::builder()
             .timeout_global(Some(timeout))
             // A redirect could carry the signed request to another host: never follow one.
@@ -191,7 +186,7 @@ impl Client {
             signer.device,
             method,
             path,
-            self.clock.now_ms(),
+            (self.clock)(),
             &nonce,
             body,
         ))
