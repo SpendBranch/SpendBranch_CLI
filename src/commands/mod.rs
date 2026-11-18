@@ -76,6 +76,38 @@ pub fn run(command: Command, ctx: &mut Ctx) -> Result<i32> {
     }
 }
 
+/// Runs `work` on its own thread while a spinner turns on the terminal (`label`, `detail`),
+/// then wipes the spinner's line. Off a terminal it just runs `work`.
+pub(super) fn spinning<T: Send>(
+    ctx: &mut Ctx,
+    label: &str,
+    detail: &str,
+    work: &(dyn Fn() -> T + Sync),
+) -> Result<T> {
+    if !ctx.style.tty {
+        return Ok(work());
+    }
+    std::thread::scope(|scope| {
+        let running = scope.spawn(work);
+        let mut tick = 0;
+        let mut shown = 0;
+        while !running.is_finished() {
+            let line = crate::cli::screen::spinner(ctx.style, tick, label, detail);
+            shown = crate::cli::screen::width(&line);
+            write!(ctx.out, "\r{line}")?;
+            ctx.out.flush()?;
+            (ctx.sleep)(Duration::from_millis(100));
+            tick += 1;
+        }
+        if shown > 0 {
+            write!(ctx.out, "\r{}\r", " ".repeat(shown))?;
+        }
+        running
+            .join()
+            .map_err(|_| Box::<dyn Error>::from("the work behind the spinner stopped"))
+    })
+}
+
 pub(super) fn say(ctx: &mut Ctx, text: &str, code: i32) -> Result<i32> {
     writeln!(ctx.out, "{text}")?;
     Ok(code)

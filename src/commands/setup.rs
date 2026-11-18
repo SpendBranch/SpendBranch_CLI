@@ -44,7 +44,9 @@ pub(super) fn run(
     say(ctx, &screen::step_start(ctx.style, "Connect"), 0)?;
     let code = live(ctx, |ctx| connect(ctx, server, relogin))?;
     if code != 0 {
-        step(ctx, Mark::Bad, "Connect", "", "")?;
+        // The last line: no joint below it, nothing follows.
+        let st = ctx.style;
+        writeln!(ctx.out, "{}", screen::step(st, &st.bad(), "Connect", ""))?;
         return Ok(code);
     }
     let organization = account::open(ctx)?.store.meta_get("org_name")?;

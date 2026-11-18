@@ -156,12 +156,16 @@ fn uninstall_removes_everything_and_leaves_the_rest() {
 
     let out = run(&rig, &["uninstall", "--yes"], "", false);
     assert_eq!(out.code, 0, "{}", out.text);
-    assert!(out.text.contains(m::LOGOUT_REVOKED), "{}", out.text);
+    assert!(out.text.contains(m::UNINSTALL_REVOKED), "{}", out.text);
     assert_eq!(
         rig.server.revoked_reason("dev-1").as_deref(),
         Some("logout")
     );
-    assert!(out.text.contains(m::SCHEDULER_REMOVED), "{}", out.text);
+    assert!(
+        out.text.contains(m::UNINSTALL_SCHEDULE_REMOVED),
+        "{}",
+        out.text
+    );
     assert!(!timer.exists(), "the schedule is gone");
 
     let left = fs::read_to_string(&settings).unwrap();
@@ -176,6 +180,54 @@ fn uninstall_removes_everything_and_leaves_the_rest() {
         "{}",
         out.text
     );
+    // One line per step, in order, like setup; paths under the home shown with ~.
+    let steps: Vec<&str> = out
+        .text
+        .lines()
+        .filter(|l| l.starts_with("[ok]") || l.starts_with("[!]") || l.starts_with("[x]"))
+        .collect();
+    let names: Vec<&str> = steps
+        .iter()
+        .map(|l| l.split_whitespace().nth(1).unwrap())
+        .collect();
+    assert_eq!(
+        names,
+        ["Disconnect", "Hooks", "Schedule", "PATH", "Data", "Program"],
+        "{}",
+        out.text
+    );
+    assert!(steps.iter().all(|l| l.starts_with("[ok]")), "{}", out.text);
+    assert!(
+        out.text
+            .contains(&m::uninstall_hooks_removed("Claude Code")),
+        "{}",
+        out.text
+    );
+    assert!(
+        out.text.contains(&m::uninstall_path_files(
+            "~/.profile, ~/.config/fish/conf.d/spendbranch.fish"
+        )),
+        "{}",
+        out.text
+    );
+    assert!(
+        out.text.contains(&m::uninstall_deleted("~/spendbranch")),
+        "{}",
+        out.text
+    );
+}
+
+#[test]
+fn paths_under_the_home_are_shown_with_a_tilde() {
+    use spendbranch::uninstall::tilde;
+    assert_eq!(tilde("/home/me/.zshrc", Some("/home/me")), "~/.zshrc");
+    assert_eq!(tilde(r"C:\Users\me\x", Some(r"C:\Users\me")), r"~\x");
+    assert_eq!(
+        tilde("/home/meg/.zshrc", Some("/home/me")),
+        "/home/meg/.zshrc"
+    );
+    assert_eq!(tilde("/home/me/.zshrc", Some("")), "/home/me/.zshrc");
+    assert_eq!(tilde("/home/me/.zshrc", None), "/home/me/.zshrc");
 }
 
 #[test]
@@ -188,7 +240,11 @@ fn a_device_that_is_not_connected_is_still_cleaned_and_no_folder_is_created() {
     assert_eq!(out.code, 0, "{}", out.text);
     assert!(rig.paths_seen().is_empty(), "nothing to revoke, no request");
     assert!(!data.exists(), "uninstall never creates the data folder");
-    assert!(out.text.contains(m::SCHEDULER_REMOVED), "{}", out.text);
+    assert!(
+        out.text.contains(m::UNINSTALL_SCHEDULE_REMOVED),
+        "{}",
+        out.text
+    );
     assert!(!rig.unit_dir().join("spendbranch-sync.timer").exists());
     assert_eq!(rig.system.removed.borrow().len(), 1);
 }
@@ -230,7 +286,7 @@ fn a_data_folder_that_is_not_named_spendbranch_is_left_alone() {
     let out = rig.run_with(&["uninstall", "--yes"], "", false, &[]);
     assert_eq!(out.code, 1, "{}", out.text);
     assert!(
-        out.text.contains("which is not a folder named spendbranch"),
+        out.text.contains("is not a folder named spendbranch"),
         "{}",
         out.text
     );

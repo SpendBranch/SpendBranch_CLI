@@ -390,6 +390,33 @@ pub fn step(st: Style, mark: &str, label: &str, detail: &str) -> String {
         .to_owned()
 }
 
+/// A step still running: a turning mark in amber, its name and what it waits for. Braille dots
+/// where the terminal shows color and symbols, `| / - \` everywhere else.
+pub fn spinner(st: Style, tick: usize, label: &str, detail: &str) -> String {
+    const DOTS: [&str; 10] = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
+    const BARS: [&str; 4] = ["|", "/", "-", "\\"];
+    let frame = if st.color {
+        DOTS[tick % DOTS.len()]
+    } else {
+        BARS[tick % BARS.len()]
+    };
+    step(
+        st,
+        &st.mark("1;38;2;240;176;32", frame, frame),
+        label,
+        &st.dim(detail),
+    )
+}
+
+/// A title above a command's steps: the program, its version and what it does.
+pub fn title(st: Style, what: &str) -> String {
+    format!(
+        "{} {}",
+        st.accent(&format!("SpendBranch CLI {VERSION}")),
+        st.dim(&format!("· {what}"))
+    )
+}
+
 /// What goes before each line a step printed: the step line goes on down past it.
 pub fn nest(st: Style) -> String {
     if st.tty {

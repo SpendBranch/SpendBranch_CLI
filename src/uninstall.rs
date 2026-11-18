@@ -54,6 +54,17 @@ pub fn installed_by_homebrew(exe: &str) -> bool {
     crate::scheduler::stable_exe(exe) != exe
 }
 
+/// A path as the person knows it: `~` for their home folder.
+pub fn tilde(path: &str, home: Option<&str>) -> String {
+    match home.filter(|h| !h.is_empty()) {
+        Some(home) => match path.strip_prefix(home) {
+            Some(rest) if rest.starts_with(['/', '\\']) => format!("~{rest}"),
+            _ => path.to_owned(),
+        },
+        None => path.to_owned(),
+    }
+}
+
 /// A PowerShell literal: single quotes, with each `'` doubled.
 fn ps_literal(text: &str) -> String {
     format!("'{}'", text.replace('\'', "''"))

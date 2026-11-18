@@ -395,40 +395,53 @@ pub fn scheduler_not_removed(why: &str) -> String {
 
 // --- uninstall ------------------------------------------------------------------------
 
-pub const UNINSTALL_ASK: &str = "This removes SpendBranch from this computer: it disconnects the device and removes the agent hooks, the scheduled sync, the data folder and the program.\nContinue? [y/N] ";
+pub const UNINSTALL_WHAT: &str = "uninstall";
+pub const UNINSTALL_ASK: &str = "This removes SpendBranch from this computer: it disconnects the device and\nremoves the agent hooks, the scheduled sync, the PATH lines, the data folder\nand the program.\n\nContinue? [y/N] ";
 pub const UNINSTALL_CANCELLED: &str = "Cancelled. Nothing was removed.";
 pub const UNINSTALL_NEEDS_YES: &str =
     "Not a terminal: run `spendbranch uninstall --yes` to remove SpendBranch without a question.";
 pub const UNINSTALL_DONE: &str = "SpendBranch was removed from this computer.";
 pub const UNINSTALL_PARTIAL: &str =
-    "SpendBranch was removed, except what the lines above say is left.";
-pub const UNINSTALL_HOMEBREW: &str =
-    "The program was installed by Homebrew: remove it with `brew uninstall spendbranch`.";
+    "SpendBranch was removed, except what the marked lines above say is left.";
 
-pub fn uninstall_path_line(file: &str) -> String {
-    format!("Removed the PATH line from {file}.")
+pub const UNINSTALL_REVOKING: &str = "revoking this device on the server";
+pub const UNINSTALL_REVOKED: &str = "device revoked on the server";
+pub const UNINSTALL_ALREADY_REVOKED: &str = "the device was already revoked or expired";
+pub const UNINSTALL_NOT_REVOKED: &str =
+    "the server could not revoke it: revoke the device in \"My devices\" on the web";
+pub const UNINSTALL_NOT_CONNECTED: &str = "this device was not connected";
+pub const UNINSTALL_NO_HOOKS: &str = "none were installed";
+pub const UNINSTALL_SCHEDULE_REMOVED: &str = "the sync every 30 minutes and at login is gone";
+pub const UNINSTALL_NO_SCHEDULE: &str = "none was installed";
+pub const UNINSTALL_NOTHING: &str = "nothing to remove";
+pub const UNINSTALL_HOMEBREW: &str = "installed by Homebrew: run `brew uninstall spendbranch`";
+
+pub fn uninstall_key_kept(why: &str) -> String {
+    format!("the stored key could not be deleted: {why}")
+}
+
+pub fn uninstall_hooks_removed(agents: &str) -> String {
+    format!("removed from {agents}")
+}
+
+pub fn uninstall_path_files(files: &str) -> String {
+    format!("removed the line from {files}")
 }
 
 pub fn uninstall_path_entry(dir: &str) -> String {
-    format!("Removed {dir} from your user Path.")
+    format!("removed {dir} from your user Path")
 }
 
-pub fn uninstall_data_removed(dir: &str) -> String {
-    format!("Deleted the data folder {dir}.")
+pub fn uninstall_deleted(path: &str) -> String {
+    format!("deleted {path}")
 }
 
 pub fn uninstall_data_not_ours(dir: &str) -> String {
-    format!(
-        "SPENDBRANCH_HOME points at {dir}, which is not a folder named spendbranch: it was left as it is. Delete what you want from it yourself."
-    )
-}
-
-pub fn uninstall_program_removed(path: &str) -> String {
-    format!("Deleted the program {path}.")
+    format!("left {dir} as it is: SPENDBRANCH_HOME is not a folder named spendbranch")
 }
 
 pub fn uninstall_failed(what: &str, why: &str) -> String {
-    format!("Could not remove {what}: {why}")
+    format!("{what}: {why}")
 }
 
 // --- otel and relay -------------------------------------------------------------------

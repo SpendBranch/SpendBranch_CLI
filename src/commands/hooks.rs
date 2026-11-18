@@ -92,26 +92,43 @@ pub(super) fn install(ctx: &mut Ctx, source: Source) -> Result<i32> {
     Ok(0)
 }
 
-pub(super) fn uninstall(ctx: &mut Ctx, source: Source) -> Result<i32> {
-    let agent = render::agent_name(source);
+/// What taking our hook out of the agent's file did.
+pub(super) enum Removal {
+    /// Taken out of this file.
+    Removed(String),
+    Absent,
+    /// Left as it was: why, in a sentence.
+    Failed(String),
+}
+
+/// Takes our hook out of the agent's file; says nothing (`uninstall` prints it as a step).
+pub(super) fn remove(ctx: &Ctx, source: Source) -> Result<Removal> {
     let Some(file) = hook_file(ctx, source) else {
-        return say(ctx, m::NO_HOME, 1);
+        return Ok(Removal::Failed(m::NO_HOME.into()));
     };
     let shown = file.display().to_string();
     let Read::Text(original) = read(&file)? else {
-        return say(ctx, &m::hook_file_problem(&shown, false), 1);
+        return Ok(Removal::Failed(m::hook_file_problem(&shown, false)));
     };
     match rules::uninstall(source, original.as_deref()) {
-        Err(problem) => say(
-            ctx,
-            &m::hook_file_problem(&shown, problem == Problem::Layout),
-            1,
-        ),
-        Ok(Plan::Unchanged) => say(ctx, &m::hook_absent(agent), 0),
+        Err(problem) => Ok(Removal::Failed(m::hook_file_problem(
+            &shown,
+            problem == Problem::Layout,
+        ))),
+        Ok(Plan::Unchanged) => Ok(Removal::Absent),
         Ok(Plan::Write(text)) => {
             agent_files::write(&file, &text)?;
-            say(ctx, &m::hook_removed(agent, &shown), 0)
+            Ok(Removal::Removed(shown))
         }
+    }
+}
+
+pub(super) fn uninstall(ctx: &mut Ctx, source: Source) -> Result<i32> {
+    let agent = render::agent_name(source);
+    match remove(ctx, source)? {
+        Removal::Failed(why) => say(ctx, &why, 1),
+        Removal::Absent => say(ctx, &m::hook_absent(agent), 0),
+        Removal::Removed(shown) => say(ctx, &m::hook_removed(agent, &shown), 0),
     }
 }
 

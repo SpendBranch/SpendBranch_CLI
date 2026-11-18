@@ -36,7 +36,7 @@ function Invoke-Installer([hashtable] $vars) {
     # Windows PowerShell 5.1 turns a child's stderr into errors; only its exit code counts here.
     $ErrorActionPreference = 'Continue'
     try {
-        $command = "Get-Content -Raw -LiteralPath '$script' | Invoke-Expression"
+        $command = "Get-Content -Raw -LiteralPath '$script' | Invoke-Expression; exit `$LASTEXITCODE"
         powershell -NoProfile -NonInteractive -Command $command *> (Join-Path $work 'out.txt')
         return $LASTEXITCODE
     } finally {
@@ -83,7 +83,7 @@ try {
     }
     Test-Check 'verifies the checksum' { Select-String -Quiet -SimpleMatch 'checksum verified' (Join-Path $work 'out.txt') }
     Test-Check 'with SPENDBRANCH_NO_SETUP, only says the next step' {
-        Select-String -Quiet -SimpleMatch "next: run 'spendbranch setup' to connect" (Join-Path $work 'out.txt')
+        Select-String -Quiet -SimpleMatch 'setup` to connect this device.' (Join-Path $work 'out.txt')
     }
     Test-Check 'a second install works' {
         (Invoke-Installer @{ SPENDBRANCH_INSTALL_DIR = $dir }) -eq 0 -and (Test-Path -LiteralPath $exe)

@@ -4,29 +4,73 @@ use super::{Loaded, load, open, revoke};
 use crate::cli::messages as m;
 use crate::infra::{keys::Slot, scheduler};
 
-pub fn logout(ctx: &mut Ctx) -> Result<i32> {
+/// What the server said about the revocation.
+pub enum Revoked {
+    Yes,
+    /// Revoked, expired or without access already.
+    Already,
+    /// Not reached, or it refused: the device must be revoked on the web.
+    No,
+}
+
+/// What `disconnect` did.
+pub enum Disconnected {
+    NotConnected,
+    /// The local key and the device's ids are gone; `kept` says why a stored key could not be
+    /// deleted, when that happened.
+    Done {
+        revoked: Revoked,
+        kept: Vec<String>,
+    },
+}
+
+/// The request to the server, ready to run.
+pub type Request<'a> = &'a (dyn Fn() -> Revoked + Sync);
+/// Runs the request: at once (`logout`), or behind a spinner (`uninstall`).
+pub type Wait<'a> = &'a mut dyn FnMut(&mut Ctx, Request) -> Result<Revoked>;
+
+/// Revokes the device on the server (through `wait`) and deletes the local key and ids.
+/// Says nothing.
+pub fn disconnect(ctx: &mut Ctx, wait: Wait) -> Result<Disconnected> {
     let account = open(ctx)?;
     if !account.store.is_connected()? {
-        return say(ctx, crate::cli::messages::ALREADY_DISCONNECTED, 0);
+        return Ok(Disconnected::NotConnected);
     }
-    let said = match load(&account)? {
-        Loaded::Ready(c) => match revoke(&c) {
-            Ok(()) => m::LOGOUT_REVOKED,
-            Err(f) if f.code == "UNAUTHENTICATED" => m::LOGOUT_ALREADY_REVOKED,
-            Err(_) => m::LOGOUT_NOT_REVOKED,
-        },
-        _ => m::LOGOUT_NOT_REVOKED,
+    let revoked = match load(&account)? {
+        Loaded::Ready(c) => wait(ctx, &|| match revoke(&c) {
+            Ok(()) => Revoked::Yes,
+            Err(f) if f.code == "UNAUTHENTICATED" => Revoked::Already,
+            Err(_) => Revoked::No,
+        })?,
+        _ => Revoked::No,
     };
-    say(ctx, said, 0)?;
     // Whatever the server said, this device stops being able to sign. The organization's id
     // and the server stay, so a later login to another organization is noticed.
+    let mut kept = Vec::new();
     for slot in [Slot::Active, Slot::Pending] {
         if let Err(e) = account.keys.delete(slot) {
-            writeln!(ctx.out, "Could not delete the stored key: {e}")?;
+            kept.push(e.to_string());
         }
     }
     for key in ["device_id", "org_name", "expires_at"] {
         account.store.meta_delete(key)?;
+    }
+    Ok(Disconnected::Done { revoked, kept })
+}
+
+pub fn logout(ctx: &mut Ctx) -> Result<i32> {
+    let Disconnected::Done { revoked, kept } = disconnect(ctx, &mut |_, request| Ok(request()))?
+    else {
+        return say(ctx, m::ALREADY_DISCONNECTED, 0);
+    };
+    let said = match revoked {
+        Revoked::Yes => m::LOGOUT_REVOKED,
+        Revoked::Already => m::LOGOUT_ALREADY_REVOKED,
+        Revoked::No => m::LOGOUT_NOT_REVOKED,
+    };
+    say(ctx, said, 0)?;
+    for why in kept {
+        writeln!(ctx.out, "Could not delete the stored key: {why}")?;
     }
     say(ctx, m::LOGOUT_LOCAL_DELETED, 0)?;
     match scheduler::remove(ctx.system, ctx.env, ctx.system.platform()) {

@@ -43,7 +43,7 @@ h="$work/a"
 mkdir -p "$h" && : > "$h/.bashrc"
 check "installs and the program runs" "run_installer '$h' && '$h/.local/bin/spendbranch' --version > /dev/null"
 check "verifies the checksum" "grep -q 'checksum verified' '$h/out.txt'"
-check "without a terminal, setup is only suggested" "grep -q \"next: run 'spendbranch setup' in a terminal\" '$h/out.txt'"
+check "without a terminal, setup is only suggested" "grep -q 'in a terminal to connect this device' '$h/out.txt'"
 check "a second install works" "run_installer '$h' && '$h/.local/bin/spendbranch' --version > /dev/null"
 check "the profile file has the PATH line once" "[ \"\$(grep -cxF '$line' '$h/.profile')\" = 1 ]"
 check "the bashrc file has the PATH line once" "[ \"\$(grep -cxF '$line' '$h/.bashrc')\" = 1 ]"
@@ -60,7 +60,7 @@ check "a fish user gets conf.d/spendbranch.fish" "grep -qxF \"fish_add_path '$h/
 # Opting out of PATH changes and setup.
 h="$work/c"
 check "SPENDBRANCH_NO_MODIFY_PATH leaves the shell files alone" "run_installer '$h' SPENDBRANCH_NO_MODIFY_PATH=1 SPENDBRANCH_NO_SETUP=1 && [ ! -e '$h/.profile' ] && [ -x '$h/.local/bin/spendbranch' ]"
-check "SPENDBRANCH_NO_SETUP only says the next step" "grep -q \"next: run 'spendbranch setup' to connect\" '$h/out.txt'"
+check "SPENDBRANCH_NO_SETUP only says the next step" "grep -q 'setup. to connect this device' '$h/out.txt'"
 
 # A folder of its own, with a space and a quote in its name.
 h="$work/d"
