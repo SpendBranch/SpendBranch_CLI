@@ -20,17 +20,19 @@ fn windows(ctx: &Ctx) -> bool {
     ctx.system.platform() == Platform::Windows
 }
 
-/// The absolute path of this program, as text (the hook and schedule lines are text).
+/// The absolute path of this program, as text (the hook and schedule lines are text), in the
+/// form that survives an upgrade (`scheduler::stable_exe`).
 /// Refused when it cannot go into a command line as it is (`scheduler::fits_a_command`).
 pub(super) fn exe_text(ctx: &Ctx) -> Result<String> {
     let path = ctx.system.exe()?;
     let text = path
         .to_str()
         .ok_or("the path of this program is not valid text")?;
-    if !crate::scheduler::fits_a_command(text, windows(ctx)) {
+    let text = crate::scheduler::stable_exe(text);
+    if !crate::scheduler::fits_a_command(&text, windows(ctx)) {
         return Err(m::EXE_PATH_UNSAFE.into());
     }
-    Ok(text.to_owned())
+    Ok(text)
 }
 
 /// What the agent's file holds, for the rules to edit.

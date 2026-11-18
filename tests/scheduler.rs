@@ -6,6 +6,49 @@ use rig::Rig;
 use spendbranch::infra::scheduler::{self, Method, Platform};
 use std::fs;
 
+// --- the path written for the executable ----------------------------------------------
+
+#[test]
+fn a_homebrew_version_folder_becomes_the_opt_path_that_survives_upgrades() {
+    use spendbranch::scheduler::stable_exe;
+    for (path, stable) in [
+        (
+            "/opt/homebrew/Cellar/spendbranch/0.2.0/bin/spendbranch",
+            "/opt/homebrew/opt/spendbranch/bin/spendbranch",
+        ),
+        (
+            "/usr/local/Cellar/spendbranch/0.2.0_1/bin/spendbranch",
+            "/usr/local/opt/spendbranch/bin/spendbranch",
+        ),
+        (
+            "/home/linuxbrew/.linuxbrew/Cellar/spendbranch/0.2.0/bin/spendbranch",
+            "/home/linuxbrew/.linuxbrew/opt/spendbranch/bin/spendbranch",
+        ),
+        // The last Cellar is the one Homebrew made.
+        (
+            "/home/me/Cellar/x/Cellar/spendbranch/1.0.0/bin/spendbranch",
+            "/home/me/Cellar/x/opt/spendbranch/bin/spendbranch",
+        ),
+    ] {
+        assert_eq!(stable_exe(path), stable, "{path}");
+    }
+    // Anything else stays as it is.
+    for path in [
+        "/home/me/.local/bin/spendbranch",
+        "/opt/spend branch/spendbranch",
+        "/opt/homebrew/Cellar/spendbranch",
+        "/opt/homebrew/Cellar/spendbranch/0.2.0",
+        "/opt/homebrew/Cellar/spendbranch/0.2.0/",
+        "/opt/homebrew/Cellar//0.2.0/bin/spendbranch",
+        "/opt/homebrew/Cellar/spendbranch//bin/spendbranch",
+        "/opt/homebrew/cellar/spendbranch/0.2.0/bin/spendbranch",
+        r"C:\Users\me\AppData\Local\Programs\spendbranch\spendbranch.exe",
+        r"C:\Users\me\AppData\Local\Microsoft\WinGet\Packages\SpendBranch.CLI_Microsoft.Winget.Source_8wekyb3d8bbwe\spendbranch.exe",
+    ] {
+        assert_eq!(stable_exe(path), path, "{path}");
+    }
+}
+
 // --- the schedule ---------------------------------------------------------------------
 
 #[test]
