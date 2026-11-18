@@ -509,3 +509,9 @@ pub fn relay_stopped(why: &str) -> String {
 pub fn relay_dropped(n: u64, why: &str) -> String {
     format!("Dropped {n} batch(es) so far: {why}")
 }
+
+/// Values of a known field that came in another shape (a negative counter, an id out of its
+/// pattern): said with the same pace as dropped batches, as a count only.
+pub fn relay_malformed(n: u64) -> String {
+    format!("Left out {n} malformed value(s) so far: the agent's export may be broken.")
+}

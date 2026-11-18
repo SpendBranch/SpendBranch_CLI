@@ -87,8 +87,8 @@ pub(super) fn run(ctx: &mut Ctx, port: Option<u16>) -> Result<i32> {
     }
 }
 
-/// Tells the screen about lost batches until the server ends; asks it to end when the system
-/// says so.
+/// Tells the screen about lost batches and left-out values until the server ends; asks it to end
+/// when the system says so. Counts only, kept in memory: nothing the relay reads goes to disk.
 fn show_events(
     ctx: &mut Ctx,
     seen: &mpsc::Receiver<Event>,
@@ -96,9 +96,18 @@ fn show_events(
     port: u16,
 ) -> Result<()> {
     let mut dropped = 0u64;
+    let (mut odd_batches, mut malformed) = (0u64, 0u64);
     loop {
         match seen.recv_timeout(Duration::from_millis(100)) {
-            Ok(Event::Forwarded) => {}
+            Ok(Event::Forwarded { malformed: 0 }) => {}
+            Ok(Event::Forwarded { malformed: n }) => {
+                odd_batches += 1;
+                malformed = malformed.saturating_add(u64::try_from(n).unwrap_or(u64::MAX));
+                if m::report_drop(odd_batches) {
+                    writeln!(ctx.out, "{}", m::relay_malformed(malformed))?;
+                    ctx.out.flush()?;
+                }
+            }
             Ok(Event::Dropped(why)) => {
                 dropped += 1;
                 if m::report_drop(dropped) {

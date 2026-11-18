@@ -242,6 +242,32 @@ fn a_counter_with_more_than_one_kind_of_value_is_never_forwarded() {
 }
 
 #[test]
+fn declared_values_that_do_not_pass_are_counted_and_nothing_else_is() {
+    let f = otlp::lenient(&payload(vec![
+        record(
+            "api_request",
+            json!([
+                {"key": "input_tokens", "value": {"intValue": "-5"}},
+                {"key": "input_tokens", "value": {"intValue": "abc"}},
+                {"key": "model", "value": {"stringValue": "not a model"}},
+                {"key": "output_tokens", "value": {"intValue": "3"}},
+                {"key": "prompt", "value": {"stringValue": "SECRET"}},
+                {"key": "cost_usd", "value": {"doubleValue": 0.1}},
+            ]),
+        ),
+        record(
+            "user_prompt",
+            json!([{"key": "input_tokens", "value": {"intValue": "-1"}}]),
+        ),
+    ]));
+    assert_eq!(
+        f.malformed, 2,
+        "the first input_tokens and the model; not the repeat, not the undeclared, not a dropped record"
+    );
+    assert_eq!((f.kept, f.dropped), (1, 1));
+}
+
+#[test]
 fn only_the_first_2000_records_are_read() {
     let many: Vec<Value> = (0..2005)
         .map(|_| record("api_request", json!([])))

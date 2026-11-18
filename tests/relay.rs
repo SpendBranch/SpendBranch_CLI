@@ -122,7 +122,36 @@ fn a_good_batch_is_filtered_forwarded_and_answered_200() {
     let sent = relay.sent.lock().unwrap();
     assert_eq!(sent.len(), 1);
     assert!(!sent[0].to_string().contains("SECRET"), "{}", sent[0]);
-    assert!(matches!(relay.events.try_recv(), Ok(Event::Forwarded)));
+    assert!(matches!(
+        relay.events.try_recv(),
+        Ok(Event::Forwarded { malformed: 0 })
+    ));
+}
+
+#[test]
+fn a_forwarded_batch_says_how_many_declared_values_were_left_out() {
+    let relay = Relay::start(|_| Ok(0));
+    let body = payload(vec![record(
+        "api_request",
+        json!([
+            {"key": "session.id", "value": {"stringValue": "s"}},
+            {"key": "input_tokens", "value": {"intValue": "-5"}},
+            {"key": "model", "value": {"stringValue": "not a model"}},
+        ]),
+    )]);
+    let (status, _) = relay.post("", &body.to_string());
+    assert_eq!(status, 200);
+    assert!(matches!(
+        relay.events.try_recv(),
+        Ok(Event::Forwarded { malformed: 2 })
+    ));
+}
+
+#[test]
+fn the_malformed_count_repeats_nothing_the_agent_sent_and_fits_80_columns() {
+    let line = spendbranch::cli::messages::relay_malformed(1_000_000);
+    assert!(line.chars().count() <= 80, "{line}");
+    assert!(line.contains("1000000"), "{line}");
 }
 
 #[test]

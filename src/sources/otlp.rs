@@ -45,6 +45,10 @@ pub struct Filtered {
     pub dropped: usize,
     /// Records past the 2000th.
     pub ignored: usize,
+    /// Declared attributes of the kept records whose value did not have the shape their key
+    /// promises (the first of each key only). An undeclared attribute is not counted: dropping it
+    /// is the filter's normal work.
+    pub malformed: usize,
 }
 
 /// The keys whose value is a token count.
@@ -188,6 +192,11 @@ impl Record {
         self.kept.push((known, clean_value(known, value)));
     }
 
+    /// The declared keys whose first value did not pass.
+    fn malformed(&self) -> usize {
+        self.kept.iter().filter(|(_, v)| v.is_none()).count()
+    }
+
     fn rebuilt(self, name: &str) -> Value {
         let mut out = Map::new();
         out.insert("eventName".into(), Value::String(name.to_owned()));
@@ -211,6 +220,7 @@ struct Walk {
     dropped: usize,
     ignored: usize,
     seen: usize,
+    malformed: usize,
 }
 
 /// Where in the body a value sits.
@@ -324,9 +334,12 @@ impl<'de> Visitor<'de> for Step<'_> {
             self.walk.seen += 1;
             match record.and_then(|r| {
                 let name = r.name().filter(|n| EVENTS.contains(n))?.to_owned();
-                Some(r.rebuilt(&name))
+                Some((r.malformed(), r.rebuilt(&name)))
             }) {
-                Some(kept) => self.walk.records.push(kept),
+                Some((malformed, kept)) => {
+                    self.walk.malformed += malformed;
+                    self.walk.records.push(kept);
+                }
                 None => self.walk.dropped += 1,
             }
         }
@@ -632,6 +645,7 @@ fn finish(walk: Walk) -> Filtered {
         kept,
         dropped: walk.dropped,
         ignored: walk.ignored,
+        malformed: walk.malformed,
     }
 }
 

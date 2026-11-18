@@ -27,7 +27,8 @@ const HEAD_WAIT: Duration = Duration::from_secs(2);
 
 /// What happened to a batch, for the screen.
 pub enum Event {
-    Forwarded,
+    /// The batch went on; `malformed` declared values were left out of it (a count, never a value).
+    Forwarded { malformed: usize },
     /// The batch was lost: why, in words that repeat nothing the agent sent.
     Dropped(String),
 }
@@ -288,7 +289,9 @@ fn handle(
     }
     match forward(&prepared.payload) {
         Ok(by_server) => {
-            let _ = events.send(Event::Forwarded);
+            let _ = events.send(Event::Forwarded {
+                malformed: prepared.malformed,
+            });
             reply_with(&stream, 200, &relay::answer(prepared.refused + by_server))
         }
         Err(why) => {

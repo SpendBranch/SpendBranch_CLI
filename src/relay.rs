@@ -137,11 +137,13 @@ impl RateLimit {
     }
 }
 
-/// A body that is JSON, filtered: what to forward and how many records stayed behind.
+/// A body that is JSON, filtered: what to forward, how many records stayed behind and how many
+/// declared values were left out of the kept ones.
 pub struct Prepared {
     pub payload: Value,
     pub kept: usize,
     pub refused: u64,
+    pub malformed: usize,
 }
 
 /// Walked as it is parsed: what the body holds is never kept, only what passes.
@@ -151,6 +153,7 @@ pub fn prepare(body: &[u8]) -> Result<Prepared, u16> {
         payload: f.payload,
         kept: f.kept,
         refused: u64::try_from(f.dropped + f.ignored).unwrap_or(u64::MAX),
+        malformed: f.malformed,
     })
 }
 
