@@ -95,9 +95,32 @@ fail() {
   exit 1
 }
 
-# spin <pid> <name> <detail>: an animated mark while <pid> runs; returns its exit status.
+# bar <done> <total>: a progress bar and the sizes, "####----  1.4 / 2.3 MB".
+bar() {
+  awk -v done="$1" -v total="$2" -v fancy="$fancy" -v amber="$AMBER" -v dim="$DIM" \
+    -v reset="$RESET" 'BEGIN {
+      width = 24
+      filled = int(width * done / total)
+      if (filled > width) filled = width
+      if (fancy == 1) {
+        s = amber
+        for (i = 0; i < filled; i++) s = s "━"
+        s = s reset dim
+        if (filled < width) { s = s "╺"; for (i = filled + 1; i < width; i++) s = s "━" }
+        s = s reset
+      } else {
+        s = "["
+        for (i = 0; i < width; i++) s = s (i < filled ? "#" : "-")
+        s = s "]"
+      }
+      printf "%s  %5.1f / %.1f MB", s, done / 1048576, total / 1048576
+    }'
+}
+
+# spin <pid> <name> <detail> [<file> <total bytes>]: an animated mark while <pid> runs, and a
+# progress bar while <file> grows towards <total>; returns the exit status of <pid>.
 spin() {
-  spin_pid=$1 spin_name=$2 spin_detail=$3
+  spin_pid=$1 spin_name=$2 spin_detail=$3 spin_file=${4:-} spin_total=${5:-0}
   if [ "$tty" = 1 ]; then
     spinning=1
     printf '\033[?25l'
@@ -109,13 +132,25 @@ spin() {
     while kill -0 "$spin_pid" 2> /dev/null; do
       i=$((i % n + 1))
       eval "frame=\${$i}"
-      printf '\r%s%s%s %s%-11s%s %s%s%s' "$AMBER" "$frame" "$RESET" "$BOLD" "$spin_name" \
-        "$RESET" "$DIM" "$spin_detail" "$RESET"
+      shown="$DIM$spin_detail$RESET"
+      if [ "$spin_total" -gt 0 ] 2> /dev/null && [ -f "$spin_file" ]; then
+        shown=$(bar "$(wc -c < "$spin_file")" "$spin_total")
+      fi
+      printf '\r%s%s%s %s%-11s%s %s' "$AMBER" "$frame" "$RESET" "$BOLD" "$spin_name" "$RESET" \
+        "$shown"
       sleep 0.1 2> /dev/null || sleep 1
     done
     stop_spinner
   fi
   wait "$spin_pid"
+}
+
+# The size the server gives for <url>, after redirects; empty when it says none.
+remote_size() {
+  case "$1" in https://*) ;; *) return 0 ;; esac
+  has curl || return 0
+  curl --proto '=https' --tlsv1.2 -fsSIL "$1" 2> /dev/null |
+    awk 'tolower($1) == "content-length:" { v = $2 } END { gsub("\r", "", v); print v }'
 }
 
 # --- the work ----------------------------------------------------------------------------
@@ -289,9 +324,11 @@ main() {
   printf '\n'
 
   # Both files in the background, the spinner in front; what curl said is kept for the error.
+  total=""
+  [ "$tty" = 1 ] && total=$(remote_size "$base/$archive")
   (fetch "$base/$archive" "$tmp/$archive" && fetch "$base/SHA256SUMS" "$tmp/SHA256SUMS") \
     2> "$tmp/fetch.err" &
-  if ! spin $! Download "$archive"; then
+  if ! spin $! Download "$archive" "$tmp/$archive" "${total:-0}"; then
     why=$(tail -n 1 "$tmp/fetch.err" 2> /dev/null)
     case "$why" in
       *://*) fail "download failed: $why" ;;

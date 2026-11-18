@@ -84,7 +84,7 @@ function Install-SpendBranch {
         return $path
     }
 
-    function Stop-Spinner {
+    function Clear-Spinner {
         if ($ui.Spinning) {
             $width = 79
             try { $width = [Console]::WindowWidth - 1 } catch { $width = 79 }
@@ -95,19 +95,42 @@ function Install-SpendBranch {
     }
 
     # An animated mark while the task runs.
-    function Wait-Task($task, [string] $name, [string] $detail) {
+    # A progress bar of $done out of $total bytes, and the sizes: "####----  1.4 / 2.3 MB".
+    function Format-Bar([long] $done, [long] $total) {
+        $width = 24
+        $filled = [math]::Min($width, [math]::Floor($width * $done / $total))
+        $sizes = '{0,5:N1} / {1:N1} MB' -f ($done / 1MB), ($total / 1MB)
+        if ($ui.Fancy) {
+            $bar = [string][char]0x2501
+            $rest = if ($filled -lt $width) { [string][char]0x257A + ($bar * ($width - $filled - 1)) } else { '' }
+            return "$($ui.Amber)$($bar * $filled)$($ui.Reset)$($ui.Dim)$rest$($ui.Reset)  $sizes"
+        }
+        return '[' + ('#' * $filled) + ('-' * ($width - $filled)) + "]  $sizes"
+    }
+
+    # An animated mark while the task runs. With the file being written and the client that
+    # writes it, a progress bar too, once the server has said how big the file is.
+    function Wait-Task($task, [string] $name, [string] $detail, [string] $file = '', $client = $null) {
         if ($ui.Tty) {
             $ui.Spinning = $true
             try { [Console]::CursorVisible = $false } catch { $null = $_ }
             $i = 0
             while (-not $task.IsCompleted) {
                 $frame = $ui.Frames[$i % $ui.Frames.Count]
-                Write-Host ("`r{0}{1}{2} {3}{4,-11}{5} {6}{7}{8}" -f $ui.Amber, $frame, $ui.Reset,
-                    $ui.Bold, $name, $ui.Reset, $ui.Dim, $detail, $ui.Reset) -NoNewline
+                $shown = "$($ui.Dim)$detail$($ui.Reset)"
+                $total = 0
+                if ($client -and $client.ResponseHeaders) {
+                    [long]::TryParse([string] $client.ResponseHeaders['Content-Length'], [ref] $total) | Out-Null
+                }
+                if ($total -gt 0 -and $file -and (Test-Path -LiteralPath $file)) {
+                    $shown = Format-Bar (Get-Item -LiteralPath $file).Length $total
+                }
+                Write-Host ("`r{0}{1}{2} {3}{4,-11}{5} {6}" -f $ui.Amber, $frame, $ui.Reset,
+                    $ui.Bold, $name, $ui.Reset, $shown) -NoNewline
                 Start-Sleep -Milliseconds 100
                 $i++
             }
-            Stop-Spinner
+            Clear-Spinner
         } else {
             while (-not $task.IsCompleted) { Start-Sleep -Milliseconds 50 }
         }
@@ -136,11 +159,13 @@ function Install-SpendBranch {
     function Get-Release([string] $base, [string] $archive, [string] $into) {
         $files = @($archive, 'SHA256SUMS')
         if ($base -match '^https://') {
+            $clients = @{}
             $tasks = foreach ($name in $files) {
-                (New-Object Net.WebClient).DownloadFileTaskAsync("$base/$name", (Join-Path $into $name))
+                $clients[$name] = New-Object Net.WebClient
+                $clients[$name].DownloadFileTaskAsync("$base/$name", (Join-Path $into $name))
             }
             $all = [Threading.Tasks.Task]::WhenAll([Threading.Tasks.Task[]] $tasks)
-            Wait-Task $all 'Download' $archive
+            Wait-Task $all 'Download' $archive (Join-Path $into $archive) $clients[$archive]
             if ($all.IsFaulted) {
                 $why = $all.Exception.GetBaseException().Message
                 throw "download failed: $base/$archive ($why)"
@@ -274,7 +299,9 @@ function Install-SpendBranch {
             if (Test-Path -LiteralPath $old) {
                 Remove-Item -LiteralPath $old -Force -ErrorAction SilentlyContinue
             }
-            $installed = & $exe --version
+            # The version already checked: no second run of the program just to print it (in Windows
+            # Terminal every program started between two lines is a chance to lose one on screen).
+            $installed = $version
             Write-Step $ui.Ok 'Install' "$(Format-Path $exe) $([char]0x00B7) $installed"
             Write-Joint
         } finally {
@@ -293,7 +320,7 @@ function Install-SpendBranch {
             Write-Step $ui.Warn 'Path' "another spendbranch comes first: $($found.Source)"
         }
     } catch {
-        Stop-Spinner
+        Clear-Spinner
         Write-Host "$($ui.Bad) $($_.Exception.Message)"
         $global:LASTEXITCODE = 1
         return
