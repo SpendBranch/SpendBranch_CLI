@@ -51,6 +51,10 @@ pub trait System {
     fn spawn_detached(&self, exe: &Path, args: &[&str], log: &Path) -> io::Result<()>;
     /// Runs a tool to the end.
     fn run(&self, program: &str, args: &[&str], stdin: Option<&str>) -> io::Result<Ran>;
+    /// Deletes this program's file (`uninstall`). On Windows a running .exe cannot be deleted:
+    /// a hidden PowerShell waits for this process to end, then deletes it and its folder if
+    /// that is left empty.
+    fn remove_program(&self, exe: &Path) -> io::Result<()>;
     /// A long-running command (`relay`) should end now. The real answer is never: it ends with
     /// the signal (Ctrl+C), which holds nothing that needs closing.
     fn stopped(&self) -> bool;
@@ -126,6 +130,36 @@ impl System for Real {
             stdout: String::from_utf8_lossy(&out.stdout).into_owned(),
             stderr: String::from_utf8_lossy(&out.stderr).into_owned(),
         })
+    }
+
+    #[cfg(not(windows))]
+    fn remove_program(&self, exe: &Path) -> io::Result<()> {
+        // A running program's file can be unlinked: it goes when this process ends.
+        std::fs::remove_file(exe)
+    }
+
+    #[cfg(windows)]
+    fn remove_program(&self, exe: &Path) -> io::Result<()> {
+        use std::os::windows::process::CommandExt;
+        const CREATE_NEW_PROCESS_GROUP: u32 = 0x200;
+        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+        let text = exe
+            .to_str()
+            .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "path is not text"))?;
+        let dir = exe.parent().and_then(Path::to_str).unwrap_or_default();
+        let script = crate::uninstall::windows_delete_script(std::process::id(), text, dir);
+        Command::new("powershell")
+            .args(["-NoProfile", "-NonInteractive", "-WindowStyle", "Hidden"])
+            .args([
+                "-EncodedCommand",
+                &crate::uninstall::powershell_encoded(&script),
+            ])
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .creation_flags(CREATE_NEW_PROCESS_GROUP | CREATE_NO_WINDOW)
+            .spawn()
+            .map(drop)
     }
 
     fn stopped(&self) -> bool {

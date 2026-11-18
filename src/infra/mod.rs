@@ -14,3 +14,4 @@ pub mod relay_server;
 pub mod scheduler;
 pub mod store;
 pub mod system;
+pub mod uninstall;
