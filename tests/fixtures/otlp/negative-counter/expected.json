@@ -49,12 +49,6 @@
                     }
                   },
                   {
-                    "key": "input_tokens",
-                    "value": {
-                      "intValue": "-5"
-                    }
-                  },
-                  {
                     "key": "output_tokens",
                     "value": {
                       "intValue": "20"

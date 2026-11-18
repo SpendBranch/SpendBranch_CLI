@@ -3,8 +3,8 @@
 //! leaves the machine is only what the company authorized, even if the agent exports more.
 //!
 //! Kept: records of an `api_request` event, and of each record only its name, its time and the
-//! twelve declared attributes, each in the shape its key promises (counters as whole numbers,
-//! identifiers in the contract's patterns). Resource attributes, the record body, every other
+//! twelve declared attributes, each in the shape its key promises (counters as whole numbers
+//! from 0 to 10^12, identifiers in the contract's patterns). Resource attributes, the record body, every other
 //! attribute, free text and any text over 256 characters never pass. Not here: the mapping into
 //! observations, which the server does.
 //!
@@ -56,11 +56,10 @@ const COUNTERS: [&str; 5] = [
     "cache_creation_1h_tokens",
 ];
 
-/// A whole number no larger than the contract's ceiling for a counter. Negative passes on
-/// purpose: the shared corpus forwards it and the server's strict mapping turns it into
-/// "unknown", so it never counts.
+/// A whole number from 0 to the contract's ceiling for a counter; anything else is not a count
+/// and never leaves the machine.
 fn fits_counter(n: i128) -> bool {
-    n <= i128::from(crate::contract::MAX_TOKENS_PER_COUNTER) && n >= i128::from(i64::MIN)
+    (0..=i128::from(crate::contract::MAX_TOKENS_PER_COUNTER)).contains(&n)
 }
 
 fn is_int_text(s: &str) -> bool {

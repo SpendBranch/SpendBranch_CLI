@@ -155,6 +155,24 @@ fn text_is_kept_only_in_the_shape_its_key_promises() {
         .unwrap()
         .len();
     assert_eq!(kept, 1, "only the counter at the ceiling stays");
+    // below zero, as text, as a number or as a string value: never forwarded; zero is a count
+    let below = otlp::lenient(&payload(vec![record(
+        "api_request",
+        json!([
+            {"key": "input_tokens", "value": {"intValue": "-1"}},
+            {"key": "output_tokens", "value": {"intValue": -1}},
+            {"key": "cache_read_tokens", "value": {"stringValue": "-3"}},
+            {"key": "cache_creation_tokens", "value": {"intValue": "0"}},
+        ]),
+    )]));
+    let kept: Vec<_> =
+        below.payload["resourceLogs"][0]["scopeLogs"][0]["logRecords"][0]["attributes"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|a| a["key"].as_str().unwrap())
+            .collect();
+    assert_eq!(kept, ["cache_creation_tokens"], "only the zero stays");
     assert!(!f.payload.to_string().contains("SECRET"));
 }
 
@@ -177,9 +195,8 @@ fn a_repeated_key_keeps_the_first_and_odd_numbers_and_times_are_dropped() {
         .unwrap();
     assert!(r.get("timeUnixNano").is_none());
     let attrs = r["attributes"].as_array().unwrap();
-    assert_eq!(attrs.len(), 2);
+    assert_eq!(attrs.len(), 1);
     assert_eq!(attrs[0]["value"]["stringValue"], "first");
-    assert_eq!(attrs[1]["value"]["intValue"], "-7");
 }
 
 #[test]
