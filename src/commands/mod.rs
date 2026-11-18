@@ -8,6 +8,7 @@ mod otel;
 mod relay;
 mod setup;
 mod sync;
+mod uninstall;
 
 use crate::cli::{args::Command, messages as m};
 use crate::env::Env;
@@ -71,6 +72,7 @@ pub fn run(command: Command, ctx: &mut Ctx) -> Result<i32> {
         Command::Hook { agent, event } => hook::run(ctx, agent.as_deref(), event.as_deref()),
         Command::Otel(s) => otel(ctx, s),
         Command::Logout => account::logout(ctx),
+        Command::Uninstall { yes } => uninstall::run(ctx, yes),
     }
 }
 

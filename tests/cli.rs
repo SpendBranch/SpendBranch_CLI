@@ -25,6 +25,9 @@ impl System for Inert {
     fn spawn_detached(&self, _: &Path, _: &[&str], _: &Path) -> io::Result<()> {
         Ok(())
     }
+    fn remove_program(&self, _: &Path) -> io::Result<()> {
+        Err(io::Error::other("nothing is removed in this mode"))
+    }
     fn run(&self, _: &str, _: &[&str], _: Option<&str>) -> io::Result<Ran> {
         Err(io::Error::new(
             io::ErrorKind::NotFound,

@@ -45,6 +45,8 @@ pub struct FakeSystem {
     pub missing: RefCell<HashSet<String>>,
     /// The system this pretends to be; Linux unless a test says otherwise, whatever runs it.
     pub platform: Platform,
+    /// Every program file `uninstall` asked to delete (nothing is deleted).
+    pub removed: RefCell<Vec<PathBuf>>,
 }
 
 impl FakeSystem {
@@ -58,6 +60,7 @@ impl FakeSystem {
             answers: RefCell::default(),
             missing: RefCell::default(),
             platform: Platform::Linux,
+            removed: RefCell::default(),
         }
     }
 
@@ -98,6 +101,10 @@ impl System for FakeSystem {
     }
     fn stopped(&self) -> bool {
         true
+    }
+    fn remove_program(&self, exe: &Path) -> io::Result<()> {
+        self.removed.borrow_mut().push(exe.to_path_buf());
+        Ok(())
     }
     fn run(&self, program: &str, args: &[&str], stdin: Option<&str>) -> io::Result<Ran> {
         if self.missing.borrow().contains(program) {

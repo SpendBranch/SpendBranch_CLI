@@ -43,12 +43,16 @@ pub enum Command {
         port: Option<u16>,
     },
     Logout,
+    /// `--yes`: no question first (for scripts).
+    Uninstall {
+        yes: bool,
+    },
 }
 
 /// `Err` carries what was wrong; the caller prints it as a usage error and exits 2.
 pub fn parse(args: &[String]) -> Result<Parsed, String> {
     let (mut server, mut source, mut port) = (None, None, None);
-    let (mut relogin, mut version, mut help) = (false, false, false);
+    let (mut relogin, mut version, mut help, mut yes) = (false, false, false, false);
     let mut positionals = Vec::new();
     let mut p = lexopt::Parser::from_args(args);
     let e = |e: lexopt::Error| e.to_string();
@@ -58,6 +62,7 @@ pub fn parse(args: &[String]) -> Result<Parsed, String> {
             Long("source") => source = Some(p.value().map_err(e)?.string().map_err(e)?),
             Long("port") => port = Some(p.value().map_err(e)?.string().map_err(e)?),
             Long("relogin") => relogin = true,
+            Short('y') | Long("yes") => yes = true,
             Short('v') | Long("version") => version = true,
             Short('h') | Long("help") => help = true,
             Value(v) => positionals.push(v.string().map_err(e)?),
@@ -100,6 +105,7 @@ pub fn parse(args: &[String]) -> Result<Parsed, String> {
                 .transpose()?,
         },
         Some("logout") => Command::Logout,
+        Some("uninstall") => Command::Uninstall { yes },
         Some(other) => return Ok(Parsed::Unknown(other.to_string())),
         None => return Ok(Parsed::Home),
     };
@@ -107,8 +113,18 @@ pub fn parse(args: &[String]) -> Result<Parsed, String> {
 }
 
 /// The commands a person types (`hook` is the agents' own, so it is left out).
-pub const COMMANDS: [&str; 10] = [
-    "setup", "login", "status", "sync", "enable", "disable", "hooks", "otel", "relay", "logout",
+pub const COMMANDS: [&str; 11] = [
+    "setup",
+    "login",
+    "status",
+    "sync",
+    "enable",
+    "disable",
+    "hooks",
+    "otel",
+    "relay",
+    "logout",
+    "uninstall",
 ];
 
 /// The command a typo most likely meant: at most 2 edits away.

@@ -151,27 +151,35 @@ Codex runs a new hook only after you trust it: open Codex and review it under `/
 
 ## Uninstall
 
-1. Disconnect the device. This revokes it on the server, deletes its key and removes the scheduled
-   sync:
+One command removes everything SpendBranch put on this computer:
 
-   ```sh
-   spendbranch logout
-   ```
+```sh
+spendbranch uninstall
+```
 
-2. Remove the hooks from the agents' settings (other hooks stay untouched):
+It asks first, then:
 
-   ```sh
-   spendbranch hooks uninstall claude-code
-   spendbranch hooks uninstall codex
-   ```
+1. disconnects the device (revokes it on the server and deletes its key);
+2. removes the Claude Code and Codex hooks (other hooks stay untouched) and the scheduled sync;
+3. takes out the `PATH` lines the install script added (on Windows, the folder in your user
+   `Path`);
+4. deletes the data folder and the program itself.
 
-3. Remove the program:
+`spendbranch uninstall --yes` does the same without the question, for scripts.
 
-   | System | Remove |
-   | --- | --- |
-   | macOS, Linux | delete `~/.local/bin/spendbranch`, and the line marked `# added by the SpendBranch CLI installer` from `~/.profile`, `~/.bashrc`, `~/.bash_profile`, `~/.zshrc` (and `~/.config/fish/conf.d/spendbranch.fish`) |
-   | Windows | delete `%LOCALAPPDATA%\Programs\spendbranch`, and take that folder out of your user `Path` |
+If you set `SPENDBRANCH_HOME` to a folder that is not named `spendbranch`, that folder is left as
+it is: delete what you want from it yourself.
 
-4. Delete the data folder: `~/.config/spendbranch` (or `$XDG_CONFIG_HOME/spendbranch`) on macOS and
-   Linux, `%APPDATA%\spendbranch` on Windows. If you set `SPENDBRANCH_HOME`, the data is there
-   instead.
+### By hand
+
+If the program is already gone, remove what is left:
+
+| What | macOS, Linux | Windows |
+| --- | --- | --- |
+| Program | `~/.local/bin/spendbranch` | `%LOCALAPPDATA%\Programs\spendbranch` |
+| PATH | the line marked `# added by the SpendBranch CLI installer` in `~/.profile`, `~/.bashrc`, `~/.bash_profile`, `~/.zshrc`, and `~/.config/fish/conf.d/spendbranch.fish` | that folder in your user `Path` |
+| Data | `~/.config/spendbranch` (or `$XDG_CONFIG_HOME/spendbranch`) | `%APPDATA%\spendbranch` |
+| Hooks | the `spendbranch hook` entries in `~/.claude/settings.json` and `~/.codex/hooks.json` | the same, under your user folder |
+| Schedule | `systemctl --user disable --now spendbranch-sync.timer` (or the `# spendbranch-sync` crontab lines); macOS: `launchctl remove com.spendbranch.sync` | `schtasks /Delete /TN SpendBranchSync /F` and `SpendBranchSyncLogon` |
+
+The device stays registered until it expires; revoke it in "My devices" on the web.

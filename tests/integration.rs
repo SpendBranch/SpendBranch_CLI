@@ -60,3 +60,5 @@ mod sync_rules;
 mod tls;
 #[path = "transport.rs"]
 mod transport;
+#[path = "uninstall.rs"]
+mod uninstall;

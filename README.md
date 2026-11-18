@@ -19,7 +19,8 @@ irm https://github.com/SpendBranch/SpendBranch_CLI/releases/latest/download/inst
 ```
 
 The script checks the SHA-256 of what it downloads and needs no sudo or admin. See [docs/INSTALL.md](docs/INSTALL.md)
-for the options, how to verify a release, installing by hand, and how to uninstall.
+for the options, how to verify a release and installing by hand. To remove everything:
+`spendbranch uninstall`.
 
 ## License
 

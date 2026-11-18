@@ -58,6 +58,7 @@ pub const HELP_GROUPS: [Group; 4] = [
         &[
             ("login [--server URL]", "connect to your organization"),
             ("logout", "revoke this device, delete credentials"),
+            ("uninstall [--yes]", "remove SpendBranch from this computer"),
         ],
     ),
     (
@@ -84,7 +85,7 @@ pub struct CommandHelp {
 
 const AGENT_ARG: (&str, &str) = ("<agent>", "claude-code | codex");
 
-pub const COMMAND_HELP: [CommandHelp; 10] = [
+pub const COMMAND_HELP: [CommandHelp; 11] = [
     CommandHelp {
         name: "setup",
         usage: "[--server URL] [--source AGENT] [--relogin]",
@@ -181,6 +182,16 @@ pub const COMMAND_HELP: [CommandHelp; 10] = [
         usage: "",
         about: &["Revokes this device on the server and deletes its local credentials."],
         options: &[],
+    },
+    CommandHelp {
+        name: "uninstall",
+        usage: "[--yes]",
+        about: &[
+            "Removes SpendBranch from this computer: disconnects the device, removes",
+            "the agent hooks, the scheduled sync, the PATH lines the installer added,",
+            "the data folder and the program. Other hooks and settings stay.",
+        ],
+        options: &[("--yes", "do not ask first (for scripts)")],
     },
 ];
 
@@ -380,6 +391,44 @@ pub fn scheduler_failed(why: &str) -> String {
 
 pub fn scheduler_not_removed(why: &str) -> String {
     format!("Could not remove the scheduled sync: {why}")
+}
+
+// --- uninstall ------------------------------------------------------------------------
+
+pub const UNINSTALL_ASK: &str = "This removes SpendBranch from this computer: it disconnects the device and removes the agent hooks, the scheduled sync, the data folder and the program.\nContinue? [y/N] ";
+pub const UNINSTALL_CANCELLED: &str = "Cancelled. Nothing was removed.";
+pub const UNINSTALL_NEEDS_YES: &str =
+    "Not a terminal: run `spendbranch uninstall --yes` to remove SpendBranch without a question.";
+pub const UNINSTALL_DONE: &str = "SpendBranch was removed from this computer.";
+pub const UNINSTALL_PARTIAL: &str =
+    "SpendBranch was removed, except what the lines above say is left.";
+pub const UNINSTALL_HOMEBREW: &str =
+    "The program was installed by Homebrew: remove it with `brew uninstall spendbranch`.";
+
+pub fn uninstall_path_line(file: &str) -> String {
+    format!("Removed the PATH line from {file}.")
+}
+
+pub fn uninstall_path_entry(dir: &str) -> String {
+    format!("Removed {dir} from your user Path.")
+}
+
+pub fn uninstall_data_removed(dir: &str) -> String {
+    format!("Deleted the data folder {dir}.")
+}
+
+pub fn uninstall_data_not_ours(dir: &str) -> String {
+    format!(
+        "SPENDBRANCH_HOME points at {dir}, which is not a folder named spendbranch: it was left as it is. Delete what you want from it yourself."
+    )
+}
+
+pub fn uninstall_program_removed(path: &str) -> String {
+    format!("Deleted the program {path}.")
+}
+
+pub fn uninstall_failed(what: &str, why: &str) -> String {
+    format!("Could not remove {what}: {why}")
 }
 
 // --- otel and relay -------------------------------------------------------------------

@@ -17,6 +17,7 @@ const PURE: &[&str] = &[
     "src/relay.rs",
     "src/scheduler.rs",
     "src/sync",
+    "src/uninstall.rs",
 ];
 const FORBIDDEN: &[&str] = &[
     "crate::infra",

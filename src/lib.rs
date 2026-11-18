@@ -1,5 +1,5 @@
 //! SpendBranch CLI. Dependency rule: `cli -> commands -> infra`. The pure modules (`contract`,
-//! `sources`, `sync`, `auth`, `api`, `hooks`, `relay`, `scheduler`, `cli::{args, messages,
+//! `sources`, `sync`, `auth`, `api`, `hooks`, `relay`, `scheduler`, `uninstall`, `cli::{args, messages,
 //! render}`) never import `infra` or touch files, sockets, processes or the environment;
 //! `tests/architecture.rs` enforces it, and keeps `commands` off files, sockets and SQLite.
 #![forbid(unsafe_code)]
@@ -31,3 +31,4 @@ pub mod relay;
 pub mod scheduler;
 pub mod sources;
 pub mod sync;
+pub mod uninstall;
