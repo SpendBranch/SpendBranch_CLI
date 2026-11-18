@@ -146,3 +146,5 @@ if ($failures) {
     exit 1
 }
 Write-Host 'all installer checks passed'
+# The refusal checks leave a failing $LASTEXITCODE behind; the runner would report it.
+exit 0
