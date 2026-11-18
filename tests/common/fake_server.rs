@@ -496,7 +496,8 @@ fn status(s: &State, id: &str) -> Reply {
                 "expiresAt": s.script.device_expires_at.clone().unwrap_or("2027-02-08T00:00:00Z".into())
             },
             "sources": s.sources,
-            "collection": if s.collection.is_empty() { collection(s) } else { s.collection.clone() }
+            "collection": if s.collection.is_empty() { collection(s) } else { s.collection.clone() },
+            "usage": { "month": "2026-11-01", "sessions": 2, "unpriced": 1, "estimatedNanoUsd": 200000 }
         }),
     )
 }

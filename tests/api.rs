@@ -1,6 +1,7 @@
 //! What may be said to the server, and how its answers are read.
 use spendbranch::api::{
-    ApiFailure, PairingStarted, PollOutcome, Polled, ServerUrl, ServerUrlError, is_plain_code,
+    ApiFailure, CliStatus, PairingStarted, PollOutcome, Polled, ServerUrl, ServerUrlError,
+    StatusView, UsageView, is_plain_code,
 };
 
 fn parse(text: &str) -> Result<ServerUrl, ServerUrlError> {
@@ -339,5 +340,43 @@ fn a_release_has_only_the_https_server_it_was_built_with() {
     );
     for bad in ["http://api.example.com", "https://", "", "api.example.com"] {
         assert_eq!(default_server(false, Some(bad)), None, "{bad}");
+    }
+}
+
+fn status_with(usage: &str) -> Option<StatusView> {
+    let json = format!(
+        r#"{{"organizationName":"Acme","memberName":null,"device":{{"label":"laptop","keyFingerprint":"a1b2-c3d4-e5f6-0718","createdAt":"2026-11-12T10:00:00Z","expiresAt":"2027-02-08T00:00:00Z"}},"sources":[],"collection":[]{usage}}}"#
+    );
+    serde_json::from_str::<CliStatus>(&json).unwrap().checked()
+}
+
+#[test]
+fn the_usage_of_the_month_is_read_and_a_server_without_it_still_answers() {
+    let view = status_with(
+        r#","usage":{"month":"2026-11-01","sessions":3,"unpriced":1,"estimatedNanoUsd":400000}"#,
+    )
+    .unwrap();
+    assert_eq!(
+        view.usage,
+        Some(UsageView {
+            month: "2026-11-01".into(),
+            sessions: 3,
+            unpriced: 1,
+            estimated_nano_usd: 400_000
+        })
+    );
+    assert_eq!(status_with("").unwrap().usage, None);
+}
+
+#[test]
+fn a_malformed_usage_refuses_the_answer() {
+    for usage in [
+        r#","usage":{"month":"2026-11-15","sessions":1,"unpriced":0,"estimatedNanoUsd":1}"#,
+        r#","usage":{"month":"Nov 2026","sessions":1,"unpriced":0,"estimatedNanoUsd":1}"#,
+        r#","usage":{"month":"2026-11-01","sessions":1,"unpriced":2,"estimatedNanoUsd":1}"#,
+        r#","usage":{"month":"2026-11-01","sessions":-1,"unpriced":0,"estimatedNanoUsd":1}"#,
+        r#","usage":{"month":"2026-11-01","sessions":1,"unpriced":0,"estimatedNanoUsd":-1}"#,
+    ] {
+        assert_eq!(status_with(usage), None, "{usage}");
     }
 }

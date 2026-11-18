@@ -26,6 +26,18 @@ pub struct CliStatus {
     device: RawDevice,
     sources: Vec<RawSource>,
     collection: Vec<RawCollection>,
+    /// Absent from a server older than D-29.10: the status shows no estimate then.
+    #[serde(default)]
+    usage: Option<RawUsage>,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct RawUsage {
+    month: String,
+    sessions: i64,
+    unpriced: i64,
+    estimated_nano_usd: i64,
 }
 
 #[derive(Clone, Debug, Deserialize)]
@@ -107,6 +119,17 @@ pub struct CollectionView {
     pub open_gaps: Vec<GapView>,
 }
 
+/// This device's sessions this month, as the API estimated them (D-29.10). The sum leaves out the
+/// sessions without a price (`unpriced`), so it is a floor when `unpriced > 0`.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct UsageView {
+    /// `2026-11-01`.
+    pub month: String,
+    pub sessions: u32,
+    pub unpriced: u32,
+    pub estimated_nano_usd: u64,
+}
+
 /// A status answer that passed validation: everything in it is safe to print.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct StatusView {
@@ -115,6 +138,7 @@ pub struct StatusView {
     pub device: DeviceView,
     pub sources: Vec<SourceView>,
     pub collection: Vec<CollectionView>,
+    pub usage: Option<UsageView>,
 }
 
 const MAX_LISTED: usize = 8;
@@ -206,6 +230,31 @@ fn collection_view(c: RawCollection) -> Option<Option<CollectionView>> {
     }))
 }
 
+/// `None` if the usage is malformed: a month that is not `YYYY-MM-01`, a negative count or sum, or
+/// more sessions without a price than sessions.
+fn usage_view(u: RawUsage) -> Option<UsageView> {
+    let month_ok = u.month.len() == 10
+        && u.month.ends_with("-01")
+        && u.month.bytes().enumerate().all(|(i, b)| {
+            if i == 4 || i == 7 {
+                b == b'-'
+            } else {
+                b.is_ascii_digit()
+            }
+        });
+    let sessions = u32::try_from(u.sessions).ok()?;
+    let unpriced = u32::try_from(u.unpriced).ok()?;
+    if !month_ok || unpriced > sessions {
+        return None;
+    }
+    Some(UsageView {
+        month: u.month,
+        sessions,
+        unpriced,
+        estimated_nano_usd: u64::try_from(u.estimated_nano_usd).ok()?,
+    })
+}
+
 impl CliStatus {
     /// The member's name alone, when it is safe to print, whatever the rest of the answer holds:
     /// the confirmation at login must not lose it to an odd field elsewhere.
@@ -227,6 +276,10 @@ impl CliStatus {
         for c in self.collection {
             collection.extend(collection_view(c)?);
         }
+        let usage = match self.usage {
+            Some(u) => Some(usage_view(u)?),
+            None => None,
+        };
         let member_name = match self.member_name {
             Some(name) if printable(&name, 200) => Some(name),
             Some(_) => return None,
@@ -239,6 +292,7 @@ impl CliStatus {
             device,
             sources,
             collection,
+            usage,
         })
     }
 }

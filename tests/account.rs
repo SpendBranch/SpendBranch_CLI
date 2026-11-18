@@ -85,6 +85,7 @@ fn login_status_and_logout_work_end_to_end() {
         "Member         Jane Doe",
         "Device         [ok] test-laptop · valid to ",
         "Server         [ok] http://",
+        "Estimated      at least US$ 0.0002 in 2026-11, 1 of 2 sessions unpriced",
         "Claude Code    [-] off       [!] no hook   [ok] authorized",
         "Upload         0 waiting",
     ] {

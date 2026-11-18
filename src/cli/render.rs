@@ -113,6 +113,27 @@ pub fn status(st: Style, remote: Option<&Remote>, local: &Local, now: Iso) -> St
     boxed(st, "SpendBranch status", &lines)
 }
 
+/// `US$ 0.0004` from nano-dollars, cut (never rounded up) to four decimals.
+fn dollars(nano: u64) -> String {
+    format!(
+        "US$ {}.{:04}",
+        nano / 1_000_000_000,
+        nano % 1_000_000_000 / 100_000
+    )
+}
+
+/// The month's estimate for this device. With sessions still without a price, the sum is a floor.
+pub fn usage_text(u: &crate::api::UsageView) -> String {
+    let month = &u.month[..7];
+    let sum = dollars(u.estimated_nano_usd);
+    let text = match (u.unpriced, u.sessions) {
+        (0, 1) => format!("{sum} in {month}, 1 session"),
+        (0, n) => format!("{sum} in {month}, {n} sessions"),
+        (unpriced, n) => format!("at least {sum} in {month}, {unpriced} of {n} sessions unpriced"),
+    };
+    fit(&text, 60)
+}
+
 fn device_lines(st: Style, r: &Remote, now: Iso, warnings: &mut Vec<String>) -> Vec<String> {
     let view = r.view;
     let mut out = vec![row("Organization", &fit(&view.organization_name, 60))];
@@ -130,6 +151,9 @@ fn device_lines(st: Style, r: &Remote, now: Iso, warnings: &mut Vec<String>) -> 
         ),
     ));
     out.push(row("Server", &format!("{} {}", st.ok(), fit(r.server, 56))));
+    if let Some(usage) = &view.usage {
+        out.push(row("Estimated", &usage_text(usage)));
+    }
     if view.device.key_fingerprint != r.local_fingerprint {
         warnings.push(format!(
             "This device's key is {}, not the one the server has ({}). Run `spendbranch login`.",
