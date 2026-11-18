@@ -200,6 +200,48 @@ fn a_repeated_key_keeps_the_first_and_odd_numbers_and_times_are_dropped() {
 }
 
 #[test]
+fn the_first_of_a_repeated_key_decides_even_when_it_does_not_pass() {
+    let f = otlp::lenient(&payload(vec![record(
+        "api_request",
+        json!([
+            {"key": "input_tokens", "value": {"intValue": "-5"}},
+            {"key": "input_tokens", "value": {"intValue": "999"}},
+            {"key": "output_tokens", "value": {"intValue": "3"}},
+        ]),
+    )]));
+    let attrs = f.payload["resourceLogs"][0]["scopeLogs"][0]["logRecords"][0]["attributes"]
+        .as_array()
+        .unwrap()
+        .clone();
+    assert_eq!(attrs.len(), 1, "{attrs:?}");
+    assert_eq!(attrs[0]["key"], "output_tokens");
+}
+
+#[test]
+fn a_counter_with_more_than_one_kind_of_value_is_never_forwarded() {
+    let f = otlp::lenient(&payload(vec![record(
+        "api_request",
+        json!([
+            {"key": "input_tokens", "value": {"intValue": "7", "boolValue": true}},
+            {"key": "output_tokens", "value": {"stringValue": "5", "intValue": "7"}},
+            {"key": "model", "value": {"stringValue": "claude-test-1", "doubleValue": 1.5}},
+            {"key": "cache_read_tokens", "value": {"intValue": "4"}},
+        ]),
+    )]));
+    let keys: Vec<_> = f.payload["resourceLogs"][0]["scopeLogs"][0]["logRecords"][0]["attributes"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|a| a["key"].as_str().unwrap().to_owned())
+        .collect();
+    assert_eq!(
+        keys,
+        ["model", "cache_read_tokens"],
+        "a text key keeps its stringValue"
+    );
+}
+
+#[test]
 fn only_the_first_2000_records_are_read() {
     let many: Vec<Value> = (0..2005)
         .map(|_| record("api_request", json!([])))

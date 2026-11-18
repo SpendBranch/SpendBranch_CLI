@@ -56,13 +56,18 @@ const COUNTERS: [&str; 5] = [
     "cache_creation_1h_tokens",
 ];
 
-/// A whole number from 0 to the contract's ceiling for a counter; anything else is not a count
-/// and never leaves the machine.
+/// A whole number the contract can count (`Count`: from 0 to its ceiling); anything else is not a
+/// count and never leaves the machine.
 fn fits_counter(n: i128) -> bool {
-    (0..=i128::from(crate::contract::MAX_TOKENS_PER_COUNTER)).contains(&n)
+    u64::try_from(n)
+        .ok()
+        .and_then(crate::contract::Count::new)
+        .is_some()
 }
 
-fn is_int_text(s: &str) -> bool {
+/// A counter written as text: digits, an optional leading `-`, and a value `fits_counter` takes
+/// (so `"-0"` passes as zero and any other negative does not).
+fn is_counter_text(s: &str) -> bool {
     let digits = s.strip_prefix('-').unwrap_or(s);
     (1..=19).contains(&digits.len())
         && digits.bytes().all(|b| b.is_ascii_digit())
@@ -70,12 +75,28 @@ fn is_int_text(s: &str) -> bool {
 }
 
 /// An attribute's value, as far as the filter looks at it: the last `stringValue` (when it is
-/// text) and the last `intValue` (whatever it is). Anything else in it is skipped unread.
+/// text), the last `intValue` (whatever it is) and which kinds of value it named. Anything else
+/// in it is skipped unread.
 #[derive(Default)]
 struct Lite {
     string: Option<String>,
     int: Option<Int>,
+    /// One bit per entry of `VALUE_KINDS` the value named.
+    kinds: u8,
 }
+
+/// The fields of an OTLP `AnyValue`: a value names one. A counter that names more is ambiguous
+/// (the server reads `stringValue`, then `boolValue` and `doubleValue`, before `intValue`) and
+/// never passes; a text key keeps its `stringValue`, which the server also reads first.
+const VALUE_KINDS: [&str; 7] = [
+    "stringValue",
+    "boolValue",
+    "intValue",
+    "doubleValue",
+    "arrayValue",
+    "kvlistValue",
+    "bytesValue",
+];
 
 /// An `intValue`: text, a whole number, or something else (which never passes).
 enum Int {
@@ -91,8 +112,11 @@ fn clean_value(key: &str, value: &Lite) -> Option<Value> {
     use crate::contract::{AccountRef, ExternalId, Model};
     let mut out = Map::new();
     if COUNTERS.contains(&key) {
+        if value.kinds.count_ones() > 1 {
+            return None;
+        }
         let (name, kept) = match (&value.int, &value.string) {
-            (Some(Int::Text(s)), _) if is_int_text(s) => ("intValue", Value::String(s.clone())),
+            (Some(Int::Text(s)), _) if is_counter_text(s) => ("intValue", Value::String(s.clone())),
             (Some(Int::Whole(n)), _) => {
                 let whole = n.as_i64().map(i128::from).or(n.as_u64().map(i128::from));
                 if !whole.is_some_and(fits_counter) {
@@ -101,7 +125,7 @@ fn clean_value(key: &str, value: &Lite) -> Option<Value> {
                 ("intValue", Value::Number(n.clone()))
             }
             (Some(_), _) => return None,
-            (None, Some(s)) if is_int_text(s) => ("stringValue", Value::String(s.clone())),
+            (None, Some(s)) if is_counter_text(s) => ("stringValue", Value::String(s.clone())),
             (None, _) => return None,
         };
         out.insert(name.into(), kept);
@@ -138,8 +162,8 @@ struct Record {
     /// The body's `stringValue`.
     body: Option<String>,
     time: Option<Value>,
-    /// The declared attributes that passed, first of each key only.
-    kept: Vec<(&'static str, Value)>,
+    /// The first of each declared key, with its value only when it passed.
+    kept: Vec<(&'static str, Option<Value>)>,
 }
 
 impl Record {
@@ -159,11 +183,9 @@ impl Record {
             return;
         };
         if self.kept.iter().any(|(k, _)| *k == known) {
-            return; // the first of a repeated key is the one that counts
+            return; // the first of a repeated key decides, even when it did not pass
         }
-        if let Some(v) = clean_value(known, value) {
-            self.kept.push((known, v));
-        }
+        self.kept.push((known, clean_value(known, value)));
     }
 
     fn rebuilt(self, name: &str) -> Value {
@@ -175,7 +197,7 @@ impl Record {
         let attributes = self
             .kept
             .into_iter()
-            .map(|(k, v)| serde_json::json!({ "key": k, "value": v }))
+            .filter_map(|(k, v)| Some(serde_json::json!({ "key": k, "value": v? })))
             .collect();
         out.insert("attributes".into(), Value::Array(attributes));
         Value::Object(out)
@@ -512,6 +534,9 @@ impl<'de> de::Deserialize<'de> for LiteSeed {
             fn visit_map<A: MapAccess<'de>>(self, mut map: A) -> Result<LiteSeed, A::Error> {
                 let mut lite = Lite::default();
                 while let Some(key) = map.next_key::<String>()? {
+                    if let Some(i) = VALUE_KINDS.iter().position(|k| *k == key) {
+                        lite.kinds |= 1 << i;
+                    }
                     match key.as_str() {
                         "stringValue" => lite.string = map.next_value::<Text>()?.0,
                         "intValue" => lite.int = Some(map.next_value::<Int>()?),
