@@ -21,7 +21,7 @@ fn serve_once(
         .with_no_client_auth()
         .with_single_cert(
             vec![cert.cert.der().clone()],
-            PrivateKeyDer::Pkcs8(cert.key_pair.serialize_der().into()),
+            PrivateKeyDer::Pkcs8(cert.signing_key.serialize_der().into()),
         )
         .unwrap();
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
