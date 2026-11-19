@@ -497,7 +497,7 @@ fn status(s: &State, id: &str) -> Reply {
             },
             "sources": s.sources,
             "collection": if s.collection.is_empty() { collection(s) } else { s.collection.clone() },
-            "usage": { "month": "2026-11-01", "sessions": 2, "unpriced": 1, "estimatedNanoUsd": 200000 }
+            "usage": { "month": "2026-11-01", "sessions": 2, "unpriced": 1, "estimatedNanoUsd": "200000" }
         }),
     )
 }

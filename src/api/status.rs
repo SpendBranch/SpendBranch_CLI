@@ -37,7 +37,8 @@ struct RawUsage {
     month: String,
     sessions: i64,
     unpriced: i64,
-    estimated_nano_usd: i64,
+    /// Decimal text: the API sends nano-USD as a string, since a sum can pass 2^53.
+    estimated_nano_usd: String,
 }
 
 #[derive(Clone, Debug, Deserialize)]
@@ -230,8 +231,8 @@ fn collection_view(c: RawCollection) -> Option<Option<CollectionView>> {
     }))
 }
 
-/// `None` if the usage is malformed: a month that is not `YYYY-MM-01`, a negative count or sum, or
-/// more sessions without a price than sessions.
+/// `None` if the usage is malformed: a month that is not `YYYY-MM-01`, a negative count, a sum that
+/// is not plain decimal digits within `u64`, or more sessions without a price than sessions.
 fn usage_view(u: RawUsage) -> Option<UsageView> {
     let month_ok = u.month.len() == 10
         && u.month.ends_with("-01")
@@ -251,8 +252,15 @@ fn usage_view(u: RawUsage) -> Option<UsageView> {
         month: u.month,
         sessions,
         unpriced,
-        estimated_nano_usd: u64::try_from(u.estimated_nano_usd).ok()?,
+        estimated_nano_usd: decimal(&u.estimated_nano_usd)?,
     })
+}
+
+fn decimal(text: &str) -> Option<u64> {
+    if text.is_empty() || !text.bytes().all(|b| b.is_ascii_digit()) {
+        return None;
+    }
+    text.parse().ok()
 }
 
 impl CliStatus {

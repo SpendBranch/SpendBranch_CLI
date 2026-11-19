@@ -353,7 +353,7 @@ fn status_with(usage: &str) -> Option<StatusView> {
 #[test]
 fn the_usage_of_the_month_is_read_and_a_server_without_it_still_answers() {
     let view = status_with(
-        r#","usage":{"month":"2026-11-01","sessions":3,"unpriced":1,"estimatedNanoUsd":400000}"#,
+        r#","usage":{"month":"2026-11-01","sessions":3,"unpriced":1,"estimatedNanoUsd":"400000"}"#,
     )
     .unwrap();
     assert_eq!(
@@ -369,13 +369,29 @@ fn the_usage_of_the_month_is_read_and_a_server_without_it_still_answers() {
 }
 
 #[test]
+fn the_estimated_usage_is_decimal_text_beyond_two_to_the_53() {
+    let view = status_with(
+        r#","usage":{"month":"2026-11-01","sessions":1,"unpriced":0,"estimatedNanoUsd":"9007199254740993"}"#,
+    )
+    .unwrap();
+    assert_eq!(
+        view.usage.unwrap().estimated_nano_usd,
+        9_007_199_254_740_993
+    );
+}
+
+#[test]
 fn a_malformed_usage_refuses_the_answer() {
     for usage in [
-        r#","usage":{"month":"2026-11-15","sessions":1,"unpriced":0,"estimatedNanoUsd":1}"#,
-        r#","usage":{"month":"Nov 2026","sessions":1,"unpriced":0,"estimatedNanoUsd":1}"#,
-        r#","usage":{"month":"2026-11-01","sessions":1,"unpriced":2,"estimatedNanoUsd":1}"#,
-        r#","usage":{"month":"2026-11-01","sessions":-1,"unpriced":0,"estimatedNanoUsd":1}"#,
-        r#","usage":{"month":"2026-11-01","sessions":1,"unpriced":0,"estimatedNanoUsd":-1}"#,
+        r#","usage":{"month":"2026-11-15","sessions":1,"unpriced":0,"estimatedNanoUsd":"1"}"#,
+        r#","usage":{"month":"Nov 2026","sessions":1,"unpriced":0,"estimatedNanoUsd":"1"}"#,
+        r#","usage":{"month":"2026-11-01","sessions":1,"unpriced":2,"estimatedNanoUsd":"1"}"#,
+        r#","usage":{"month":"2026-11-01","sessions":-1,"unpriced":0,"estimatedNanoUsd":"1"}"#,
+        r#","usage":{"month":"2026-11-01","sessions":1,"unpriced":0,"estimatedNanoUsd":"-1"}"#,
+        r#","usage":{"month":"2026-11-01","sessions":1,"unpriced":0,"estimatedNanoUsd":"1.5"}"#,
+        r#","usage":{"month":"2026-11-01","sessions":1,"unpriced":0,"estimatedNanoUsd":"+1"}"#,
+        r#","usage":{"month":"2026-11-01","sessions":1,"unpriced":0,"estimatedNanoUsd":""}"#,
+        r#","usage":{"month":"2026-11-01","sessions":1,"unpriced":0,"estimatedNanoUsd":"18446744073709551616"}"#,
     ] {
         assert_eq!(status_with(usage), None, "{usage}");
     }
