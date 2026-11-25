@@ -342,6 +342,51 @@ pub fn apply_results(items: &[Item], results: &[ItemOutcome], now_ms: i64) -> Ap
     applied
 }
 
+/// How long the answer to "what did the company authorize" is reused before it is asked again.
+pub const GRANTS_KEEP_MS: i64 = 10 * 60 * 1000;
+
+/// The refusals of an item that say the answer this device went by is out of date.
+pub const GRANT_CODES: [&str; 3] = [
+    "COLLECTION_NOT_AUTHORIZED",
+    "FIELDS_NOT_AUTHORIZED",
+    "BEFORE_COLLECTION_WINDOW",
+];
+
+/// Whether an answer saved at `saved_ms` can still be used at `now_ms`. One saved in the future
+/// (the clock went back) cannot.
+pub fn grants_fresh(saved_ms: i64, now_ms: i64) -> bool {
+    (0..GRANTS_KEEP_MS).contains(&(now_ms - saved_ms))
+}
+
+fn grant_refusal(result: &ItemOutcome) -> bool {
+    matches!(result, ItemOutcome::Rejected(code) if GRANT_CODES.contains(&code.as_str()))
+}
+
+/// Whether the server refused an item over what the company authorized.
+pub fn grant_refused(results: &[ItemOutcome]) -> bool {
+    results.iter().any(grant_refusal)
+}
+
+/// The batch went out on a reused answer: what the server refused over the authorization stays
+/// in the buffer and is not counted, to be tried again on a fresh answer.
+pub fn spare_grant_refusals(items: &[Item], results: &[ItemOutcome], applied: &mut Applied) {
+    for (item, result) in items.iter().zip(results) {
+        let ItemOutcome::Rejected(code) = result else {
+            continue;
+        };
+        if !grant_refusal(result) {
+            continue;
+        }
+        applied.delete.retain(|id| *id != item.id);
+        if let Some(n) = applied.rejected.get_mut(code) {
+            *n -= 1;
+            if *n == 0 {
+                applied.rejected.remove(code);
+            }
+        }
+    }
+}
+
 /// An item from before the start of the authorized window is not sent: the server would only
 /// refuse it.
 pub fn before_window(item: &Item, window_start: Iso) -> bool {

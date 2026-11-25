@@ -15,7 +15,7 @@ use std::{
     time::{Duration, Instant},
 };
 
-pub use outbox::{Batch, Change, Queued};
+pub use outbox::{Batch, Change, GRANTS, Queued};
 pub use reads::{Commit, SpoolLimits};
 
 #[derive(Debug)]

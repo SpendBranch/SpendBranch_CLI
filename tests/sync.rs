@@ -1133,3 +1133,168 @@ fn the_status_shows_what_the_server_has_seen_and_the_gaps_still_open() {
             .contains("observed until 2026-11-12T09:00:00")
     );
 }
+
+fn status_calls(rig: &Rig) -> usize {
+    rig.paths_seen()
+        .iter()
+        .filter(|p| *p == "/api/cli/v1/status")
+        .count()
+}
+
+#[test]
+fn what_the_company_authorized_is_asked_once_per_ten_minutes_and_status_always_asks() {
+    let rig = Rig::ready();
+    rig.buffer(now_ms(), events(1));
+    let before = status_calls(&rig);
+    assert_eq!(rig.run(&["sync"]).code, 0);
+    assert_eq!(status_calls(&rig), before + 1);
+    rig.buffer(
+        now_ms(),
+        vec![observation("codex", "s1", "later", &at_now())],
+    );
+    let out = rig.run(&["sync"]);
+    assert!(
+        out.text.contains("Uploaded 1 usage events."),
+        "{}",
+        out.text
+    );
+    assert_eq!(
+        status_calls(&rig),
+        before + 1,
+        "the second sync reuses the answer"
+    );
+    assert_eq!(rig.run(&["status"]).code, 0);
+    assert_eq!(status_calls(&rig), before + 2, "`status` always asks");
+    // ten minutes later it is asked again
+    let saved: serde_json::Value =
+        serde_json::from_str(&rig.sync_state("grantsView").unwrap()).unwrap();
+    let mut old = saved.clone();
+    old["at"] = json!(saved["at"].as_i64().unwrap() - 10 * 60_000);
+    rig.store()
+        .sync_set("grantsView", &old.to_string())
+        .unwrap();
+    rig.buffer(
+        now_ms(),
+        vec![observation("codex", "s1", "much-later", &at_now())],
+    );
+    assert_eq!(rig.run(&["sync"]).code, 0);
+    assert_eq!(status_calls(&rig), before + 3);
+}
+
+#[test]
+fn a_refusal_over_the_authorization_asks_again_and_keeps_what_a_reused_answer_sent() {
+    let rig = Rig::ready();
+    rig.buffer(now_ms(), events(1));
+    assert_eq!(rig.run(&["sync"]).code, 0);
+    // The company turns Codex off; the answer this device keeps still says it is on.
+    rig.server.configure(|s| {
+        s.sources.retain(|x| x["source"] != "codex");
+        s.ingest
+            .reject
+            .insert("late".into(), "COLLECTION_NOT_AUTHORIZED".into());
+    });
+    rig.buffer(
+        now_ms(),
+        vec![observation("codex", "s1", "late", &at_now())],
+    );
+    let before = status_calls(&rig);
+    let out = rig.run(&["sync"]);
+    assert_eq!(out.code, 0, "{}", out.text);
+    assert_eq!(
+        status_calls(&rig),
+        before + 1,
+        "asked again after the refusal"
+    );
+    assert!(
+        out.text.contains("1 Codex items stay in the buffer"),
+        "{}",
+        out.text
+    );
+    assert_eq!(rig.buffered(), 1, "kept: the answer it went out on was old");
+    assert!(rig.store().rejected_counts().unwrap().is_empty());
+}
+
+#[test]
+fn a_refusal_on_a_fresh_answer_counts_and_the_next_sync_asks_again() {
+    let rig = Rig::ready();
+    rig.buffer(now_ms(), vec![observation("codex", "s1", "odd", &at_now())]);
+    rig.server.configure(|s| {
+        s.ingest
+            .reject
+            .insert("odd".into(), "FIELDS_NOT_AUTHORIZED".into());
+    });
+    assert_eq!(rig.run(&["sync"]).code, 0);
+    assert_eq!(rig.buffered(), 0);
+    assert_eq!(
+        rig.store().rejected_counts().unwrap(),
+        [("FIELDS_NOT_AUTHORIZED".into(), 1)]
+    );
+    assert_eq!(
+        rig.sync_state("grantsView"),
+        None,
+        "the answer is forgotten"
+    );
+    rig.buffer(now_ms(), events(1));
+    let before = status_calls(&rig);
+    assert_eq!(rig.run(&["sync"]).code, 0);
+    assert_eq!(status_calls(&rig), before + 1);
+}
+
+#[test]
+fn a_reused_answer_never_drops_an_item_as_before_the_window() {
+    let rig = Rig::ready();
+    rig.buffer(now_ms(), events(1));
+    assert_eq!(rig.run(&["sync"]).code, 0);
+    // The window moved back since: the old answer would call this item too early.
+    rig.server.configure(|s| {
+        for source in &mut s.sources {
+            source["windowStart"] = json!("2026-10-01T00:00:00Z");
+        }
+    });
+    rig.buffer(
+        now_ms(),
+        vec![observation(
+            "codex",
+            "s1",
+            "october",
+            "2026-10-15T10:00:00.000Z",
+        )],
+    );
+    let out = rig.run(&["sync"]);
+    assert_eq!(out.code, 0, "{}", out.text);
+    assert!(
+        out.text.contains("Uploaded 1 usage events."),
+        "{}",
+        out.text
+    );
+    assert!(rig.store().rejected_counts().unwrap().is_empty());
+}
+
+#[test]
+fn turning_a_source_on_or_off_or_signing_in_or_out_forgets_the_answer() {
+    let rig = Rig::ready();
+    let kept = |rig: &Rig| rig.sync_state("grantsView").is_some();
+    let sync = |rig: &Rig| {
+        rig.buffer(
+            now_ms(),
+            vec![observation(
+                "codex",
+                "s1",
+                &format!("e{}", now_ms()),
+                &at_now(),
+            )],
+        );
+        assert_eq!(rig.run(&["sync"]).code, 0);
+        assert!(kept(rig));
+    };
+    for step in [
+        &["disable", "codex"][..],
+        &["enable", "codex"][..],
+        &["login"][..],
+        &["logout"][..],
+    ] {
+        sync(&rig);
+        rig.run(step);
+        assert!(!kept(&rig), "{step:?}");
+    }
+}

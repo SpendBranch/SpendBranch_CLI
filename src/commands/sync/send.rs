@@ -8,7 +8,7 @@ use crate::cli::{VERSION, messages as m};
 use crate::contract::{CoverageReport, Iso};
 use crate::infra::{
     http::{Client, Signer},
-    store::{Change, Queued, Store},
+    store::{Change, GRANTS, Queued, Store},
 };
 use crate::sync::{self as rules, Failed, Narrow, TRIES_PER_RUN, Unpacked};
 use std::collections::BTreeMap;
@@ -78,6 +78,8 @@ fn with_retries<T>(
 
 /// The run stops here, the buffer stays, and the reason is kept for `status`.
 fn stop(ctx: &mut Ctx, store: &Store, f: &ApiFailure) -> Result<Option<i32>> {
+    // Whatever stopped it may be a change in what the company authorized: the next run asks.
+    store.forget_grants()?;
     if crate::api::is_plain_code(&f.code) {
         store.sync_set("lastError", &f.code)?;
     }
@@ -88,23 +90,30 @@ fn stop(ctx: &mut Ctx, store: &Store, f: &ApiFailure) -> Result<Option<i32>> {
 struct Granted {
     window: BTreeMap<&'static str, Iso>,
     active: Vec<&'static str>,
+    /// Asked in this run. A reused answer never removes anything: what it would remove is
+    /// asked again first.
+    fresh: bool,
 }
 
 /// Nothing outside it leaves the machine; what a source not granted holds stays in the buffer.
-fn granted(store: &Store, view: &StatusView, tally: &mut Tally) -> Result<Granted> {
+/// `active`: the sources on, and the start of each one's window.
+fn granted(
+    store: &Store,
+    active: &BTreeMap<&'static str, Option<Iso>>,
+    fresh: bool,
+    tally: &mut Tally,
+) -> Result<Granted> {
     let mut granted = Granted {
         window: BTreeMap::new(),
         active: Vec::new(),
+        fresh,
     };
+    tally.held.clear();
     for source in BOTH {
-        let found = view
-            .sources
-            .iter()
-            .find(|s| s.source == source && s.state == SourceState::Active);
-        if let Some(s) = found {
+        if let Some(window) = active.get(source.name()) {
             granted.active.push(source.name());
-            if let Some(w) = s.window_start {
-                granted.window.insert(source.name(), w);
+            if let Some(w) = window {
+                granted.window.insert(source.name(), *w);
             }
         } else {
             let held = store.queued_count(source.name())?;
@@ -116,6 +125,71 @@ fn granted(store: &Store, view: &StatusView, tally: &mut Tally) -> Result<Grante
     Ok(granted)
 }
 
+/// Asks the server what the company authorizes, and keeps the answer for the next runs.
+/// `Err` is the exit code of a run that ends here.
+fn ask(
+    ctx: &mut Ctx,
+    store: &Store,
+    c: &Connection,
+    tally: &mut Tally,
+) -> Result<std::result::Result<Granted, Option<i32>>> {
+    let view = match with_retries(ctx, store, || status_of(c), &mut |_| Ok(false))? {
+        Ok(v) => v,
+        Err(Final::Deferred) => return Ok(Err(Some(1))),
+        Err(Final::Failure(f) | Final::Narrow(f)) => return Ok(Err(stop(ctx, store, &f)?)),
+    };
+    let active = active_of(&view);
+    let saved = serde_json::json!({
+        "at": ms(),
+        "sources": active.iter().map(|(k, w)| (*k, w.map(|w| w.to_string()))).collect::<BTreeMap<_, _>>(),
+    });
+    store.sync_set(GRANTS, &saved.to_string())?;
+    Ok(Ok(granted(store, &active, true, tally)?))
+}
+
+fn active_of(view: &StatusView) -> BTreeMap<&'static str, Option<Iso>> {
+    BOTH.into_iter()
+        .filter_map(|source| {
+            view.sources
+                .iter()
+                .find(|s| s.source == source && s.state == SourceState::Active)
+                .map(|s| (source.name(), s.window_start))
+        })
+        .collect()
+}
+
+/// The answer kept from a recent run, when there is one young enough.
+fn reused(store: &Store, tally: &mut Tally) -> Result<Option<Granted>> {
+    let Some(saved) = store
+        .sync_get(GRANTS)?
+        .and_then(|t| serde_json::from_str::<serde_json::Value>(&t).ok())
+    else {
+        return Ok(None);
+    };
+    let at = saved["at"].as_i64().unwrap_or(i64::MIN);
+    let Some(sources) = saved["sources"]
+        .as_object()
+        .filter(|_| rules::grants_fresh(at, ms()))
+    else {
+        return Ok(None);
+    };
+    let mut active = BTreeMap::new();
+    for (name, window) in sources {
+        let Some(source) = BOTH.into_iter().find(|s| s.name() == name) else {
+            return Ok(None);
+        };
+        let window = match window.as_str() {
+            Some(t) => match Iso::parse(t) {
+                Some(w) => Some(w),
+                None => return Ok(None),
+            },
+            None => None,
+        };
+        active.insert(source.name(), window);
+    }
+    Ok(Some(granted(store, &active, false, tally)?))
+}
+
 /// The next batch, after the housekeeping that needs no answer from the server.
 struct Next {
     items: Vec<rules::Item>,
@@ -125,6 +199,9 @@ struct Next {
     packed: std::result::Result<rules::Packed, Unpacked>,
     /// Rows left the buffer without being sent.
     removed: bool,
+    /// The answer in use is reused and would remove items as before the window: nothing was
+    /// done, and the server is to be asked first.
+    stale: bool,
 }
 
 /// Reads the oldest rows, drops what is broken or from before the collection window (counted,
@@ -150,6 +227,15 @@ fn next_batch(
         ..Change::default()
     };
     let mut broken = invalid.len() as u64;
+    if !granted.fresh && items.iter().any(|i| before(i, granted)) {
+        return Ok(Next {
+            items: Vec::new(),
+            reports: Vec::new(),
+            packed: Err(Unpacked::Nothing),
+            removed: false,
+            stale: true,
+        });
+    }
     let early = drop_before_window(&mut items, granted, &mut local);
     let mut limit = rules::Strikes::limit(strikes, items.first().map(|i| i.id), max_items);
     if limit == 0 && reports.is_empty() {
@@ -180,7 +266,15 @@ fn next_batch(
         reports,
         packed,
         removed,
+        stale: false,
     })
+}
+
+fn before(item: &rules::Item, granted: &Granted) -> bool {
+    granted
+        .window
+        .get(item.observation.source.name())
+        .is_some_and(|w| rules::before_window(item, *w))
 }
 
 /// What is from before its source's collection window is never sent: it is taken out of the
@@ -188,11 +282,7 @@ fn next_batch(
 fn drop_before_window(items: &mut Vec<rules::Item>, granted: &Granted, local: &mut Change) -> u64 {
     let mut early = 0;
     items.retain(|item| {
-        let name = item.observation.source.name();
-        let before = granted
-            .window
-            .get(name)
-            .is_some_and(|w| rules::before_window(item, *w));
+        let before = before(item, granted);
         if before {
             local.remove_items.push(item.id);
             early += 1;
@@ -357,6 +447,7 @@ fn record(
 /// What one upload run holds on to while it goes batch by batch.
 struct Run<'a> {
     granted: Granted,
+    connection: &'a Connection,
     installation: uuid::Uuid,
     signer: Signer<'a>,
     client: Client,
@@ -414,14 +505,17 @@ pub(super) fn upload(
     else {
         return say(ctx, m::BAD_INSTALLATION_ID, 1).map(Some);
     };
-    // What the company authorized now, and from when.
-    let view = match with_retries(ctx, store, || status_of(c), &mut |_| Ok(false))? {
-        Ok(v) => v,
-        Err(Final::Deferred) => return Ok(Some(1)),
-        Err(Final::Failure(f) | Final::Narrow(f)) => return stop(ctx, store, &f),
+    // What the company authorized now, and from when: asked, or reused for a few minutes.
+    let granted = match reused(store, tally)? {
+        Some(g) => g,
+        None => match ask(ctx, store, c, tally)? {
+            Ok(g) => g,
+            Err(code) => return Ok(code),
+        },
     };
-    let run = Run {
-        granted: granted(store, &view, tally)?,
+    let mut run = Run {
+        granted,
+        connection: c,
         installation,
         signer: Signer {
             device: &c.device,
@@ -434,7 +528,7 @@ pub(super) fn upload(
     // Every pass removes or sends something, so this is never reached; it is a stop for a
     // process that holds the lock if that ever stops being true.
     for _ in 0..MAX_PASSES {
-        match pass(ctx, store, tally, &run, &mut max_items)? {
+        match pass(ctx, store, tally, &mut run, &mut max_items)? {
             Pass::Next => {}
             Pass::Done(code) => return Ok(code),
         }
@@ -447,7 +541,7 @@ fn pass(
     ctx: &mut Ctx,
     store: &mut Store,
     tally: &mut Tally,
-    run: &Run,
+    run: &mut Run,
     max_items: &mut usize,
 ) -> Result<Pass> {
     let strikes = store
@@ -462,6 +556,9 @@ fn pass(
         strikes,
         tally,
     )?;
+    if next.stale {
+        return refresh(ctx, store, tally, run);
+    }
     let packed = match next.packed {
         Ok(packed) => packed,
         // Not the fault of any observation: the run stops and the buffer stays.
@@ -526,7 +623,14 @@ fn pass(
             &ApiFailure::bad_response(200),
         )?));
     };
-    let applied = rules::apply_results(sent().items, &outcomes, ms());
+    let mut applied = rules::apply_results(sent().items, &outcomes, ms());
+    let out_of_date = rules::grant_refused(&outcomes);
+    if out_of_date {
+        store.forget_grants()?;
+        if !run.granted.fresh {
+            rules::spare_grant_refusals(sent().items, &outcomes, &mut applied);
+        }
+    }
     record(store, tally, sent(), &applied)?;
     // Whatever was cut down to get this batch through (the coverage alone, a half after a
     // refusal) was about this batch: the next one starts full again.
@@ -536,5 +640,19 @@ fn pass(
         summary(ctx, tally)?;
         return Ok(Pass::Done(say(ctx, m::SESSION_OWNED_STOP, 1).map(Some)?));
     }
+    if out_of_date && !run.granted.fresh {
+        return refresh(ctx, store, tally, run);
+    }
     Ok(Pass::Next)
+}
+
+/// The reused answer is out of date: ask the server, and go on with what it says.
+fn refresh(ctx: &mut Ctx, store: &Store, tally: &mut Tally, run: &mut Run) -> Result<Pass> {
+    Ok(match ask(ctx, store, run.connection, tally)? {
+        Ok(granted) => {
+            run.granted = granted;
+            Pass::Next
+        }
+        Err(code) => Pass::Done(code),
+    })
 }

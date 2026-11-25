@@ -189,6 +189,7 @@ fn save(
     store.meta_set("org_id", &approval.organization_id)?;
     store.meta_set("org_name", &approval.organization_name)?;
     store.meta_set("expires_at", &approval.expires_at.to_string())?;
+    store.forget_grants()?;
     if account.keys.backend() == Backend::File {
         say(ctx, m::KEY_IN_FILE, 0)?;
     }

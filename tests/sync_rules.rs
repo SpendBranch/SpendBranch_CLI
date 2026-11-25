@@ -355,3 +355,32 @@ fn a_refused_read_is_a_gap_from_the_last_read_or_an_hour_ago_until_now() {
     let g = sync::full_gap(Source::Codex, None, Iso::from_millis(5).unwrap());
     assert!(g.from() < g.to());
 }
+
+#[test]
+fn a_saved_authorization_answer_is_reused_for_ten_minutes_and_never_from_the_future() {
+    let saved = 1_000_000;
+    assert!(sync::grants_fresh(saved, saved));
+    assert!(sync::grants_fresh(saved, saved + sync::GRANTS_KEEP_MS - 1));
+    assert!(!sync::grants_fresh(saved, saved + sync::GRANTS_KEEP_MS));
+    assert!(!sync::grants_fresh(saved, saved - 1), "the clock went back");
+}
+
+#[test]
+fn on_a_reused_answer_the_refusals_over_the_authorization_stay_and_are_not_counted() {
+    let all = items(4);
+    let outcomes = [
+        ItemOutcome::Accepted,
+        ItemOutcome::Rejected("COLLECTION_NOT_AUTHORIZED".into()),
+        ItemOutcome::Rejected("BEFORE_COLLECTION_WINDOW".into()),
+        ItemOutcome::Rejected("SESSION_OWNED".into()),
+    ];
+    assert!(sync::grant_refused(&outcomes));
+    assert!(!sync::grant_refused(&outcomes[3..]));
+    let mut applied = sync::apply_results(&all, &outcomes, 0);
+    sync::spare_grant_refusals(&all, &outcomes, &mut applied);
+    assert_eq!(applied.delete, [1, 4]);
+    assert_eq!(
+        applied.rejected.into_iter().collect::<Vec<_>>(),
+        [("SESSION_OWNED".to_owned(), 1)]
+    );
+}
