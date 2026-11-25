@@ -355,6 +355,22 @@ fn a_client_that_trickles_its_headers_gives_its_slot_back_within_seconds() {
 }
 
 #[test]
+#[cfg(target_os = "macos")]
+fn on_macos_a_client_of_this_user_is_recognised() {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let _client = TcpStream::connect(("127.0.0.1", port)).unwrap();
+    let (stream, peer) = listener.accept().unwrap();
+    let started = Instant::now();
+    assert!(relay_server::same_user(&stream, peer));
+    assert!(
+        started.elapsed() < Duration::from_secs(2),
+        "{:?}",
+        started.elapsed()
+    );
+}
+
+#[test]
 #[cfg(target_os = "linux")]
 fn another_account_is_closed_on_even_with_the_right_token() {
     // A second account: this user's subordinate ids, through a user namespace. Skipped where

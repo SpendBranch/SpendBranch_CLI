@@ -315,3 +315,27 @@ fn the_owner_of_the_clients_end_is_read_from_the_kernels_table() {
     );
     assert_eq!(relay::peer_uid("", lo(1), lo(2)), None);
 }
+
+#[test]
+fn the_owner_of_the_clients_end_is_read_from_lsof_on_macos() {
+    let lo = |port: u16| ([127, 0, 0, 1], port);
+    // `lsof -F pun`: a process (p), its user (u), then one name (n) per open socket. The relay's
+    // own end is listed too, the other way round.
+    let out = "p100\nu501\nf7\nn127.0.0.1:20817->127.0.0.1:52000\n\
+               p200\nu502\nf9\nn127.0.0.1:52001->127.0.0.1:20817\n\
+               p300\nu503\nf4\nn*:20817\nf5\nn127.0.0.1:52000->127.0.0.1:20817\n";
+    assert_eq!(relay::lsof_peer_uid(out, lo(52000), lo(20817)), Some(503));
+    assert_eq!(relay::lsof_peer_uid(out, lo(52001), lo(20817)), Some(502));
+    assert_eq!(
+        relay::lsof_peer_uid(out, lo(20817), lo(52000)),
+        Some(501),
+        "only the exact direction matches"
+    );
+    assert_eq!(relay::lsof_peer_uid(out, lo(52002), lo(20817)), None);
+    assert_eq!(relay::lsof_peer_uid("", lo(1), lo(2)), None);
+    // A name with no user before it is not trusted.
+    assert_eq!(
+        relay::lsof_peer_uid("p1\nf1\nn127.0.0.1:1->127.0.0.1:2\n", lo(1), lo(2)),
+        None
+    );
+}

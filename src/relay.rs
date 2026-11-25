@@ -80,6 +80,26 @@ pub fn peer_uid(table: &str, peer: ([u8; 4], u16), us: ([u8; 4], u16)) -> Option
     })
 }
 
+/// Who owns the client's end of a loopback connection, read from macOS's `lsof -F pun`: the
+/// user (`u`) of the process (`p`) that lists a socket named `peer->us` (the client's end; the
+/// relay's own end is named the other way round). `None` when no such socket is listed, or it
+/// comes before any user.
+pub fn lsof_peer_uid(output: &str, peer: ([u8; 4], u16), us: ([u8; 4], u16)) -> Option<u32> {
+    let end =
+        |(ip, port): ([u8; 4], u16)| format!("{}.{}.{}.{}:{port}", ip[0], ip[1], ip[2], ip[3]);
+    let wanted = format!("{}->{}", end(peer), end(us));
+    let mut user = None;
+    for line in output.lines() {
+        match line.split_at_checked(1) {
+            Some(("p", _)) => user = None,
+            Some(("u", uid)) => user = uid.parse().ok(),
+            Some(("n", name)) if name == wanted => return user,
+            _ => {}
+        }
+    }
+    None
+}
+
 /// Equal in time that does not depend on where they differ.
 fn same(a: &str, b: &str) -> bool {
     a.len() == b.len() && a.bytes().zip(b.bytes()).fold(0, |d, (x, y)| d | (x ^ y)) == 0
