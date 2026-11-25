@@ -110,6 +110,9 @@ pub struct Ingest {
     pub short_results: bool,
     /// Refuse bodies over this many bytes once decompressed (default 1 MiB).
     pub max_plain: Option<usize>,
+    /// Refuse the whole batch with (status, code) whenever it holds an observation with this
+    /// `externalEventId`: one bad item fails every batch it is in.
+    pub refuse_batch: HashMap<String, (u16, String)>,
 }
 
 /// What the person does in the browser, and when the server says so.
@@ -742,6 +745,13 @@ fn ingest(s: &mut State, req: &Seen, device: &str) -> Reply {
     });
     if !well_formed || !coverage_ok {
         return error(400, "VALIDATION_FAILED");
+    }
+    let marked = observations.iter().find_map(|o| {
+        let event = o["externalEventId"].as_str().unwrap_or("");
+        s.ingest.refuse_batch.get(event).cloned()
+    });
+    if let Some((status, code)) = marked {
+        return error(status, &code);
     }
     s.batches
         .push((observations.len(), coverage.len(), req.body.len()));

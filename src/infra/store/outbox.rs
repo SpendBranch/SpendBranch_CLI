@@ -32,7 +32,16 @@ pub struct Change {
     pub discard_session: Option<(String, String)>,
 }
 
+/// The `sync_state` key of the last answer to "what did the company authorize", reused for a
+/// few minutes by `sync`.
+pub const GRANTS: &str = "grantsView";
+
 impl Store {
+    /// Forgets the saved authorization answer: the next `sync` asks the server.
+    pub fn forget_grants(&self) -> Result<()> {
+        self.sync_delete(&[GRANTS])
+    }
+
     /// The oldest observations of the given sources with `id <= up_to`, at most `limit`.
     /// `up_to` keeps an item put back this run from being taken again in the same run.
     pub fn queued(&self, sources: &[&str], up_to: i64, limit: usize) -> Result<Vec<Queued>> {

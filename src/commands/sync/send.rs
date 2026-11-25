@@ -1,16 +1,16 @@
 //! The sending half of `sync`: batches, answers, retries and what each answer does to the buffer.
 use super::super::account::{Connection, now, status_of};
 use super::super::{Ctx, Result, say};
-use super::report::{dropped_batch, summary};
+use super::report::{dropped_item, summary};
 use super::{BOTH, INGEST, MAX_PASSES, Tally, ms, random};
 use crate::api::{ApiFailure, IngestResults, SourceState, StatusView};
 use crate::cli::{VERSION, messages as m};
 use crate::contract::{CoverageReport, Iso};
 use crate::infra::{
     http::{Client, Signer},
-    store::{Change, Queued, Store},
+    store::{Change, GRANTS, Queued, Store},
 };
-use crate::sync::{self as rules, Failed, TRIES_PER_RUN};
+use crate::sync::{self as rules, Failed, Narrow, TRIES_PER_RUN, Unpacked};
 use std::collections::BTreeMap;
 
 /// A call to the server, tried again while the trouble looks passing. `Err(Final)` is what is
@@ -20,17 +20,28 @@ enum Final {
     Failure(ApiFailure),
     /// Passing, but not this run: `nextAttemptAt` is saved and the message is on the screen.
     Deferred,
+    /// The server keeps failing (5xx) on this batch: it is narrowed instead of waited for.
+    Narrow(ApiFailure),
 }
 
+/// `strike` is told of each server error (5xx) and says whether the batch should be narrowed
+/// now instead of waited for.
 fn with_retries<T>(
     ctx: &mut Ctx,
     store: &Store,
     mut call: impl FnMut() -> std::result::Result<T, ApiFailure>,
+    strike: &mut dyn FnMut(&ApiFailure) -> Result<bool>,
 ) -> Result<std::result::Result<T, Final>> {
     let mut tries = 0;
     loop {
         match call() {
-            Ok(value) => return Ok(Ok(value)),
+            Ok(value) => {
+                // The server answered: whatever failed before is over, and the backoff starts again.
+                if store.sync_get("failures")?.is_some() {
+                    store.sync_delete(&["failures"])?;
+                }
+                return Ok(Ok(value));
+            }
             Err(f) if rules::classify(&f) == Failed::Transient => {
                 tries += 1;
                 let failures = store
@@ -39,6 +50,9 @@ fn with_retries<T>(
                     .unwrap_or(0)
                     .saturating_add(1);
                 store.sync_set("failures", &failures.to_string())?;
+                if f.status >= 500 && strike(&f)? {
+                    return Ok(Err(Final::Narrow(f)));
+                }
                 let wait = rules::wait_after(failures, &f, random());
                 if wait <= rules::MAX_SLEEP && tries < TRIES_PER_RUN {
                     (ctx.sleep)(wait);
@@ -64,6 +78,8 @@ fn with_retries<T>(
 
 /// The run stops here, the buffer stays, and the reason is kept for `status`.
 fn stop(ctx: &mut Ctx, store: &Store, f: &ApiFailure) -> Result<Option<i32>> {
+    // Whatever stopped it may be a change in what the company authorized: the next run asks.
+    store.forget_grants()?;
     if crate::api::is_plain_code(&f.code) {
         store.sync_set("lastError", &f.code)?;
     }
@@ -74,23 +90,30 @@ fn stop(ctx: &mut Ctx, store: &Store, f: &ApiFailure) -> Result<Option<i32>> {
 struct Granted {
     window: BTreeMap<&'static str, Iso>,
     active: Vec<&'static str>,
+    /// Asked in this run. A reused answer never removes anything: what it would remove is
+    /// asked again first.
+    fresh: bool,
 }
 
 /// Nothing outside it leaves the machine; what a source not granted holds stays in the buffer.
-fn granted(store: &Store, view: &StatusView, tally: &mut Tally) -> Result<Granted> {
+/// `active`: the sources on, and the start of each one's window.
+fn granted(
+    store: &Store,
+    active: &BTreeMap<&'static str, Option<Iso>>,
+    fresh: bool,
+    tally: &mut Tally,
+) -> Result<Granted> {
     let mut granted = Granted {
         window: BTreeMap::new(),
         active: Vec::new(),
+        fresh,
     };
+    tally.held.clear();
     for source in BOTH {
-        let found = view
-            .sources
-            .iter()
-            .find(|s| s.source == source && s.state == SourceState::Active);
-        if let Some(s) = found {
+        if let Some(window) = active.get(source.name()) {
             granted.active.push(source.name());
-            if let Some(w) = s.window_start {
-                granted.window.insert(source.name(), w);
+            if let Some(w) = window {
+                granted.window.insert(source.name(), *w);
             }
         } else {
             let held = store.queued_count(source.name())?;
@@ -102,14 +125,83 @@ fn granted(store: &Store, view: &StatusView, tally: &mut Tally) -> Result<Grante
     Ok(granted)
 }
 
+/// Asks the server what the company authorizes, and keeps the answer for the next runs.
+/// `Err` is the exit code of a run that ends here.
+fn ask(
+    ctx: &mut Ctx,
+    store: &Store,
+    c: &Connection,
+    tally: &mut Tally,
+) -> Result<std::result::Result<Granted, Option<i32>>> {
+    let view = match with_retries(ctx, store, || status_of(c), &mut |_| Ok(false))? {
+        Ok(v) => v,
+        Err(Final::Deferred) => return Ok(Err(Some(1))),
+        Err(Final::Failure(f) | Final::Narrow(f)) => return Ok(Err(stop(ctx, store, &f)?)),
+    };
+    let active = active_of(&view);
+    let saved = serde_json::json!({
+        "at": ms(),
+        "sources": active.iter().map(|(k, w)| (*k, w.map(|w| w.to_string()))).collect::<BTreeMap<_, _>>(),
+    });
+    store.sync_set(GRANTS, &saved.to_string())?;
+    Ok(Ok(granted(store, &active, true, tally)?))
+}
+
+fn active_of(view: &StatusView) -> BTreeMap<&'static str, Option<Iso>> {
+    BOTH.into_iter()
+        .filter_map(|source| {
+            view.sources
+                .iter()
+                .find(|s| s.source == source && s.state == SourceState::Active)
+                .map(|s| (source.name(), s.window_start))
+        })
+        .collect()
+}
+
+/// The answer kept from a recent run, when there is one young enough.
+fn reused(store: &Store, tally: &mut Tally) -> Result<Option<Granted>> {
+    let Some(saved) = store
+        .sync_get(GRANTS)?
+        .and_then(|t| serde_json::from_str::<serde_json::Value>(&t).ok())
+    else {
+        return Ok(None);
+    };
+    let at = saved["at"].as_i64().unwrap_or(i64::MIN);
+    let Some(sources) = saved["sources"]
+        .as_object()
+        .filter(|_| rules::grants_fresh(at, ms()))
+    else {
+        return Ok(None);
+    };
+    let mut active = BTreeMap::new();
+    for (name, window) in sources {
+        let Some(source) = BOTH.into_iter().find(|s| s.name() == name) else {
+            return Ok(None);
+        };
+        let window = match window.as_str() {
+            Some(t) => match Iso::parse(t) {
+                Some(w) => Some(w),
+                None => return Ok(None),
+            },
+            None => None,
+        };
+        active.insert(source.name(), window);
+    }
+    Ok(Some(granted(store, &active, false, tally)?))
+}
+
 /// The next batch, after the housekeeping that needs no answer from the server.
 struct Next {
     items: Vec<rules::Item>,
     reports: Vec<(i64, CoverageReport)>,
-    /// `None` when there is nothing to send (or one item alone is too big and was removed).
-    packed: Option<rules::Packed>,
+    /// `Err` when there is nothing to send (or one item alone is too big and was removed), or
+    /// no batch can be built.
+    packed: std::result::Result<rules::Packed, Unpacked>,
     /// Rows left the buffer without being sent.
     removed: bool,
+    /// The answer in use is reused and would remove items as before the window: nothing was
+    /// done, and the server is to be asked first.
+    stale: bool,
 }
 
 /// Reads the oldest rows, drops what is broken or from before the collection window (counted,
@@ -120,6 +212,7 @@ fn next_batch(
     installation: uuid::Uuid,
     end: i64,
     max_items: usize,
+    strikes: Option<rules::Strikes>,
     tally: &mut Tally,
 ) -> Result<Next> {
     let rows = store.queued(&granted.active, end, max_items)?;
@@ -134,9 +227,23 @@ fn next_batch(
         ..Change::default()
     };
     let mut broken = invalid.len() as u64;
+    if !granted.fresh && items.iter().any(|i| before(i, granted)) {
+        return Ok(Next {
+            items: Vec::new(),
+            reports: Vec::new(),
+            packed: Err(Unpacked::Nothing),
+            removed: false,
+            stale: true,
+        });
+    }
     let early = drop_before_window(&mut items, granted, &mut local);
-    let packed = rules::pack(installation, &items, &reports, max_items);
-    if packed.is_none() && !items.is_empty() {
+    let mut limit = rules::Strikes::limit(strikes, items.first().map(|i| i.id), max_items);
+    if limit == 0 && reports.is_empty() {
+        // The coverage that was to go alone is gone (sent, or its source no longer active).
+        limit = crate::contract::MAX_BATCH_OBSERVATIONS;
+    }
+    let packed = rules::pack(installation, &items, &reports, limit);
+    if packed.as_ref().err() == Some(&Unpacked::TooBig) && !items.is_empty() {
         // One observation alone is over the size limit: it can never be sent.
         local.remove_items.push(items[0].id);
         broken += 1;
@@ -159,7 +266,15 @@ fn next_batch(
         reports,
         packed,
         removed,
+        stale: false,
     })
+}
+
+fn before(item: &rules::Item, granted: &Granted) -> bool {
+    granted
+        .window
+        .get(item.observation.source.name())
+        .is_some_and(|w| rules::before_window(item, *w))
 }
 
 /// What is from before its source's collection window is never sent: it is taken out of the
@@ -167,11 +282,7 @@ fn next_batch(
 fn drop_before_window(items: &mut Vec<rules::Item>, granted: &Granted, local: &mut Change) -> u64 {
     let mut early = 0;
     items.retain(|item| {
-        let name = item.observation.source.name();
-        let before = granted
-            .window
-            .get(name)
-            .is_some_and(|w| rules::before_window(item, *w));
+        let before = before(item, granted);
         if before {
             local.remove_items.push(item.id);
             early += 1;
@@ -203,53 +314,89 @@ fn refused(
     sent: Sent,
     max_items: &mut usize,
 ) -> Result<Flow> {
-    match rules::classify(f) {
-        Failed::DropBatch => {
-            let n = sent.items.len() as u64;
-            tally.add("VALIDATION_FAILED", n);
+    // What is dropped once it is alone: an observation the server finds too big can never be
+    // sent; one it calls out of contract is the one that spoiled the batch.
+    let code = match rules::classify(f) {
+        Failed::OutOfContract => "VALIDATION_FAILED",
+        Failed::Split => "INVALID_LOCAL",
+        _ => return Ok(Flow::Stop(stop(ctx, store, f)?)),
+    };
+    let full = crate::contract::MAX_BATCH_OBSERVATIONS;
+    match rules::narrow(sent.items.len(), sent.coverage.len()) {
+        Narrow::CoverageAlone => *max_items = 0,
+        Narrow::Halve(n) => *max_items = n,
+        Narrow::DropItem => {
+            tally.add(code, 1);
             store.apply(&Change {
-                remove_items: sent.items.iter().map(|i| i.id).collect(),
-                remove_coverage: sent.coverage,
-                rejected: vec![("VALIDATION_FAILED".into(), n)],
+                remove_items: vec![sent.items[0].id],
+                rejected: vec![(code.into(), 1)],
                 ..Change::default()
             })?;
-            dropped_batch(ctx, store)?;
-            Ok(Flow::Again)
+            if code == "VALIDATION_FAILED" {
+                dropped_item(ctx, store)?;
+            }
+            *max_items = full;
         }
-        // The coverage may be what is too big: it goes alone first, so no event is blamed for it.
-        Failed::Split if !sent.items.is_empty() && !sent.coverage.is_empty() => {
-            *max_items = 0;
-            Ok(Flow::Again)
+        // Coverage alone the server refuses: it goes, or every run would fail on it again.
+        Narrow::DropCoverage => {
+            store.apply(&Change {
+                remove_coverage: sent.coverage,
+                ..Change::default()
+            })?;
+            *max_items = full;
         }
-        Failed::Split if sent.items.len() > 1 => {
-            *max_items = sent.items.len().div_ceil(2);
-            Ok(Flow::Again)
-        }
-        Failed::Split => {
-            // One observation the server finds too big: it can never be sent. With none, the
-            // coverage alone was too big: it goes, or every run would fail on it again.
-            let change = match sent.items.first() {
-                Some(item) => {
-                    tally.add("INVALID_LOCAL", 1);
-                    Change {
-                        remove_items: vec![item.id],
-                        rejected: vec![("INVALID_LOCAL".into(), 1)],
-                        ..Change::default()
-                    }
-                }
-                None => {
-                    *max_items = crate::contract::MAX_BATCH_OBSERVATIONS;
-                    Change {
-                        remove_coverage: sent.coverage,
-                        ..Change::default()
-                    }
-                }
-            };
-            store.apply(&change)?;
-            Ok(Flow::Again)
-        }
-        _ => Ok(Flow::Stop(stop(ctx, store, f)?)),
     }
+    Ok(Flow::Again)
+}
+
+/// The batch the server keeps failing on (`Strikes`, as text).
+const STRIKES: &str = "serverStrikes";
+/// The items the server kept failing on even alone, by `item_key`, with its code.
+const STUCK: &str = "stuckItems";
+
+/// The server failed on the batch again and again: it is narrowed like a refused one, but
+/// nothing is dropped. An item that fails alone goes back to the end of the queue, so the rest
+/// can go, and `status` says it is there.
+fn server_failing(
+    store: &mut Store,
+    tally: &mut Tally,
+    f: &ApiFailure,
+    sent: Sent,
+) -> Result<Pass> {
+    let Some(head) = sent.items.first() else {
+        return Ok(Pass::Done(Some(1)));
+    };
+    let narrowed = |size| rules::Strikes {
+        head: head.id,
+        size,
+        count: 0,
+    };
+    match rules::narrow(sent.items.len(), sent.coverage.len()) {
+        Narrow::CoverageAlone => store.sync_set(STRIKES, &narrowed(0).text())?,
+        Narrow::Halve(n) => store.sync_set(STRIKES, &narrowed(n).text())?,
+        Narrow::DropItem | Narrow::DropCoverage => {
+            store.apply(&Change {
+                requeue: vec![Queued {
+                    id: head.id,
+                    payload: head.payload.clone(),
+                    queued_at: head.queued_at,
+                }],
+                ..Change::default()
+            })?;
+            let code = if crate::api::is_plain_code(&f.code) {
+                f.code.as_str()
+            } else {
+                "UNAVAILABLE"
+            };
+            let stuck = store.sync_get(STUCK)?;
+            if let Some(list) = rules::stuck_add(stuck.as_deref(), rules::item_key(head), code) {
+                store.sync_set(STUCK, &list)?;
+            }
+            store.sync_delete(&[STRIKES])?;
+            tally.stuck += 1;
+        }
+    }
+    Ok(Pass::Next)
 }
 
 /// Applies the server's answer to the buffer and to the numbers of the run, in one transaction.
@@ -272,7 +419,7 @@ fn record(
     store.apply(&Change {
         remove_items: applied.delete.clone(),
         requeue,
-        remove_coverage: sent.coverage,
+        remove_coverage: sent.coverage.clone(),
         rejected: applied
             .rejected
             .iter()
@@ -285,7 +432,14 @@ fn record(
     }
     tally.accepted += applied.accepted;
     tally.sent_any = true;
-    store.sync_delete(&["failures", "nextAttemptAt", "lastError"])?;
+    store.sync_delete(&["failures", "nextAttemptAt", "lastError", STRIKES])?;
+    let stuck = store.sync_get(STUCK)?;
+    if stuck.is_some() {
+        match rules::stuck_remove(stuck.as_deref(), sent.items.iter().map(rules::item_key)) {
+            Some(left) => store.sync_set(STUCK, &left)?,
+            None => store.sync_delete(&[STUCK])?,
+        }
+    }
     store.sync_set("lastSentAt", &now().to_string())?;
     Ok(())
 }
@@ -293,6 +447,7 @@ fn record(
 /// What one upload run holds on to while it goes batch by batch.
 struct Run<'a> {
     granted: Granted,
+    connection: &'a Connection,
     installation: uuid::Uuid,
     signer: Signer<'a>,
     client: Client,
@@ -341,17 +496,27 @@ pub(super) fn upload(
     }
     let (waiting, coverage) = store.pending_counts()?;
     if waiting + coverage == 0 {
+        store.sync_delete(&[STUCK, STRIKES])?;
         return Ok(None);
     }
-    // What the company authorized now, and from when.
-    let view = match with_retries(ctx, store, || status_of(c))? {
-        Ok(v) => v,
-        Err(Final::Deferred) => return Ok(Some(1)),
-        Err(Final::Failure(f)) => return stop(ctx, store, &f),
+    let Some(installation) = uuid::Uuid::parse_str(&store.installation_id()?)
+        .ok()
+        .filter(|id| rules::installation_ok(*id))
+    else {
+        return say(ctx, m::BAD_INSTALLATION_ID, 1).map(Some);
     };
-    let run = Run {
-        granted: granted(store, &view, tally)?,
-        installation: uuid::Uuid::parse_str(&store.installation_id()?)?,
+    // What the company authorized now, and from when: asked, or reused for a few minutes.
+    let granted = match reused(store, tally)? {
+        Some(g) => g,
+        None => match ask(ctx, store, c, tally)? {
+            Ok(g) => g,
+            Err(code) => return Ok(code),
+        },
+    };
+    let mut run = Run {
+        granted,
+        connection: c,
+        installation,
         signer: Signer {
             device: &c.device,
             key: &c.key,
@@ -363,7 +528,7 @@ pub(super) fn upload(
     // Every pass removes or sends something, so this is never reached; it is a stop for a
     // process that holds the lock if that ever stops being true.
     for _ in 0..MAX_PASSES {
-        match pass(ctx, store, tally, &run, &mut max_items)? {
+        match pass(ctx, store, tally, &mut run, &mut max_items)? {
             Pass::Next => {}
             Pass::Done(code) => return Ok(code),
         }
@@ -376,24 +541,38 @@ fn pass(
     ctx: &mut Ctx,
     store: &mut Store,
     tally: &mut Tally,
-    run: &Run,
+    run: &mut Run,
     max_items: &mut usize,
 ) -> Result<Pass> {
+    let strikes = store
+        .sync_get(STRIKES)?
+        .and_then(|t| rules::Strikes::parse(&t));
     let next = next_batch(
         store,
         &run.granted,
         run.installation,
         run.end,
         *max_items,
+        strikes,
         tally,
     )?;
-    let Some(packed) = next.packed else {
+    if next.stale {
+        return refresh(ctx, store, tally, run);
+    }
+    let packed = match next.packed {
+        Ok(packed) => packed,
+        // Not the fault of any observation: the run stops and the buffer stays.
+        Err(Unpacked::Invalid) => {
+            return Ok(Pass::Done(say(ctx, m::BAD_INSTALLATION_ID, 1).map(Some)?));
+        }
         // What was behind the removed rows is next; with nothing removed, nothing is left.
-        return Ok(if next.removed {
-            Pass::Next
-        } else {
-            Pass::Done(None)
-        });
+        Err(_) => {
+            return Ok(if next.removed {
+                Pass::Next
+            } else {
+                Pass::Done(None)
+            });
+        }
     };
     let sent = || Sent {
         items: &next.items[..packed.items],
@@ -402,13 +581,33 @@ fn pass(
             .map(|(id, _)| *id)
             .collect(),
     };
-    let answer = with_retries(ctx, store, || {
-        run.client
-            .post_json_gzip::<IngestResults>(INGEST, &packed.json, Some(&run.signer))
-    })?;
+    let head = next
+        .items
+        .first()
+        .map(|i| i.id)
+        .filter(|_| packed.items > 0);
+    let answer = with_retries(
+        ctx,
+        store,
+        || {
+            run.client
+                .post_json_gzip::<IngestResults>(INGEST, &packed.json, Some(&run.signer))
+        },
+        &mut |_| {
+            // Only a batch with observations can be narrowed.
+            let Some(head) = head else { return Ok(false) };
+            let previous = store
+                .sync_get(STRIKES)?
+                .and_then(|t| rules::Strikes::parse(&t));
+            let now = rules::Strikes::add(previous, head, packed.items);
+            store.sync_set(STRIKES, &now.text())?;
+            Ok(now.count >= rules::SERVER_ERRORS_TO_NARROW)
+        },
+    )?;
     let raw = match answer {
         Ok(raw) => raw,
         Err(Final::Deferred) => return Ok(Pass::Done(Some(1))),
+        Err(Final::Narrow(f)) => return server_failing(store, tally, &f, sent()),
         Err(Final::Failure(f)) => {
             return Ok(match refused(ctx, store, tally, &f, sent(), max_items)? {
                 Flow::Again => Pass::Next,
@@ -424,16 +623,36 @@ fn pass(
             &ApiFailure::bad_response(200),
         )?));
     };
-    let applied = rules::apply_results(sent().items, &outcomes, ms());
-    record(store, tally, sent(), &applied)?;
-    if *max_items == 0 {
-        // The coverage went alone; the events are next, in full batches again.
-        *max_items = crate::contract::MAX_BATCH_OBSERVATIONS;
+    let mut applied = rules::apply_results(sent().items, &outcomes, ms());
+    let out_of_date = rules::grant_refused(&outcomes);
+    if out_of_date {
+        store.forget_grants()?;
+        if !run.granted.fresh {
+            rules::spare_grant_refusals(sent().items, &outcomes, &mut applied);
+        }
     }
+    record(store, tally, sent(), &applied)?;
+    // Whatever was cut down to get this batch through (the coverage alone, a half after a
+    // refusal) was about this batch: the next one starts full again.
+    *max_items = crate::contract::MAX_BATCH_OBSERVATIONS;
     if applied.session_owned.is_some() {
         // A session that is not this member's: its buffer is gone, and the run stops here.
         summary(ctx, tally)?;
         return Ok(Pass::Done(say(ctx, m::SESSION_OWNED_STOP, 1).map(Some)?));
     }
+    if out_of_date && !run.granted.fresh {
+        return refresh(ctx, store, tally, run);
+    }
     Ok(Pass::Next)
+}
+
+/// The reused answer is out of date: ask the server, and go on with what it says.
+fn refresh(ctx: &mut Ctx, store: &Store, tally: &mut Tally, run: &mut Run) -> Result<Pass> {
+    Ok(match ask(ctx, store, run.connection, tally)? {
+        Ok(granted) => {
+            run.granted = granted;
+            Pass::Next
+        }
+        Err(code) => Pass::Done(code),
+    })
 }

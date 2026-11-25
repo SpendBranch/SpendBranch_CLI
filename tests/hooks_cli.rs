@@ -250,7 +250,7 @@ fn the_end_of_a_session_starts_a_detached_sync_and_logs_only_the_event() {
 }
 
 #[test]
-fn a_stop_waits_ten_minutes_after_the_last_sync_but_a_session_end_does_not() {
+fn a_stop_waits_ten_minutes_after_the_last_sync_and_a_session_end_two() {
     let rig = Rig::ready();
     let ago = |ms: i64| {
         spendbranch::contract::Iso::from_millis(rig::now_ms() - ms)
@@ -264,7 +264,14 @@ fn a_stop_waits_ten_minutes_after_the_last_sync_but_a_session_end_does_not() {
     assert_eq!(spawned(&rig), 0, "synced two minutes ago");
     rig.claude_event("SessionEnd");
     rig.run(&["hook", "claude-code"]);
-    assert_eq!(spawned(&rig), 1, "the end of a session always goes");
+    assert_eq!(
+        spawned(&rig),
+        1,
+        "two minutes is enough for the end of a session"
+    );
+    rig.store().sync_set("lastSyncAt", &ago(min)).unwrap();
+    rig.run(&["hook", "claude-code"]);
+    assert_eq!(spawned(&rig), 1, "but not one");
     rig.store().sync_set("lastSyncAt", &ago(11 * min)).unwrap();
     rig.claude_event("Stop");
     rig.run(&["hook", "claude-code"]);
@@ -290,6 +297,29 @@ fn a_sync_that_ended_early_still_holds_the_next_stop_back() {
     rig.claude_event("Stop");
     rig.run(&["hook", "claude-code"]);
     assert_eq!(spawned(&rig), 0, "a sync was tried a moment ago");
+}
+
+#[test]
+fn the_hook_reads_the_time_of_the_last_sync_from_a_small_file_beside_the_log() {
+    let rig = Rig::ready();
+    assert_eq!(rig.run(&["sync"]).code, 0);
+    let stamp = rig.dir.path().join("last-sync-attempt");
+    assert!(stamp.exists(), "sync leaves the time of its attempt");
+    // The database says an hour ago; the file says a moment ago, and the hook goes by the file
+    // without opening the database.
+    let hour_ago = spendbranch::contract::Iso::from_millis(rig::now_ms() - 3_600_000)
+        .unwrap()
+        .to_string();
+    rig.store()
+        .sync_set("lastSyncAttemptAt", &hour_ago)
+        .unwrap();
+    rig.claude_event("Stop");
+    rig.run(&["hook", "claude-code"]);
+    assert_eq!(spawned(&rig), 0);
+    // Without the file, the database decides.
+    fs::remove_file(&stamp).unwrap();
+    rig.run(&["hook", "claude-code"]);
+    assert_eq!(spawned(&rig), 1);
 }
 
 #[test]

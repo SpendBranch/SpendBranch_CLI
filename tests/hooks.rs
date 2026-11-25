@@ -401,11 +401,17 @@ fn the_last_firing_is_the_newest_line_of_that_agent() {
 }
 
 #[test]
-fn the_end_of_a_session_always_syncs_and_the_rest_waits_ten_minutes() {
+fn the_end_of_a_session_waits_two_minutes_and_the_rest_waits_ten() {
     let now = Iso::parse("2026-11-12T12:00:00Z").unwrap();
     let ago = |ms: i64| Iso::from_millis(now.millis() - ms);
     let min = 60_000;
-    assert!(hooks::due(Some("SessionEnd"), ago(min), now));
+    assert!(
+        !hooks::due(Some("SessionEnd"), ago(min), now),
+        "sessions ending one after another start one sync"
+    );
+    assert!(hooks::due(Some("SessionEnd"), ago(2 * min), now));
+    assert!(hooks::due(Some("SessionEnd"), None, now));
+    assert!(hooks::due(Some("SessionEnd"), ago(-5 * min), now));
     assert!(!hooks::due(Some("Stop"), ago(9 * min), now));
     assert!(hooks::due(Some("Stop"), ago(10 * min), now));
     assert!(

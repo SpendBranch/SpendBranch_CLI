@@ -27,7 +27,7 @@ fn a_new_database_has_the_schema_wal_and_private_permissions() {
     let tmp = tempfile::tempdir().unwrap();
     let dir = tmp.path().join("data");
     let store = Store::open(&dir).unwrap();
-    assert_eq!(user_version(&dir), 2);
+    assert_eq!(user_version(&dir), 3);
     let conn = Connection::open(dir.join("state.db")).unwrap();
     for table in [
         "meta",
@@ -73,7 +73,7 @@ fn reopening_keeps_the_data_and_does_not_migrate_again() {
         Some("http://localhost:3000")
     );
     assert_eq!(again.meta_get("missing").unwrap(), None);
-    assert_eq!(user_version(dir.path()), 2);
+    assert_eq!(user_version(dir.path()), 3);
 }
 
 #[test]
@@ -244,7 +244,7 @@ fn many_processes_opening_a_new_database_at_once_all_succeed() {
                 .unwrap()
                 .unwrap_or_else(|e| panic!("round {round}: every opener must succeed: {e}"));
         }
-        assert_eq!(user_version(&path), 2);
+        assert_eq!(user_version(&path), 3);
     }
 }
 
@@ -258,7 +258,7 @@ fn a_newer_database_is_a_typed_error() {
         .unwrap();
     assert!(matches!(
         Store::open(dir.path()),
-        Err(spendbranch::infra::store::Error::NewerSchema { found: 7, known: 2 })
+        Err(spendbranch::infra::store::Error::NewerSchema { found: 7, known: 3 })
     ));
 }
 
@@ -558,7 +558,7 @@ fn migration_2_keeps_what_was_buffered_and_dates_it_as_entering_now() {
         .unwrap();
     }
     let store = Store::open(dir.path()).unwrap();
-    assert_eq!(user_version(dir.path()), 2);
+    assert_eq!(user_version(dir.path()), 3);
     let items = store.queued(&["codex"], i64::MAX, 10).unwrap();
     assert_eq!(items.len(), 1);
     assert_eq!(items[0].id, 7, "the id is kept, so the order is");
@@ -611,4 +611,128 @@ fn outcome_of(ids: &[&str]) -> spendbranch::sources::outcome::ReadOutcome {
     );
     o.observations = ids.iter().map(|i| observation(i)).collect();
     o
+}
+
+fn plan(conn: &Connection, sql: &str) -> String {
+    let mut q = conn.prepare(&format!("EXPLAIN QUERY PLAN {sql}")).unwrap();
+    let rows = q.query_map([], |r| r.get::<_, String>(3)).unwrap();
+    rows.map(|r| r.unwrap()).collect::<Vec<_>>().join("; ")
+}
+
+#[test]
+fn the_buffer_is_read_by_source_and_old_keys_deleted_by_age_through_indexes() {
+    let dir = tempfile::tempdir().unwrap();
+    Store::open(dir.path()).unwrap();
+    let conn = Connection::open(dir.path().join("state.db")).unwrap();
+    for (sql, index) in [
+        (
+            "SELECT id, payload, queued_at FROM spool WHERE id <= 9 \
+             AND json_extract(payload, '$.source') = 'codex' ORDER BY id LIMIT 5",
+            "spool_source",
+        ),
+        (
+            "SELECT COUNT(*) FROM spool WHERE json_extract(payload, '$.source') = 'codex'",
+            "spool_source",
+        ),
+        (
+            "SELECT id, payload FROM pending_coverage \
+             WHERE json_extract(payload, '$.source') = 'codex' ORDER BY id LIMIT 5",
+            "pending_coverage_source",
+        ),
+        (
+            "DELETE FROM seen WHERE source = 'codex' AND occurred_ms < 5",
+            "seen_age",
+        ),
+    ] {
+        let p = plan(&conn, sql);
+        assert!(p.contains(index), "{sql}: {p}");
+    }
+}
+
+#[test]
+fn the_size_of_the_buffer_is_kept_by_the_database_on_every_change() {
+    use spendbranch::infra::store::{Change, Queued, SpoolLimits};
+    let dir = tempfile::tempdir().unwrap();
+    let mut store = Store::open(dir.path()).unwrap();
+    let conn = Connection::open(dir.path().join("state.db")).unwrap();
+    let check = || {
+        let kept: (i64, i64) = conn
+            .query_row("SELECT items, bytes FROM spool_size", [], |r| {
+                Ok((r.get(0)?, r.get(1)?))
+            })
+            .unwrap();
+        let real: (i64, i64) = conn
+            .query_row(
+                "SELECT COUNT(*), COALESCE(SUM(LENGTH(payload) + 1), 0) FROM spool",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(kept, real);
+        kept
+    };
+    assert_eq!(check(), (0, 0));
+    store
+        .commit_read(&outcome_of(&["a", "b", "c", "d"]), SpoolLimits::default())
+        .unwrap();
+    assert_eq!(check().0, 4);
+    let all = store.queued(&["codex"], i64::MAX, 10).unwrap();
+    store
+        .apply(&Change {
+            remove_items: vec![all[1].id],
+            requeue: vec![Queued { ..all[0].clone() }],
+            ..Change::default()
+        })
+        .unwrap();
+    assert_eq!(check().0, 3);
+    store
+        .apply(&Change {
+            discard_session: Some(("codex".into(), "s".into())),
+            ..Change::default()
+        })
+        .unwrap();
+    check();
+    // The ceiling goes by the kept size: a buffer one byte short of room refuses the read.
+    let (_, bytes) = check();
+    let room = SpoolLimits {
+        items: 100,
+        bytes: bytes as u64,
+    };
+    assert_eq!(
+        store.commit_read(&outcome_of(&["e"]), room).unwrap(),
+        spendbranch::infra::store::Commit::Full
+    );
+}
+
+#[test]
+fn migration_3_counts_what_was_already_buffered() {
+    let dir = tempfile::tempdir().unwrap();
+    {
+        let mut store = Store::open(dir.path()).unwrap();
+        store
+            .commit_read(
+                &outcome_of(&["a", "b"]),
+                spendbranch::infra::store::SpoolLimits::default(),
+            )
+            .unwrap();
+    }
+    // back to schema 2, as the previous build left it
+    {
+        let db = Connection::open(dir.path().join("state.db")).unwrap();
+        db.execute_batch(
+            "DROP TRIGGER spool_size_insert; DROP TRIGGER spool_size_delete;
+             DROP TRIGGER spool_size_update; DROP TABLE spool_size;
+             DROP INDEX spool_source; DROP INDEX pending_coverage_source; DROP INDEX seen_age;
+             PRAGMA user_version = 2;",
+        )
+        .unwrap();
+    }
+    let store = Store::open(dir.path()).unwrap();
+    assert_eq!(user_version(dir.path()), 3);
+    assert_eq!(store.pending_counts().unwrap().0, 2);
+    let conn = Connection::open(dir.path().join("state.db")).unwrap();
+    let items: i64 = conn
+        .query_row("SELECT items FROM spool_size", [], |r| r.get(0))
+        .unwrap();
+    assert_eq!(items, 2);
 }

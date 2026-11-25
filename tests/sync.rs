@@ -85,7 +85,7 @@ fn a_large_buffer_goes_in_batches_of_500() {
 }
 
 #[test]
-fn a_batch_the_server_finds_too_big_is_halved_until_it_fits() {
+fn a_batch_the_server_finds_too_big_is_halved_until_it_fits_and_the_next_starts_full() {
     use spendbranch::sync::{self, Item};
     let rig = Rig::ready();
     // a limit that fits 15 observations but not 20, worked out from the real batch size
@@ -93,12 +93,7 @@ fn a_batch_the_server_finds_too_big_is_halved_until_it_fits() {
         let items: Vec<Item> = events(n)
             .into_iter()
             .enumerate()
-            .map(|(i, observation)| Item {
-                id: i as i64,
-                queued_at: 0,
-                payload: String::new(),
-                observation,
-            })
+            .map(|(i, observation)| Item::new(i as i64, 0, String::new(), observation))
             .collect();
         sync::pack(uuid::Uuid::new_v4(), &items, &[], 500)
             .unwrap()
@@ -124,8 +119,8 @@ fn a_batch_the_server_finds_too_big_is_halved_until_it_fits() {
         .collect();
     assert_eq!(
         sizes,
-        [10, 10, 10, 10],
-        "40 -> 20 -> 10: halved, not trimmed one at a time"
+        [10, 15, 15],
+        "40 -> 20 -> 10, halved; after an accepted batch the next starts full again: 30 -> 15"
     );
 }
 
@@ -156,25 +151,25 @@ fn a_source_whose_authorization_is_not_active_is_not_sent() {
 }
 
 #[test]
-fn the_dropped_batches_are_announced_on_the_first_and_every_fiftieth() {
+fn the_dropped_items_are_announced_on_the_first_and_every_fiftieth() {
     for (before, said) in [(0, true), (1, false), (48, false), (49, true), (50, false)] {
         let rig = Rig::ready();
-        rig.buffer(now_ms(), events(2));
+        rig.buffer(now_ms(), events(1));
         rig.store()
-            .sync_set("droppedBatches", &before.to_string())
+            .sync_set("droppedItems", &before.to_string())
             .unwrap();
         rig.server.configure(|s| {
             s.ingest.fail_next = VecDeque::from(vec![(400, "VALIDATION_FAILED".into(), None)])
         });
         let out = rig.run(&["sync"]);
         assert_eq!(
-            out.text.contains("batch(es) so far"),
+            out.text.contains("item(s) so far"),
             said,
             "after {before}: {}",
             out.text
         );
         assert_eq!(
-            rig.sync_state("droppedBatches"),
+            rig.sync_state("droppedItems"),
             Some((before + 1).to_string())
         );
     }
@@ -184,18 +179,19 @@ fn the_dropped_batches_are_announced_on_the_first_and_every_fiftieth() {
 fn a_server_that_is_away_leaves_everything_in_the_buffer_and_the_next_run_sends_it_once() {
     let rig = Rig::ready();
     rig.buffer(now_ms(), events(3));
+    // Throttled with no time given: passing trouble that is no fault of the batch.
     rig.server.configure(|s| {
         s.ingest.fail_next = VecDeque::from(vec![
-            (503, "UNAVAILABLE".into(), None),
-            (503, "UNAVAILABLE".into(), None),
-            (503, "UNAVAILABLE".into(), None),
+            (429, "RATE_LIMITED".into(), None),
+            (429, "RATE_LIMITED".into(), None),
+            (429, "RATE_LIMITED".into(), None),
         ]);
     });
     let out = rig.run(&["sync"]);
     assert_eq!(out.code, 1, "{}", out.text);
     assert!(
         out.text
-            .contains("The server is temporarily unavailable. Try again later."),
+            .contains("The server requested a pause (rate limit)."),
         "{}",
         out.text
     );
@@ -234,6 +230,91 @@ fn a_server_that_is_away_leaves_everything_in_the_buffer_and_the_next_run_sends_
         "a success forgets the trouble"
     );
     assert_eq!(rig.sync_state("nextAttemptAt"), None);
+}
+
+#[test]
+fn any_answer_from_the_server_forgets_the_old_trouble() {
+    // Failures from an outage long gone: the status answering is proof the server is back,
+    // so one stumble on the upload waits a second, not fifteen minutes.
+    let rig = Rig::ready();
+    rig.buffer(now_ms(), events(2));
+    rig.store().sync_set("failures", "10").unwrap();
+    rig.server.configure(|s| {
+        s.ingest.fail_next = VecDeque::from(vec![(503, "UNAVAILABLE".into(), None)])
+    });
+    let out = rig.run(&["sync"]);
+    assert_eq!(out.code, 0, "{}", out.text);
+    assert_eq!(out.sleeps.len(), 1, "one short pause, then the batch went");
+    assert!(out.sleeps[0] <= 1);
+    assert_eq!(rig.buffered(), 0);
+    assert_eq!(rig.sync_state("failures"), None);
+}
+
+/// Runs `sync` as the schedule would, the waits it saved already over, until `done` or 40 runs.
+fn sync_until(rig: &Rig, done: impl Fn(&Rig) -> bool) {
+    for _ in 0..40 {
+        if done(rig) {
+            return;
+        }
+        rig.store().sync_delete(&["nextAttemptAt"]).unwrap();
+        rig.run(&["sync"]);
+    }
+    assert!(done(rig), "never settled");
+}
+
+#[test]
+fn a_batch_that_keeps_failing_on_the_server_is_halved_instead_of_waiting_for_ever() {
+    let rig = Rig::ready();
+    rig.buffer(now_ms(), events(4));
+    rig.server.configure(|s| {
+        s.ingest.fail_next = VecDeque::from(vec![
+            (503, "UNAVAILABLE".into(), None),
+            (503, "UNAVAILABLE".into(), None),
+            (503, "UNAVAILABLE".into(), None),
+        ]);
+    });
+    let out = rig.run(&["sync"]);
+    assert_eq!(out.code, 0, "{}", out.text);
+    assert_eq!(rig.buffered(), 0);
+    let sizes: Vec<usize> = rig
+        .server
+        .state
+        .lock()
+        .unwrap()
+        .batches
+        .iter()
+        .map(|b| b.0)
+        .collect();
+    assert_eq!(sizes, [2, 2], "a whole run of 5xx on 4, then halves");
+}
+
+#[test]
+fn an_item_the_server_keeps_failing_on_stays_in_the_buffer_and_status_says_so() {
+    let rig = Rig::ready();
+    rig.buffer(now_ms(), events(8));
+    rig.server.configure(|s| {
+        s.ingest
+            .refuse_batch
+            .insert("e003".into(), (503, "UNAVAILABLE".into()));
+    });
+    sync_until(&rig, |r| r.server.state.lock().unwrap().stored.len() == 7);
+    let left = rig.store().queued(&["codex"], i64::MAX, 10).unwrap();
+    assert_eq!(left.len(), 1, "only the item at fault waits");
+    assert!(left[0].payload.contains("e003"));
+    assert!(
+        rig.store().rejected_counts().unwrap().is_empty(),
+        "nothing was dropped"
+    );
+    let text = rig.run(&["status"]).text;
+    assert!(
+        text.contains("1 items keep failing on the server")
+            && text.contains(&messages::failure_message("UNAVAILABLE")),
+        "{text}"
+    );
+    // once the server takes it, the warning goes
+    rig.server.configure(|s| s.ingest.refuse_batch.clear());
+    sync_until(&rig, |r| r.buffered() == 0);
+    assert!(!rig.run(&["status"]).text.contains("keep failing"));
 }
 
 #[test]
@@ -358,28 +439,95 @@ fn a_device_the_server_revoked_stops_at_the_first_call() {
 }
 
 #[test]
-fn a_batch_the_server_calls_out_of_contract_is_dropped_and_counted_and_the_rest_goes() {
+fn one_item_the_server_calls_out_of_contract_is_found_by_halving_and_only_it_is_dropped() {
     let rig = Rig::ready();
-    rig.buffer(now_ms(), events(600));
+    rig.buffer(now_ms(), events(500));
+    rig.server.configure(|s| {
+        s.ingest
+            .refuse_batch
+            .insert("e321".into(), (400, "VALIDATION_FAILED".into()));
+    });
+    let out = rig.run(&["sync"]);
+    assert_eq!(out.code, 0, "{}", out.text);
+    assert!(
+        out.text.contains("Dropped 1 item(s) so far"),
+        "{}",
+        out.text
+    );
+    assert!(
+        out.text
+            .contains("1 events dropped: the server said they were out of contract"),
+        "{}",
+        out.text
+    );
+    assert!(
+        out.text.contains("Uploaded 499 usage events."),
+        "{}",
+        out.text
+    );
+    assert_eq!(rig.buffered(), 0);
+    let stored = rig.server.state.lock().unwrap().stored.clone();
+    assert_eq!(stored.len(), 499, "every good item reached the server");
+    assert!(stored.iter().all(|o| o["externalEventId"] != "e321"));
+    assert_eq!(
+        rig.store().rejected_counts().unwrap(),
+        [("VALIDATION_FAILED".into(), 1)]
+    );
+}
+
+#[test]
+fn coverage_is_sent_alone_before_an_event_is_blamed_for_a_refused_batch() {
+    let rig = Rig::ready();
+    let db = rusqlite::Connection::open(rig.dir.path().join("state.db")).unwrap();
+    coverage(
+        &db,
+        "codex",
+        "2026-11-10T10:00:00.000Z",
+        "2026-11-10T11:00:00.000Z",
+        "observed",
+        None,
+    );
+    rig.buffer(now_ms(), events(1));
     rig.server.configure(|s| {
         s.ingest.fail_next = VecDeque::from(vec![(400, "VALIDATION_FAILED".into(), None)])
     });
     let out = rig.run(&["sync"]);
     assert_eq!(out.code, 0, "{}", out.text);
     assert!(
-        out.text.contains("Dropped 1 batch(es) so far"),
+        rig.store().rejected_counts().unwrap().is_empty(),
         "{}",
         out.text
     );
-    assert!(
-        out.text
-            .contains("500 events dropped: the server said the batch was out of contract")
-    );
-    assert!(out.text.contains("Uploaded 100 usage events."));
-    assert_eq!(rig.buffered(), 0);
+    let s = rig.server.state.lock().unwrap();
+    assert_eq!((s.stored.len(), s.stored_coverage.len()), (1, 1));
     assert_eq!(
-        rig.store().rejected_counts().unwrap(),
-        [("VALIDATION_FAILED".into(), 500)]
+        s.batches.iter().map(|b| (b.0, b.1)).collect::<Vec<_>>(),
+        [(0, 1), (1, 0)],
+        "the coverage alone, then the event"
+    );
+}
+
+#[test]
+fn an_installation_id_that_cannot_go_in_a_batch_stops_the_run_and_keeps_the_buffer() {
+    let rig = Rig::ready();
+    rig.buffer(now_ms(), events(3));
+    rig.store()
+        .meta_set("installation_id", "00000000-0000-0000-0000-000000000001")
+        .unwrap();
+    let out = rig.run(&["sync"]);
+    assert_eq!(out.code, 1, "{}", out.text);
+    assert!(
+        out.text.contains(messages::BAD_INSTALLATION_ID),
+        "{}",
+        out.text
+    );
+    assert_eq!(rig.buffered(), 3, "no event is blamed for it");
+    assert!(rig.store().rejected_counts().unwrap().is_empty());
+    assert!(
+        !rig.paths_seen()
+            .iter()
+            .any(|p| p == "/api/ingest/v1/events"),
+        "nothing is sent"
     );
 }
 
@@ -614,12 +762,7 @@ fn a_batch_too_big_because_of_its_coverage_sends_the_coverage_alone_and_keeps_ev
     let items: Vec<Item> = events(5)
         .into_iter()
         .enumerate()
-        .map(|(i, observation)| Item {
-            id: i as i64,
-            queued_at: 0,
-            payload: String::new(),
-            observation,
-        })
+        .map(|(i, observation)| Item::new(i as i64, 0, String::new(), observation))
         .collect();
     let size = |n: usize, c: usize| {
         let id = uuid::Uuid::new_v4();
@@ -979,4 +1122,169 @@ fn the_status_shows_what_the_server_has_seen_and_the_gaps_still_open() {
             .text
             .contains("observed until 2026-11-12T09:00:00")
     );
+}
+
+fn status_calls(rig: &Rig) -> usize {
+    rig.paths_seen()
+        .iter()
+        .filter(|p| *p == "/api/cli/v1/status")
+        .count()
+}
+
+#[test]
+fn what_the_company_authorized_is_asked_once_per_ten_minutes_and_status_always_asks() {
+    let rig = Rig::ready();
+    rig.buffer(now_ms(), events(1));
+    let before = status_calls(&rig);
+    assert_eq!(rig.run(&["sync"]).code, 0);
+    assert_eq!(status_calls(&rig), before + 1);
+    rig.buffer(
+        now_ms(),
+        vec![observation("codex", "s1", "later", &at_now())],
+    );
+    let out = rig.run(&["sync"]);
+    assert!(
+        out.text.contains("Uploaded 1 usage events."),
+        "{}",
+        out.text
+    );
+    assert_eq!(
+        status_calls(&rig),
+        before + 1,
+        "the second sync reuses the answer"
+    );
+    assert_eq!(rig.run(&["status"]).code, 0);
+    assert_eq!(status_calls(&rig), before + 2, "`status` always asks");
+    // ten minutes later it is asked again
+    let saved: serde_json::Value =
+        serde_json::from_str(&rig.sync_state("grantsView").unwrap()).unwrap();
+    let mut old = saved.clone();
+    old["at"] = json!(saved["at"].as_i64().unwrap() - 10 * 60_000);
+    rig.store()
+        .sync_set("grantsView", &old.to_string())
+        .unwrap();
+    rig.buffer(
+        now_ms(),
+        vec![observation("codex", "s1", "much-later", &at_now())],
+    );
+    assert_eq!(rig.run(&["sync"]).code, 0);
+    assert_eq!(status_calls(&rig), before + 3);
+}
+
+#[test]
+fn a_refusal_over_the_authorization_asks_again_and_keeps_what_a_reused_answer_sent() {
+    let rig = Rig::ready();
+    rig.buffer(now_ms(), events(1));
+    assert_eq!(rig.run(&["sync"]).code, 0);
+    // The company turns Codex off; the answer this device keeps still says it is on.
+    rig.server.configure(|s| {
+        s.sources.retain(|x| x["source"] != "codex");
+        s.ingest
+            .reject
+            .insert("late".into(), "COLLECTION_NOT_AUTHORIZED".into());
+    });
+    rig.buffer(
+        now_ms(),
+        vec![observation("codex", "s1", "late", &at_now())],
+    );
+    let before = status_calls(&rig);
+    let out = rig.run(&["sync"]);
+    assert_eq!(out.code, 0, "{}", out.text);
+    assert_eq!(
+        status_calls(&rig),
+        before + 1,
+        "asked again after the refusal"
+    );
+    assert!(
+        out.text.contains("1 Codex items stay in the buffer"),
+        "{}",
+        out.text
+    );
+    assert_eq!(rig.buffered(), 1, "kept: the answer it went out on was old");
+    assert!(rig.store().rejected_counts().unwrap().is_empty());
+}
+
+#[test]
+fn a_refusal_on_a_fresh_answer_counts_and_the_next_sync_asks_again() {
+    let rig = Rig::ready();
+    rig.buffer(now_ms(), vec![observation("codex", "s1", "odd", &at_now())]);
+    rig.server.configure(|s| {
+        s.ingest
+            .reject
+            .insert("odd".into(), "FIELDS_NOT_AUTHORIZED".into());
+    });
+    assert_eq!(rig.run(&["sync"]).code, 0);
+    assert_eq!(rig.buffered(), 0);
+    assert_eq!(
+        rig.store().rejected_counts().unwrap(),
+        [("FIELDS_NOT_AUTHORIZED".into(), 1)]
+    );
+    assert_eq!(
+        rig.sync_state("grantsView"),
+        None,
+        "the answer is forgotten"
+    );
+    rig.buffer(now_ms(), events(1));
+    let before = status_calls(&rig);
+    assert_eq!(rig.run(&["sync"]).code, 0);
+    assert_eq!(status_calls(&rig), before + 1);
+}
+
+#[test]
+fn a_reused_answer_never_drops_an_item_as_before_the_window() {
+    let rig = Rig::ready();
+    rig.buffer(now_ms(), events(1));
+    assert_eq!(rig.run(&["sync"]).code, 0);
+    // The window moved back since: the old answer would call this item too early.
+    rig.server.configure(|s| {
+        for source in &mut s.sources {
+            source["windowStart"] = json!("2026-10-01T00:00:00Z");
+        }
+    });
+    rig.buffer(
+        now_ms(),
+        vec![observation(
+            "codex",
+            "s1",
+            "october",
+            "2026-10-15T10:00:00.000Z",
+        )],
+    );
+    let out = rig.run(&["sync"]);
+    assert_eq!(out.code, 0, "{}", out.text);
+    assert!(
+        out.text.contains("Uploaded 1 usage events."),
+        "{}",
+        out.text
+    );
+    assert!(rig.store().rejected_counts().unwrap().is_empty());
+}
+
+#[test]
+fn turning_a_source_on_or_off_or_signing_in_or_out_forgets_the_answer() {
+    let rig = Rig::ready();
+    let kept = |rig: &Rig| rig.sync_state("grantsView").is_some();
+    let sync = |rig: &Rig| {
+        rig.buffer(
+            now_ms(),
+            vec![observation(
+                "codex",
+                "s1",
+                &format!("e{}", now_ms()),
+                &at_now(),
+            )],
+        );
+        assert_eq!(rig.run(&["sync"]).code, 0);
+        assert!(kept(rig));
+    };
+    for step in [
+        &["disable", "codex"][..],
+        &["enable", "codex"][..],
+        &["login"][..],
+        &["logout"][..],
+    ] {
+        sync(&rig);
+        rig.run(step);
+        assert!(!kept(&rig), "{step:?}");
+    }
 }

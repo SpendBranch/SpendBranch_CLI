@@ -2,7 +2,7 @@
 //! Pure: the buffer, the network and the clock are the caller's.
 use crate::api::{ApiFailure, ItemOutcome};
 use crate::contract::{
-    CoverageReport, CoverageState, GapReason, IngestBatch, Iso, MAX_BATCH_COVERAGE,
+    CoverageReport, CoverageState, Encoded, GapReason, IngestBatch, Iso, MAX_BATCH_COVERAGE,
     MAX_BATCH_OBSERVATIONS, Source, UsageObservation,
 };
 use std::{collections::BTreeMap, time::Duration};
@@ -14,6 +14,9 @@ pub const CLOCK_SKEW_CAP_MS: i64 = 24 * 60 * 60 * 1000;
 pub const MAX_BODY_BYTES: usize = 1024 * 1024;
 /// How often the same batch is tried within one run.
 pub const TRIES_PER_RUN: u32 = 3;
+/// How many server errors (5xx) in a row the same batch gets before it is narrowed instead of
+/// only waiting: as many as one run tries it.
+pub const SERVER_ERRORS_TO_NARROW: u32 = TRIES_PER_RUN;
 /// A wait longer than this is not slept through: it is saved as `nextAttemptAt`.
 pub const MAX_SLEEP: Duration = Duration::from_secs(8);
 /// The furthest a saved `nextAttemptAt` may be: the server's longest `Retry-After` (24 h) and
@@ -28,6 +31,21 @@ pub struct Item {
     pub queued_at: i64,
     pub payload: String,
     pub observation: UsageObservation,
+    /// The observation as it goes in a batch: written once from the parsed value, so the
+    /// contract is checked on the way out without serializing it again on each halving.
+    pub encoded: Encoded<UsageObservation>,
+}
+
+impl Item {
+    pub fn new(id: i64, queued_at: i64, payload: String, observation: UsageObservation) -> Self {
+        Self {
+            id,
+            queued_at,
+            payload,
+            encoded: Encoded::new(&observation),
+            observation,
+        }
+    }
 }
 
 /// Rows from the buffer into items. A row that no longer passes the contract (a hand-edited
@@ -36,12 +54,7 @@ pub fn parse_items(rows: impl IntoIterator<Item = (i64, String, i64)>) -> (Vec<I
     let (mut items, mut invalid) = (Vec::new(), Vec::new());
     for (id, payload, queued_at) in rows {
         match serde_json::from_str::<UsageObservation>(&payload) {
-            Ok(observation) => items.push(Item {
-                id,
-                queued_at,
-                payload,
-                observation,
-            }),
+            Ok(observation) => items.push(Item::new(id, queued_at, payload, observation)),
             Err(_) => invalid.push(id),
         }
     }
@@ -61,6 +74,43 @@ pub fn parse_coverage(
     (reports, invalid)
 }
 
+/// The reports as they go in a batch: an `observed` range of a source that starts where the
+/// last report of that source (an `observed` range too) ends is joined to it. Nothing else is
+/// joined, and the order of each source's reports is kept, so a gap and the ranges told after
+/// it keep their order. The server checks the joined ranges like any other.
+pub fn merge_coverage(reports: &[(i64, CoverageReport)]) -> Vec<CoverageReport> {
+    let mut out: Vec<CoverageReport> = Vec::with_capacity(reports.len());
+    let mut last: BTreeMap<&'static str, usize> = BTreeMap::new();
+    for (_, report) in reports {
+        let name = report.source().name();
+        let joined = last.get(name).and_then(|&i| {
+            let before = &out[i];
+            let touching = before.state() == CoverageState::Observed
+                && report.state() == CoverageState::Observed
+                && before.to() == report.from();
+            touching
+                .then(|| {
+                    CoverageReport::new(
+                        report.source(),
+                        before.from(),
+                        report.to(),
+                        CoverageState::Observed,
+                    )
+                })
+                .flatten()
+                .map(|r| (i, r))
+        });
+        match joined {
+            Some((i, r)) => out[i] = r,
+            None => {
+                last.insert(name, out.len());
+                out.push(report.clone());
+            }
+        }
+    }
+    out
+}
+
 /// A batch ready to send.
 #[derive(Debug)]
 pub struct Packed {
@@ -70,16 +120,33 @@ pub struct Packed {
     pub json: Vec<u8>,
 }
 
+/// Why there is no batch.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Unpacked {
+    /// Nothing to send.
+    Nothing,
+    /// The first observation alone is over the size: it can never be sent.
+    TooBig,
+    /// The batch cannot be built at all (the installation id is not one the contract takes):
+    /// no observation is at fault.
+    Invalid,
+}
+
+/// Whether this installation id can go in a batch. Checked once before a run, so a bad id
+/// stops the run instead of being blamed on the observations.
+pub fn installation_ok(installation_id: uuid::Uuid) -> bool {
+    crate::contract::standard_installation_id(installation_id)
+}
+
 /// The largest batch from the front of the queue that fits the limits: at most 500
 /// observations (and `max_items`), 50 coverage reports and 1 MiB of JSON. A batch over the
-/// size is halved until it fits. `None` when there is nothing to send, or one observation
-/// alone is over the size.
+/// size is halved until it fits.
 pub fn pack(
     installation_id: uuid::Uuid,
     items: &[Item],
     coverage: &[(i64, CoverageReport)],
     max_items: usize,
-) -> Option<Packed> {
+) -> Result<Packed, Unpacked> {
     pack_within(installation_id, items, coverage, max_items, MAX_BODY_BYTES)
 }
 
@@ -90,28 +157,33 @@ pub fn pack_within(
     coverage: &[(i64, CoverageReport)],
     max_items: usize,
     max_bytes: usize,
-) -> Option<Packed> {
+) -> Result<Packed, Unpacked> {
     let mut n = items.len().min(MAX_BATCH_OBSERVATIONS).min(max_items);
     let c = coverage.len().min(MAX_BATCH_COVERAGE);
+    let observations: Vec<&Encoded<UsageObservation>> =
+        items[..n].iter().map(|i| &i.encoded).collect();
+    let reports: Vec<Encoded<CoverageReport>> = merge_coverage(&coverage[..c])
+        .iter()
+        .map(Encoded::new)
+        .collect();
     loop {
         if n + c == 0 {
-            return None;
+            return Err(Unpacked::Nothing);
         }
-        let batch = IngestBatch::new(
-            installation_id,
-            items[..n].iter().map(|i| i.observation.clone()).collect(),
-            coverage[..c].iter().map(|(_, r)| r.clone()).collect(),
-        )?;
-        let json = serde_json::to_vec(&batch).ok()?;
-        if json.len() <= max_bytes {
-            return Some(Packed {
+        // The size is worked out from the parts; the bytes are written once, for what fits.
+        let len = IngestBatch::encoded_len(installation_id, &observations[..n], &reports)
+            .ok_or(Unpacked::Invalid)?;
+        if len <= max_bytes {
+            let json = IngestBatch::encode(installation_id, &observations[..n], &reports)
+                .ok_or(Unpacked::Invalid)?;
+            return Ok(Packed {
                 items: n,
                 coverage: c,
                 json,
             });
         }
         if n <= 1 {
-            return None;
+            return Err(Unpacked::TooBig);
         }
         n = n.div_ceil(2);
     }
@@ -130,8 +202,9 @@ pub fn backoff(failures: u32, random: f64) -> Duration {
 pub enum Failed {
     /// The network, a throttle or a server that stumbled: wait and try the same batch again.
     Transient,
-    /// The whole batch is out of contract (`400 VALIDATION_FAILED`): drop it, go on.
-    DropBatch,
+    /// The batch is out of contract (`400 VALIDATION_FAILED`): one bad item refuses the whole
+    /// batch, so it is narrowed down until the item at fault is alone (see `narrow`).
+    OutOfContract,
     /// `413`: the batch is too big for the server: halve it.
     Split,
     /// Anything else (`401`, `402`, `403`, `415`...): stop, the buffer stays.
@@ -142,10 +215,124 @@ pub fn classify(failure: &ApiFailure) -> Failed {
     match (failure.status, failure.code.as_str()) {
         (0, _) | (429, _) => Failed::Transient,
         (s, _) if s >= 500 => Failed::Transient,
-        (400, "VALIDATION_FAILED") => Failed::DropBatch,
+        (400, "VALIDATION_FAILED") => Failed::OutOfContract,
         (413, _) => Failed::Split,
         _ => Failed::Stop,
     }
+}
+
+/// How a refused batch is cut down: nothing leaves the buffer until it is alone in a batch
+/// the server still refuses.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Narrow {
+    /// The coverage goes alone first, so no event is blamed for it.
+    CoverageAlone,
+    /// Try again with at most this many observations (and no coverage).
+    Halve(usize),
+    /// One observation alone was refused: it is the one at fault.
+    DropItem,
+    /// Coverage alone was refused: it can never go.
+    DropCoverage,
+}
+
+/// What to do with a batch of `items` observations and `coverage` reports that was refused.
+pub fn narrow(items: usize, coverage: usize) -> Narrow {
+    match (items, coverage) {
+        (1.., 1..) => Narrow::CoverageAlone,
+        (2.., 0) => Narrow::Halve(items.div_ceil(2)),
+        (1, 0) => Narrow::DropItem,
+        _ => Narrow::DropCoverage,
+    }
+}
+
+/// The batch the server keeps failing on (5xx): the id of its first observation, how many
+/// observations it holds, and how many server errors in a row it got. Kept between runs, so a
+/// batch is narrowed even when each run gives up after one try.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Strikes {
+    pub head: i64,
+    pub size: usize,
+    pub count: u32,
+}
+
+impl Strikes {
+    pub fn parse(text: &str) -> Option<Self> {
+        let mut parts = text.split(':');
+        let strikes = Self {
+            head: parts.next()?.parse().ok()?,
+            size: parts.next()?.parse().ok()?,
+            count: parts.next()?.parse().ok()?,
+        };
+        parts.next().is_none().then_some(strikes)
+    }
+
+    pub fn text(&self) -> String {
+        format!("{}:{}:{}", self.head, self.size, self.count)
+    }
+
+    /// The most observations the batch starting at `head` may hold.
+    pub fn limit(this: Option<Self>, head: Option<i64>, max_items: usize) -> usize {
+        match this {
+            Some(s) if Some(s.head) == head => max_items.min(s.size),
+            _ => max_items,
+        }
+    }
+
+    /// One more server error for the batch that starts at `head` with `size` observations.
+    pub fn add(this: Option<Self>, head: i64, size: usize) -> Self {
+        let count = match this {
+            Some(s) if s.head == head && s.size == size => s.count.saturating_add(1),
+            _ => 1,
+        };
+        Self { head, size, count }
+    }
+}
+
+/// The key an item is known by in the list of items the server keeps failing on.
+pub fn item_key(item: &Item) -> String {
+    let o = &item.observation;
+    format!(
+        "{}/{}/{}",
+        o.source.name(),
+        o.external_session_id.as_str(),
+        o.external_event_id.as_str()
+    )
+}
+
+type Stuck = BTreeMap<String, String>;
+
+fn stuck_of(text: Option<&str>) -> Stuck {
+    text.and_then(|t| serde_json::from_str(t).ok())
+        .unwrap_or_default()
+}
+
+fn stuck_text(stuck: &Stuck) -> Option<String> {
+    (!stuck.is_empty())
+        .then(|| serde_json::to_string(stuck).ok())
+        .flatten()
+}
+
+/// The list (JSON, as kept) with this item added, under the server's code.
+pub fn stuck_add(text: Option<&str>, key: String, code: &str) -> Option<String> {
+    let mut stuck = stuck_of(text);
+    stuck.insert(key, code.to_owned());
+    stuck_text(&stuck)
+}
+
+/// The list without these items: the server answered for them. `None` when it is empty.
+pub fn stuck_remove(text: Option<&str>, keys: impl IntoIterator<Item = String>) -> Option<String> {
+    let mut stuck = stuck_of(text);
+    for key in keys {
+        stuck.remove(&key);
+    }
+    stuck_text(&stuck)
+}
+
+/// How many items the server keeps failing on, and the code it gave for one of them.
+pub fn stuck_summary(text: Option<&str>) -> Option<(u64, String)> {
+    let stuck = stuck_of(text);
+    let code = stuck.values().next()?.clone();
+    Some((stuck.len() as u64, code))
 }
 
 /// How long to wait before the next try: the backoff, or what the server asked for, if more.
@@ -204,6 +391,51 @@ pub fn apply_results(items: &[Item], results: &[ItemOutcome], now_ms: i64) -> Ap
         }
     }
     applied
+}
+
+/// How long the answer to "what did the company authorize" is reused before it is asked again.
+pub const GRANTS_KEEP_MS: i64 = 10 * 60 * 1000;
+
+/// The refusals of an item that say the answer this device went by is out of date.
+pub const GRANT_CODES: [&str; 3] = [
+    "COLLECTION_NOT_AUTHORIZED",
+    "FIELDS_NOT_AUTHORIZED",
+    "BEFORE_COLLECTION_WINDOW",
+];
+
+/// Whether an answer saved at `saved_ms` can still be used at `now_ms`. One saved in the future
+/// (the clock went back) cannot.
+pub fn grants_fresh(saved_ms: i64, now_ms: i64) -> bool {
+    (0..GRANTS_KEEP_MS).contains(&(now_ms - saved_ms))
+}
+
+fn grant_refusal(result: &ItemOutcome) -> bool {
+    matches!(result, ItemOutcome::Rejected(code) if GRANT_CODES.contains(&code.as_str()))
+}
+
+/// Whether the server refused an item over what the company authorized.
+pub fn grant_refused(results: &[ItemOutcome]) -> bool {
+    results.iter().any(grant_refusal)
+}
+
+/// The batch went out on a reused answer: what the server refused over the authorization stays
+/// in the buffer and is not counted, to be tried again on a fresh answer.
+pub fn spare_grant_refusals(items: &[Item], results: &[ItemOutcome], applied: &mut Applied) {
+    for (item, result) in items.iter().zip(results) {
+        let ItemOutcome::Rejected(code) = result else {
+            continue;
+        };
+        if !grant_refusal(result) {
+            continue;
+        }
+        applied.delete.retain(|id| *id != item.id);
+        if let Some(n) = applied.rejected.get_mut(code) {
+            *n -= 1;
+            if *n == 0 {
+                applied.rejected.remove(code);
+            }
+        }
+    }
 }
 
 /// An item from before the start of the authorized window is not sent: the server would only

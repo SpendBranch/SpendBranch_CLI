@@ -59,6 +59,7 @@ pub(in crate::commands) fn enable_with(ctx: &mut Ctx, source: Source, hint: bool
     } else {
         writeln!(ctx.out, "{}", m::fields_line(agent, source.arg(), fields))?;
     }
+    account.store.forget_grants()?;
     // Already on: keep the date it started, or the first days would fall out of the window.
     if account.store.source_facts(source)?.enabled_since.is_none() {
         account.store.enable_source(source, now())?;
@@ -80,5 +81,6 @@ pub fn disable(ctx: &mut Ctx, source: Source) -> Result<i32> {
         return say(ctx, m::NOT_CONNECTED, 1);
     }
     account.store.disable_source(source)?;
+    account.store.forget_grants()?;
     say(ctx, m::DISABLED, 0)
 }

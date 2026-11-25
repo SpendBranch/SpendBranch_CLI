@@ -2,7 +2,7 @@
 use serde_json::json;
 use spendbranch::api::{ApiFailure, ItemOutcome};
 use spendbranch::contract::{CoverageReport, Iso, UsageObservation};
-use spendbranch::sync::{self, Failed, Item};
+use spendbranch::sync::{self, Failed, Item, Unpacked};
 use std::time::Duration;
 
 fn observation(event: &str, session: &str, at: &str) -> UsageObservation {
@@ -20,12 +20,12 @@ fn items(n: usize) -> Vec<Item> {
     (0..n)
         .map(|i| {
             let observation = observation(&format!("e{i}"), "s", "2026-06-01T10:00:00.000Z");
-            Item {
-                id: i as i64 + 1,
-                queued_at: 0,
-                payload: serde_json::to_string(&observation).unwrap(),
+            Item::new(
+                i as i64 + 1,
+                0,
+                serde_json::to_string(&observation).unwrap(),
                 observation,
-            }
+            )
         })
         .collect()
 }
@@ -90,7 +90,10 @@ fn a_failure_is_passing_stopping_or_a_fault_of_the_batch_by_status_never_by_code
         (failure(502, "INTERNAL", None), Failed::Transient),
         (failure(503, "UNAVAILABLE", None), Failed::Transient),
         (failure(504, "ANYTHING_AT_ALL", None), Failed::Transient),
-        (failure(400, "VALIDATION_FAILED", None), Failed::DropBatch),
+        (
+            failure(400, "VALIDATION_FAILED", None),
+            Failed::OutOfContract,
+        ),
         (failure(413, "PAYLOAD_TOO_LARGE", None), Failed::Split),
         (failure(401, "UNAUTHENTICATED", None), Failed::Stop),
         (failure(401, "CLOCK_SKEW", None), Failed::Stop),
@@ -104,6 +107,74 @@ fn a_failure_is_passing_stopping_or_a_fault_of_the_batch_by_status_never_by_code
     ] {
         assert_eq!(sync::classify(&f), want, "{} {}", f.status, f.code);
     }
+}
+
+#[test]
+fn a_refused_batch_is_narrowed_down_to_what_is_at_fault() {
+    use sync::Narrow;
+    // The coverage goes alone first, so no event is blamed for it.
+    assert_eq!(sync::narrow(10, 3), Narrow::CoverageAlone);
+    assert_eq!(sync::narrow(1, 1), Narrow::CoverageAlone);
+    assert_eq!(sync::narrow(500, 0), Narrow::Halve(250));
+    assert_eq!(sync::narrow(3, 0), Narrow::Halve(2));
+    assert_eq!(sync::narrow(2, 0), Narrow::Halve(1));
+    // Only what is alone can be at fault.
+    assert_eq!(sync::narrow(1, 0), Narrow::DropItem);
+    assert_eq!(sync::narrow(0, 4), Narrow::DropCoverage);
+}
+
+#[test]
+fn server_errors_are_counted_per_batch_and_survive_the_run() {
+    use sync::Strikes;
+    let one = Strikes::add(None, 7, 500);
+    assert_eq!(
+        one,
+        Strikes {
+            head: 7,
+            size: 500,
+            count: 1
+        }
+    );
+    let two = Strikes::add(Some(one), 7, 500);
+    assert_eq!(two.count, 2);
+    assert_eq!(Strikes::add(Some(two), 7, 250).count, 1, "another batch");
+    assert_eq!(Strikes::add(Some(two), 8, 500).count, 1, "another head");
+    assert_eq!(Strikes::parse(&two.text()), Some(two));
+    for bad in ["", "1:2", "1:2:3:4", "a:2:3", "1:-2:3"] {
+        assert_eq!(Strikes::parse(bad), None, "{bad}");
+    }
+    let narrowed = Strikes {
+        head: 7,
+        size: 125,
+        count: 0,
+    };
+    assert_eq!(Strikes::limit(Some(narrowed), Some(7), 500), 125);
+    assert_eq!(Strikes::limit(Some(narrowed), Some(7), 60), 60);
+    assert_eq!(
+        Strikes::limit(Some(narrowed), Some(9), 500),
+        500,
+        "another head"
+    );
+    assert_eq!(Strikes::limit(None, Some(7), 500), 500);
+    assert_eq!(sync::SERVER_ERRORS_TO_NARROW, sync::TRIES_PER_RUN);
+}
+
+#[test]
+fn the_items_the_server_keeps_failing_on_are_listed_until_it_answers_for_them() {
+    let list = sync::stuck_add(None, "codex/s/e1".into(), "INTERNAL");
+    let list = sync::stuck_add(list.as_deref(), "codex/s/e2".into(), "INTERNAL");
+    assert_eq!(
+        sync::stuck_summary(list.as_deref()),
+        Some((2, "INTERNAL".into()))
+    );
+    let list = sync::stuck_remove(list.as_deref(), ["codex/s/e1".to_owned()]);
+    assert_eq!(sync::stuck_summary(list.as_deref()).map(|s| s.0), Some(1));
+    assert_eq!(
+        sync::stuck_remove(list.as_deref(), ["codex/s/e2".to_owned()]),
+        None
+    );
+    assert_eq!(sync::stuck_summary(Some("not json")), None);
+    assert_eq!(sync::item_key(&items(1)[0]), "codex/s/e0");
 }
 
 #[test]
@@ -126,7 +197,7 @@ fn a_batch_is_at_most_500_observations_and_50_reports_and_never_empty() {
     let p = sync::pack(id, &[], &reports, 500).unwrap();
     assert_eq!((p.items, p.coverage), (0, 50), "reports alone are a batch");
     assert!(
-        sync::pack(id, &[], &[], 500).is_none(),
+        matches!(sync::pack(id, &[], &[], 500), Err(Unpacked::Nothing)),
         "nothing to send is no batch"
     );
     let v: serde_json::Value =
@@ -149,9 +220,24 @@ fn a_batch_over_the_size_is_halved_until_it_fits_and_one_that_cannot_is_refused(
     assert!(p.json.len() <= one * 10);
     assert_eq!(p.items, 8, "64 -> 32 -> 16 -> 8");
     assert!(
-        sync::pack_within(id, &all, &[], 500, one - 1).is_none(),
+        matches!(
+            sync::pack_within(id, &all, &[], 500, one - 1),
+            Err(Unpacked::TooBig)
+        ),
         "one alone is too big"
     );
+}
+
+#[test]
+fn a_batch_that_cannot_be_built_is_told_apart_from_one_that_is_too_big() {
+    // Version 0 is not a standard UUID: no observation is at fault, so none may be blamed.
+    let bad = uuid::Uuid::parse_str("00000000-0000-0000-0000-000000000001").unwrap();
+    assert!(matches!(
+        sync::pack(bad, &items(3), &[], 500),
+        Err(Unpacked::Invalid)
+    ));
+    assert!(!sync::installation_ok(bad));
+    assert!(sync::installation_ok(uuid::Uuid::new_v4()));
 }
 
 #[test]
@@ -268,4 +354,83 @@ fn a_refused_read_is_a_gap_from_the_last_read_or_an_hour_ago_until_now() {
     // at the very start of time it still makes a valid gap
     let g = sync::full_gap(Source::Codex, None, Iso::from_millis(5).unwrap());
     assert!(g.from() < g.to());
+}
+
+#[test]
+fn a_saved_authorization_answer_is_reused_for_ten_minutes_and_never_from_the_future() {
+    let saved = 1_000_000;
+    assert!(sync::grants_fresh(saved, saved));
+    assert!(sync::grants_fresh(saved, saved + sync::GRANTS_KEEP_MS - 1));
+    assert!(!sync::grants_fresh(saved, saved + sync::GRANTS_KEEP_MS));
+    assert!(!sync::grants_fresh(saved, saved - 1), "the clock went back");
+}
+
+#[test]
+fn on_a_reused_answer_the_refusals_over_the_authorization_stay_and_are_not_counted() {
+    let all = items(4);
+    let outcomes = [
+        ItemOutcome::Accepted,
+        ItemOutcome::Rejected("COLLECTION_NOT_AUTHORIZED".into()),
+        ItemOutcome::Rejected("BEFORE_COLLECTION_WINDOW".into()),
+        ItemOutcome::Rejected("SESSION_OWNED".into()),
+    ];
+    assert!(sync::grant_refused(&outcomes));
+    assert!(!sync::grant_refused(&outcomes[3..]));
+    let mut applied = sync::apply_results(&all, &outcomes, 0);
+    sync::spare_grant_refusals(&all, &outcomes, &mut applied);
+    assert_eq!(applied.delete, [1, 4]);
+    assert_eq!(
+        applied.rejected.into_iter().collect::<Vec<_>>(),
+        [("SESSION_OWNED".to_owned(), 1)]
+    );
+}
+
+#[test]
+fn observed_ranges_that_touch_go_as_one_and_nothing_else_is_joined() {
+    use spendbranch::contract::{CoverageState, GapReason, Source};
+    let at = |m: i64| Iso::from_millis(1_000_000 + m * 60_000).unwrap();
+    let observed = |source, from, to| {
+        CoverageReport::new(source, at(from), at(to), CoverageState::Observed).unwrap()
+    };
+    let gap = |from, to| {
+        CoverageReport::new(
+            Source::Codex,
+            at(from),
+            at(to),
+            CoverageState::Unavailable {
+                reason: GapReason::AdapterError,
+            },
+        )
+        .unwrap()
+    };
+    let reports: Vec<(i64, CoverageReport)> = [
+        observed(Source::Codex, 0, 10),
+        observed(Source::ClaudeCode, 10, 20), // another source in between does not matter
+        observed(Source::Codex, 10, 20),
+        observed(Source::Codex, 20, 30),
+        observed(Source::Codex, 31, 40), // a minute apart: not touching
+        gap(100, 110),
+        // touches 31-40, but a gap of its source was told in between: kept apart, in order
+        observed(Source::Codex, 40, 50),
+    ]
+    .into_iter()
+    .enumerate()
+    .map(|(i, r)| (i as i64, r))
+    .collect();
+    let merged = sync::merge_coverage(&reports);
+    assert_eq!(
+        merged,
+        [
+            observed(Source::Codex, 0, 30),
+            observed(Source::ClaudeCode, 10, 20),
+            observed(Source::Codex, 31, 40),
+            gap(100, 110),
+            observed(Source::Codex, 40, 50),
+        ]
+    );
+    // and a batch carries the joined ranges
+    let p = sync::pack(uuid::Uuid::new_v4(), &[], &reports, 500).unwrap();
+    assert_eq!(p.coverage, 7, "every report sent leaves the buffer");
+    let v: serde_json::Value = serde_json::from_slice(&p.json).unwrap();
+    assert_eq!(v["coverage"].as_array().unwrap().len(), 5);
 }

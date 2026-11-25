@@ -15,7 +15,7 @@ use std::{
     time::{Duration, Instant},
 };
 
-pub use outbox::{Batch, Change, Queued};
+pub use outbox::{Batch, Change, GRANTS, Queued};
 pub use reads::{Commit, SpoolLimits};
 
 #[derive(Debug)]
@@ -106,6 +106,31 @@ const MIGRATIONS: &[&str] = &[
         SELECT id, payload, CAST(strftime('%s', 'now') AS INTEGER) * 1000 FROM spool;
     DROP TABLE spool;
     ALTER TABLE spool_new RENAME TO spool;
+",
+    "
+    -- Sending reads the buffer one source at a time, oldest first: an index on the source in
+    -- the payload, the same expression the queries use, so every way a row is written is
+    -- covered without a column to keep in step.
+    CREATE INDEX spool_source ON spool(json_extract(payload, '$.source'), id);
+    CREATE INDEX pending_coverage_source
+        ON pending_coverage(json_extract(payload, '$.source'), id);
+    -- Every read deletes the keys of its source that are past the window, by age.
+    CREATE INDEX seen_age ON seen(source, occurred_ms);
+    -- The size of the buffer, kept by the database on every insert, delete and change, so the
+    -- check before each read does not add up the whole buffer.
+    CREATE TABLE spool_size(id INTEGER PRIMARY KEY CHECK (id = 1),
+        items INTEGER NOT NULL, bytes INTEGER NOT NULL);
+    INSERT INTO spool_size(id, items, bytes)
+        SELECT 1, COUNT(*), COALESCE(SUM(LENGTH(payload) + 1), 0) FROM spool;
+    CREATE TRIGGER spool_size_insert AFTER INSERT ON spool BEGIN
+        UPDATE spool_size SET items = items + 1, bytes = bytes + LENGTH(new.payload) + 1;
+    END;
+    CREATE TRIGGER spool_size_delete AFTER DELETE ON spool BEGIN
+        UPDATE spool_size SET items = items - 1, bytes = bytes - LENGTH(old.payload) - 1;
+    END;
+    CREATE TRIGGER spool_size_update AFTER UPDATE OF payload ON spool BEGIN
+        UPDATE spool_size SET bytes = bytes - LENGTH(old.payload) + LENGTH(new.payload);
+    END;
 ",
 ];
 

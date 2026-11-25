@@ -55,6 +55,7 @@ pub fn disconnect(ctx: &mut Ctx, wait: Wait) -> Result<Disconnected> {
     for key in ["device_id", "org_name", "expires_at"] {
         account.store.meta_delete(key)?;
     }
+    account.store.forget_grants()?;
     Ok(Disconnected::Done { revoked, kept })
 }
 

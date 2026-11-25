@@ -4,4 +4,6 @@ mod files;
 mod run;
 
 pub use files::{Plan, Problem, State, command, install, is_ours, state, uninstall};
-pub use run::{INTERVAL_MS, MAX_INPUT, due, last_firing, log_line, parse_input, plain};
+pub use run::{
+    INTERVAL_MS, MAX_INPUT, SESSION_END_INTERVAL_MS, due, last_firing, log_line, parse_input, plain,
+};

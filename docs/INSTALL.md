@@ -151,6 +151,19 @@ spendbranch status    # what is connected, what is waiting, and what to fix
 
 Codex runs a new hook only after you trust it: open Codex and review it under `/hooks`.
 
+### How uploads behave
+
+- `sync` reads what is new into a local buffer, then sends the buffer in batches. Nothing leaves
+  the buffer until the server has answered for it.
+- The end of a session starts a sync at most every 2 minutes; any other hook event at most every
+  10 minutes.
+- During a sync, what the company authorized is asked at most every 10 minutes; `spendbranch status`
+  always asks the server.
+- A batch the server refuses as out of contract, or as too large, is split until the item at
+  fault is alone; only that item is dropped, and `status` counts it.
+- A batch that keeps getting server errors is split the same way. An item that keeps failing on its
+  own is never dropped: it stays in the buffer, is tried again on later uploads, and `status` says so.
+
 ## Uninstall
 
 One command removes everything SpendBranch put on this computer:

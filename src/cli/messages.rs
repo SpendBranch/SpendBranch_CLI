@@ -295,6 +295,7 @@ pub fn different_fields(agent: &str) -> String {
 
 pub const NO_SOURCE_ON: &str =
     "No source is turned on. Run `spendbranch enable claude-code` or `spendbranch enable codex`.";
+pub const BAD_INSTALLATION_ID: &str = "The installation id in the local state is not valid, so nothing can be sent. The buffer was kept. Run `spendbranch uninstall` and set up again, or report it.";
 pub const SESSION_OWNED_STOP: &str = "A session in the buffer belongs to another member, so it was discarded and the upload stopped. Run `spendbranch status` to check that this device is still connected.";
 
 /// One line of the summary for a code and how many events it covers.
@@ -303,7 +304,7 @@ pub fn rejected_line(code: &str, n: u64) -> String {
         "CLOCK_SKEW_EXPIRED" => format!("{n} items dropped: their time was ahead of the server"),
         "INVALID_LOCAL" => format!("{n} events dropped: they did not pass the local check"),
         "VALIDATION_FAILED" => {
-            format!("{n} events dropped: the server said the batch was out of contract")
+            format!("{n} events dropped: the server said they were out of contract")
         }
         "BEFORE_COLLECTION_WINDOW" => format!(
             "{n} events dropped: they are from before the month the company authorized collection"
@@ -313,6 +314,13 @@ pub fn rejected_line(code: &str, n: u64) -> String {
             failure_message(other)
         ),
     }
+}
+
+/// Items the server failed on (5xx) again and again, even alone: they are kept, never dropped.
+pub fn stuck_line(n: u64) -> String {
+    format!(
+        "{n} items keep failing on the server: they stay in the buffer and are tried again on the next upload."
+    )
 }
 
 // --- hooks, scheduler, setup ----------------------------------------------------------
