@@ -10,10 +10,13 @@ pub(super) const TOKEN_KEY: &str = "relay_token";
 
 /// The settings, one `(name, value)` per line. The token is the relay's own: it only says the
 /// batch comes from the agent this file was loaded for. The device key never leaves this program.
-fn settings(port: u16, token: &str) -> [(&'static str, String); 7] {
+fn settings(port: u16, token: &str) -> [(&'static str, String); 8] {
     [
         ("CLAUDE_CODE_ENABLE_TELEMETRY", "1".into()),
         ("OTEL_LOGS_EXPORTER", "otlp".into()),
+        // Milliseconds: the logs leave once a minute, in fewer and bigger batches, so the relay
+        // forwards less often and still keeps nothing between them.
+        ("OTEL_LOGS_EXPORT_INTERVAL", "60000".into()),
         ("OTEL_METRICS_EXPORTER", "none".into()),
         ("OTEL_EXPORTER_OTLP_PROTOCOL", "http/json".into()),
         ("OTEL_EXPORTER_OTLP_LOGS_PROTOCOL", "http/json".into()),

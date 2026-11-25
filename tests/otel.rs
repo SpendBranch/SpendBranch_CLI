@@ -29,6 +29,11 @@ fn otel_writes_a_private_environment_file_with_no_secret_in_it() {
             || text.contains("OTEL_METRICS_EXPORTER = 'none'"),
         "{text}"
     );
+    // Logs leave once a minute (milliseconds), in fewer and bigger batches.
+    assert!(
+        text.contains("export OTEL_LOGS_EXPORT_INTERVAL=60000\n"),
+        "{text}"
+    );
     // The port and token the relay will check, picked for this install, never the well-known 4318.
     let store = rig.store();
     let port: u16 = store
@@ -116,6 +121,10 @@ fn on_windows_otel_writes_a_powershell_file() {
     assert_eq!(out.code, 0, "{}", out.text);
     let text = fs::read_to_string(rig.dir.path().join("otel-claude_code.ps1")).unwrap();
     assert!(text.contains("$env:OTEL_LOGS_EXPORTER = 'otlp'"), "{text}");
+    assert!(
+        text.contains("$env:OTEL_LOGS_EXPORT_INTERVAL = '60000'"),
+        "{text}"
+    );
     assert!(
         text.contains("$env:OTEL_EXPORTER_OTLP_LOGS_HEADERS = 'x-spendbranch-token="),
         "{text}"
