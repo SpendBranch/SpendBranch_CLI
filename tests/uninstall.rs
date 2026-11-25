@@ -7,8 +7,8 @@ use rig::{EXE, Rig, authorize};
 use spendbranch::cli::messages as m;
 use spendbranch::infra::scheduler::Platform;
 use spendbranch::uninstall::{
-    PATH_MARK, folder_is_ours, installed_by_homebrew, powershell_encoded, windows_path_script,
-    without_path_lines,
+    PATH_MARK, folder_is_ours, installed_by_homebrew, powershell_encoded, tilde,
+    windows_path_script, without_path_lines,
 };
 use std::{fs, path::PathBuf};
 
@@ -147,7 +147,13 @@ fn uninstall_removes_everything_and_leaves_the_rest() {
     fs::write(&settings, json.to_string()).unwrap();
     let profile = rig.dir.path().join(".profile");
     fs::write(&profile, format!("umask 022\n{}", added(BASH_LINE))).unwrap();
-    let fish = rig.dir.path().join(".config/fish/conf.d/spendbranch.fish");
+    let fish = rig
+        .dir
+        .path()
+        .join(".config")
+        .join("fish")
+        .join("conf.d")
+        .join("spendbranch.fish");
     fs::create_dir_all(fish.parent().unwrap()).unwrap();
     fs::write(&fish, added("fish_add_path '/home/me/.local/bin'")).unwrap();
     rig.install_schedule(Platform::Linux, &[]).unwrap();
@@ -203,23 +209,46 @@ fn uninstall_removes_everything_and_leaves_the_rest() {
         "{}",
         out.text
     );
+    // Built with the platform's separator, as the command builds them.
+    let shown = |p: &PathBuf| tilde(p.to_str().unwrap(), rig.dir.path().to_str());
     assert!(
-        out.text.contains(&m::uninstall_path_files(
-            "~/.profile, ~/.config/fish/conf.d/spendbranch.fish"
-        )),
+        out.text.contains(&m::uninstall_path_files(&format!(
+            "{}, {}",
+            shown(&profile),
+            shown(&fish)
+        ))),
         "{}",
         out.text
     );
     assert!(
-        out.text.contains(&m::uninstall_deleted("~/spendbranch")),
+        out.text.contains(&m::uninstall_deleted(&shown(&data))),
         "{}",
         out.text
     );
 }
 
 #[test]
+fn the_shell_files_are_joined_with_the_platform_separator() {
+    use spendbranch::infra::uninstall::shell_files;
+    let home = std::env::temp_dir();
+    let home_text = home.to_str().unwrap().to_owned();
+    let env = move |k: &str| (k == "HOME").then(|| home_text.clone());
+    let fish = home
+        .join(".config")
+        .join("fish")
+        .join("conf.d")
+        .join("spendbranch.fish");
+    let files = shell_files(&env);
+    // Compared as text: `Path` equality ignores which separator was used.
+    assert_eq!(
+        files.last().and_then(|f| f.to_str()),
+        fish.to_str(),
+        "{files:?}"
+    );
+}
+
+#[test]
 fn paths_under_the_home_are_shown_with_a_tilde() {
-    use spendbranch::uninstall::tilde;
     assert_eq!(tilde("/home/me/.zshrc", Some("/home/me")), "~/.zshrc");
     assert_eq!(tilde(r"C:\Users\me\x", Some(r"C:\Users\me")), r"~\x");
     assert_eq!(

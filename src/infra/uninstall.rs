@@ -19,7 +19,9 @@ pub fn shell_files(env: Env) -> Vec<PathBuf> {
         home.join(".bashrc"),
         home.join(".bash_profile"),
         zdot.join(".zshrc"),
-        home.join(".config/fish/conf.d/spendbranch.fish"),
+        [".config", "fish", "conf.d", "spendbranch.fish"]
+            .iter()
+            .fold(home, |path, part| path.join(part)),
     ]
 }
 
