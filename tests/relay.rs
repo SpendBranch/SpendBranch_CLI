@@ -566,6 +566,43 @@ fn the_program_forwards_signed_what_passed_the_filter_and_keeps_nothing() {
 }
 
 #[test]
+fn the_program_sends_gzip_signed_over_one_reused_connection() {
+    let rig = Rig::new();
+    authorize(&rig);
+    assert_eq!(rig.run(&["login"]).code, 0);
+    let (_, token) = agent_endpoint(&rig);
+    rig.server.configure(|s| s.otlp.keep_alive = true);
+    let port = free_port();
+    let _child = start_program(&rig, port);
+
+    for _ in 0..3 {
+        // 200 only when the signature checks out against the bytes that were sent.
+        let (status, body) = post_to(port, &token, &sample());
+        assert_eq!((status, body.as_str()), (200, "{}"));
+    }
+    let sent: Vec<_> = rig
+        .server
+        .seen()
+        .into_iter()
+        .filter(|s| s.path == "/api/ingest/otlp/v1/logs")
+        .collect();
+    assert_eq!(sent.len(), 3);
+    for s in &sent {
+        assert_eq!(
+            s.headers.get("content-encoding").map(String::as_str),
+            Some("gzip")
+        );
+        assert_eq!(s.body[..2], [0x1f, 0x8b], "a gzip stream");
+    }
+    assert!(
+        sent.iter().all(|s| s.conn == sent[0].conn),
+        "one client, one connection: {:?}",
+        sent.iter().map(|s| s.conn).collect::<Vec<_>>()
+    );
+    assert_eq!(rig.server.state.lock().unwrap().otlp.received.len(), 3);
+}
+
+#[test]
 fn the_program_refuses_a_busy_port_an_unpaired_device_and_a_missing_otel() {
     let rig = Rig::new();
     let run = |port: Option<u16>| {

@@ -22,6 +22,9 @@ use std::{
 };
 
 const OTLP_LOGS: &str = "/api/ingest/otlp/v1/logs";
+/// How long a batch may take to go on: less than the 10 s an OTLP exporter waits by default, so
+/// the agent hears the answer before it gives up and sends the batch again.
+const FORWARD_WAIT: Duration = Duration::from_secs(8);
 
 pub(super) fn run(ctx: &mut Ctx, port: Option<u16>) -> Result<i32> {
     let account = account::open(ctx)?;
@@ -56,11 +59,13 @@ pub(super) fn run(ctx: &mut Ctx, port: Option<u16>) -> Result<i32> {
     ctx.out.flush()?;
 
     let (server, device, key) = (&connection.server, &connection.device, &connection.key);
-    // Each batch is sent with a fresh signature; a client is cheap to make and not shared.
+    // One client for every batch, so the connection to the server is reused; each batch is
+    // still signed afresh, over the gzipped bytes that go on the wire.
+    let client = Client::with_timeout(server.clone(), VERSION, FORWARD_WAIT);
     let forward = |payload: &Value| -> std::result::Result<u64, String> {
         let signer = Signer { device, key };
-        Client::new(server.clone(), VERSION)
-            .post::<_, Value>(OTLP_LOGS, payload, Some(&signer))
+        client
+            .post_gzip::<_, Value>(OTLP_LOGS, payload, Some(&signer))
             .map(|answer| relay::refused_by_server(&answer))
             .map_err(|f| m::failure_text(&f, account::now().millis()))
     };

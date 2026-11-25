@@ -107,6 +107,17 @@ impl Client {
         self.json(self.send("GET", path, None, signer)?)
     }
 
+    /// `POST` of `body` as JSON, sent gzipped (see `post_json_gzip`).
+    pub fn post_gzip<B: Serialize, R: DeserializeOwned>(
+        &self,
+        path: &str,
+        body: &B,
+        signer: Option<&Signer>,
+    ) -> Result<R, ApiFailure> {
+        let bytes = serde_json::to_vec(body).map_err(|_| ApiFailure::plain(0, "INTERNAL"))?;
+        self.post_json_gzip(path, &bytes, signer)
+    }
+
     /// `POST` of JSON that is sent gzipped. The signature covers the compressed bytes, the
     /// ones that go on the wire.
     pub fn post_json_gzip<R: DeserializeOwned>(
