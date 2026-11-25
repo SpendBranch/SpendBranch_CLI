@@ -297,6 +297,48 @@ fn an_archive_nobody_read_before_is_read_in_full_once() {
 }
 
 #[test]
+fn an_archive_in_several_checksummed_frames_is_read_in_full() {
+    let mut rig = Rig::new();
+    let text = rollout("thread_frames", 6, 6);
+    let cut = text[..text.len() / 2].rfind('\n').unwrap() + 1;
+    // A skippable frame first (magic 0x184D2A50, a length, bytes nobody decodes).
+    let mut archive = vec![0x50, 0x2a, 0x4d, 0x18, 3, 0, 0, 0, b'a', b'b', b'c'];
+    for (part, level) in [(&text[..cut], 19), (&text[cut..], 1)] {
+        let mut encoder = zstd::stream::Encoder::new(Vec::new(), level).unwrap();
+        encoder.include_checksum(true).unwrap();
+        encoder.write_all(part.as_bytes()).unwrap();
+        archive.extend(encoder.finish().unwrap());
+    }
+    fs::create_dir_all(rig.archived("x").parent().unwrap()).unwrap();
+    fs::write(rig.archived("rollout-f.jsonl.zst"), archive).unwrap();
+    let out = rig.collect();
+    assert_eq!(ids(&out).len(), 6);
+    assert!(gaps(&out).is_empty());
+}
+
+#[test]
+fn an_archive_that_is_not_zstd_or_fails_its_checksum_is_a_gap() {
+    let mut rig = Rig::new();
+    fs::create_dir_all(rig.archived("x").parent().unwrap()).unwrap();
+    fs::write(rig.archived("rollout-d.jsonl.zst"), b"plain text").unwrap();
+    // A frame whose checksum does not match what it decodes to.
+    let mut encoder = zstd::stream::Encoder::new(Vec::new(), 3).unwrap();
+    encoder.include_checksum(true).unwrap();
+    encoder
+        .write_all(rollout("thread_sum", 3, 3).as_bytes())
+        .unwrap();
+    let mut wrong = encoder.finish().unwrap();
+    *wrong.last_mut().unwrap() ^= 0xff;
+    fs::write(rig.archived("rollout-e.jsonl.zst"), wrong).unwrap();
+    let out = rig.collect();
+    assert!(out.observations.is_empty(), "{:?}", ids(&out));
+    assert_eq!(
+        gaps(&out),
+        [GapReason::AdapterError, GapReason::AdapterError]
+    );
+}
+
+#[test]
 fn an_archive_that_expands_too_much_is_a_gap_not_a_crash() {
     let mut rig = Rig::new();
     rig.max_archive_output = 200;

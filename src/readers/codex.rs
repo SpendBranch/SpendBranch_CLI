@@ -18,11 +18,15 @@ use crate::sources::{
     coverage::{failure_now, too_many_unsupported},
     outcome::{ReadOutcome, ReaderState},
 };
+use ruzstd::decoding::{
+    BlockDecodingStrategy, FrameDecoder,
+    errors::{FrameDecoderError, ReadFrameHeaderError},
+};
 use serde::{Deserialize, Serialize};
 use std::{
     collections::HashMap,
     fs::{self, File},
-    io::{self, BufReader, Read, Seek, SeekFrom},
+    io::{self, BufRead, BufReader, Read, Seek, SeekFrom},
     path::{Path, PathBuf},
 };
 
@@ -153,7 +157,7 @@ fn read_archive(
     threads: &HashMap<String, ThreadCursor>,
 ) -> io::Result<FileRead> {
     let options = ReadOptions::default();
-    let decoder = zstd::stream::read::Decoder::new(file)?;
+    let decoder = Zstd::new(BufReader::new(file));
     let limited = decoder.take(config.max_archive_output + 1);
     let (read, limited) = stream(
         limited,
@@ -168,6 +172,80 @@ fn read_archive(
         return Err(io::Error::other("archive expands beyond the limit"));
     }
     Ok(read)
+}
+
+/// A zstd stream decoded frame after frame, as the reference decoder does it: skippable frames
+/// are passed over, and a frame that carries a checksum must match it.
+struct Zstd<R: BufRead> {
+    source: R,
+    frame: FrameDecoder,
+    /// A frame is being decoded.
+    open: bool,
+}
+
+impl<R: BufRead> Zstd<R> {
+    fn new(source: R) -> Self {
+        Self {
+            source,
+            frame: FrameDecoder::new(),
+            open: false,
+        }
+    }
+
+    /// Reads the next frame's header; `false` at the end of the stream.
+    fn next_frame(&mut self) -> io::Result<bool> {
+        loop {
+            if self.source.fill_buf()?.is_empty() {
+                return Ok(false);
+            }
+            match self.frame.reset(&mut self.source) {
+                Ok(()) => return Ok(true),
+                Err(FrameDecoderError::ReadFrameHeaderError(ReadFrameHeaderError::SkipFrame {
+                    length,
+                    ..
+                })) => {
+                    let wanted = u64::from(length);
+                    let skipped = io::copy(&mut (&mut self.source).take(wanted), &mut io::sink())?;
+                    if skipped < wanted {
+                        return Err(io::Error::other("archive ends inside a skippable frame"));
+                    }
+                }
+                Err(e) => return Err(io::Error::other(e)),
+            }
+        }
+    }
+}
+
+impl<R: BufRead> Read for Zstd<R> {
+    fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+        if buf.is_empty() {
+            return Ok(0);
+        }
+        loop {
+            if !self.open {
+                if !self.next_frame()? {
+                    return Ok(0);
+                }
+                self.open = true;
+            }
+            while self.frame.can_collect() == 0 && !self.frame.is_finished() {
+                self.frame
+                    .decode_blocks(&mut self.source, BlockDecodingStrategy::UptoBlocks(1))
+                    .map_err(io::Error::other)?;
+            }
+            let n = self.frame.read(buf)?;
+            if n > 0 {
+                return Ok(n);
+            }
+            // The frame is decoded and handed out in full.
+            if let Some(expected) = self.frame.get_checksum_from_data()
+                && self.frame.get_calculated_checksum() != Some(expected)
+            {
+                return Err(io::Error::other("archive checksum does not match"));
+            }
+            self.open = false;
+        }
+    }
 }
 
 /// A `.jsonl` continues from the saved offset only if this is the same file, still holding the
