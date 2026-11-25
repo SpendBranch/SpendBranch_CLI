@@ -300,6 +300,29 @@ fn a_sync_that_ended_early_still_holds_the_next_stop_back() {
 }
 
 #[test]
+fn the_hook_reads_the_time_of_the_last_sync_from_a_small_file_beside_the_log() {
+    let rig = Rig::ready();
+    assert_eq!(rig.run(&["sync"]).code, 0);
+    let stamp = rig.dir.path().join("last-sync-attempt");
+    assert!(stamp.exists(), "sync leaves the time of its attempt");
+    // The database says an hour ago; the file says a moment ago, and the hook goes by the file
+    // without opening the database.
+    let hour_ago = spendbranch::contract::Iso::from_millis(rig::now_ms() - 3_600_000)
+        .unwrap()
+        .to_string();
+    rig.store()
+        .sync_set("lastSyncAttemptAt", &hour_ago)
+        .unwrap();
+    rig.claude_event("Stop");
+    rig.run(&["hook", "claude-code"]);
+    assert_eq!(spawned(&rig), 0);
+    // Without the file, the database decides.
+    fs::remove_file(&stamp).unwrap();
+    rig.run(&["hook", "claude-code"]);
+    assert_eq!(spawned(&rig), 1);
+}
+
+#[test]
 fn codex_never_reads_stdin_and_logs_its_event() {
     let rig = Rig::ready();
     *rig.system.stdin.borrow_mut() = Some(b"{\"last_assistant_message\":\"PRIVATE\"}".to_vec());

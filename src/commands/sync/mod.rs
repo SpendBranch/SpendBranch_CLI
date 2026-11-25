@@ -4,7 +4,7 @@ use super::account::{self, Loaded, now, open};
 use super::{Ctx, Result, say};
 use crate::cli::messages as m;
 use crate::contract::Source;
-use crate::infra::{clock, lock};
+use crate::infra::{clock, hook_log, lock};
 use std::collections::BTreeMap;
 
 pub(super) const INGEST: &str = "/api/ingest/v1/events";
@@ -51,9 +51,9 @@ pub fn run(ctx: &mut Ctx) -> Result<i32> {
     let mut account = open(ctx)?;
     // Before anything can end the run early: the hook's interval counts from the attempt, so a
     // sync that keeps failing is not started again on every Stop.
-    account
-        .store
-        .sync_set("lastSyncAttemptAt", &now().to_string())?;
+    let attempt = now().to_string();
+    account.store.sync_set("lastSyncAttemptAt", &attempt)?;
+    let _ = hook_log::write_attempt(&dir, &attempt);
     let connection = match account::load(&account)? {
         Loaded::NotConnected => return say(ctx, m::NOT_CONNECTED, 1),
         Loaded::Broken(text) => return say(ctx, &text, 1),

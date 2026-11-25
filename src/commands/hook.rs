@@ -38,6 +38,15 @@ fn fire(ctx: &Ctx, source: Source, argv_event: Option<&str>, at: Iso) -> Result<
     };
     let label = event.clone().unwrap_or_else(|| "unknown".into());
     let _ = hook_log::append(&dir, &hooks::log_line(at, &label, session.as_deref()));
+    let bare = event
+        .as_deref()
+        .map(|e| e.strip_prefix("codex:").unwrap_or(e));
+    // Most events come too soon after the last sync: the small file says so without opening
+    // the database.
+    let stamp = hook_log::read_attempt(&dir).and_then(|t| Iso::parse(t.trim()));
+    if stamp.is_some() && !hooks::due(bare, stamp, at) {
+        return Ok(());
+    }
     // Nothing to send before the first login, and no reason to create the database here.
     if !Store::exists(&dir) {
         return Ok(());
@@ -52,9 +61,6 @@ fn fire(ctx: &Ctx, source: Source, argv_event: Option<&str>, at: Iso) -> Result<
         None => store.sync_get("lastSyncAt")?,
     }
     .and_then(|t| Iso::parse(&t));
-    let bare = event
-        .as_deref()
-        .map(|e| e.strip_prefix("codex:").unwrap_or(e));
     if hooks::due(bare, last, at) {
         ctx.system
             .spawn_detached(&ctx.system.exe()?, &["sync"], &hook_log::path(&dir))?;
