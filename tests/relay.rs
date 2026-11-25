@@ -282,6 +282,36 @@ fn without_the_token_nothing_is_signed_and_nothing_is_counted() {
 }
 
 #[test]
+fn a_request_refused_early_still_gets_its_status_when_the_body_comes_late() {
+    let relay = Relay::start(|_| Ok(0));
+    let p = relay.port;
+    let body = vec![b'x'; 200 * 1024];
+    for (auth, length, status) in [
+        ("X-SpendBranch-Token: nope\r\n", body.len(), 403),
+        (AUTH, 2 * 1024 * 1024, 413),
+    ] {
+        let mut stream = TcpStream::connect(("127.0.0.1", p)).unwrap();
+        stream
+            .set_read_timeout(Some(Duration::from_secs(5)))
+            .unwrap();
+        let head = format!(
+            "POST /v1/logs HTTP/1.1\r\nHost: 127.0.0.1:{p}\r\n{auth}Content-Type: application/json\r\nContent-Length: {length}\r\n\r\n"
+        );
+        stream.write_all(head.as_bytes()).unwrap();
+        // The relay has answered and moved on before the body leaves the client.
+        thread::sleep(Duration::from_millis(200));
+        let _ = stream.write_all(&body);
+        let mut text = Vec::new();
+        let read = stream.read_to_end(&mut text);
+        let text = String::from_utf8_lossy(&text);
+        assert!(
+            text.starts_with(&format!("HTTP/1.1 {status} ")),
+            "{status}: {read:?} {text:?}"
+        );
+    }
+}
+
+#[test]
 fn a_client_that_trickles_is_cut_off_when_its_time_is_up() {
     let relay = Relay::start(|_| Ok(0));
     let mut slow = TcpStream::connect(("127.0.0.1", relay.port)).unwrap();
@@ -423,7 +453,12 @@ fn post_to(port: u16, token: &str, body: &str) -> (u16, String) {
     stream
         .set_read_timeout(Some(Duration::from_secs(20)))
         .unwrap();
-    write!(stream, "POST /v1/logs HTTP/1.1\r\nHost: localhost:{port}\r\nX-SpendBranch-Token: {token}\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{body}", body.len()).unwrap();
+    // One buffer, one write: the head and the body leave together, as an exporter sends them.
+    let request = format!(
+        "POST /v1/logs HTTP/1.1\r\nHost: localhost:{port}\r\nX-SpendBranch-Token: {token}\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{body}",
+        body.len()
+    );
+    stream.write_all(request.as_bytes()).unwrap();
     let mut text = String::new();
     let _ = stream.read_to_string(&mut text);
     (

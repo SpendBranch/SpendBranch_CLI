@@ -24,6 +24,10 @@ const READ_WAIT: Duration = Duration::from_secs(5);
 const REQUEST_WAIT: Duration = Duration::from_secs(10);
 /// The headers come at once from an exporter; whoever trickles them gives the slot back soon.
 const HEAD_WAIT: Duration = Duration::from_secs(2);
+/// After an early answer, how much of the unread body is taken in, and for how long, so the
+/// close is a clean end of stream and not a reset that would lose the answer.
+const DRAIN_MAX: u64 = 256 * 1024;
+const DRAIN_WAIT: Duration = Duration::from_millis(500);
 
 /// What happened to a batch, for the screen.
 pub enum Event {
@@ -131,6 +135,34 @@ fn reply_with(mut stream: &TcpStream, status: u16, body: &str) -> io::Result<()>
         relay::reason(status),
         body.len()
     )
+}
+
+/// Answers before the body was read, then lets the client finish sending (up to `DRAIN_MAX` of
+/// what it announced, within `DRAIN_WAIT`) and discards it. Closing with unread bytes, or with
+/// bytes still on their way, makes the system reset the connection, and the client loses the
+/// status (a refused batch would look like a network failure and be sent again at once).
+fn reply_early(
+    stream: &TcpStream,
+    status: u16,
+    announced: Option<u64>,
+    had: usize,
+) -> io::Result<()> {
+    let sent = reply(stream, status);
+    let _ = stream.shutdown(std::net::Shutdown::Write);
+    let left = announced
+        .unwrap_or(DRAIN_MAX)
+        .min(DRAIN_MAX)
+        .saturating_sub(had as u64);
+    let deadline = Instant::now() + DRAIN_WAIT;
+    let mut taken = 0u64;
+    let mut chunk = [0u8; 8192];
+    while taken < left {
+        let Some(n) = read_by(stream, &mut chunk, deadline) else {
+            break;
+        };
+        taken += n as u64;
+    }
+    sent
 }
 
 /// One read that never waits past `deadline`: a client that trickles bytes cannot hold a slot
@@ -259,22 +291,23 @@ fn handle(
     let (head, body) = match read_head(&stream, started + HEAD_WAIT) {
         Ok(h) => h,
         Err(0) => return Ok(()),
-        Err(status) => return reply(&stream, status),
+        Err(status) => return reply_early(&stream, status, None, 0),
     };
     let Some(request) = Request::parse(&head) else {
-        return reply(&stream, 400);
+        return reply_early(&stream, 400, None, body.len());
     };
+    let announced = content_length(&request).ok().flatten();
     // The token is checked here, before the rate limit counts anything.
     let wanted = match screen(&request, peer, token) {
         Ok(n) => n,
-        Err(status) => return reply(&stream, status),
+        Err(status) => return reply_early(&stream, status, announced, body.len()),
     };
     if !limit
         .lock()
         .unwrap_or_else(PoisonError::into_inner)
         .allow(clock::now_ms())
     {
-        return reply(&stream, 429);
+        return reply_early(&stream, 429, announced, body.len());
     }
     let Some(body) = read_body(&stream, body, wanted, deadline) else {
         return Ok(()); // gone or too slow: nothing to answer
