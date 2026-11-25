@@ -384,3 +384,53 @@ fn on_a_reused_answer_the_refusals_over_the_authorization_stay_and_are_not_count
         [("SESSION_OWNED".to_owned(), 1)]
     );
 }
+
+#[test]
+fn observed_ranges_that_touch_go_as_one_and_nothing_else_is_joined() {
+    use spendbranch::contract::{CoverageState, GapReason, Source};
+    let at = |m: i64| Iso::from_millis(1_000_000 + m * 60_000).unwrap();
+    let observed = |source, from, to| {
+        CoverageReport::new(source, at(from), at(to), CoverageState::Observed).unwrap()
+    };
+    let gap = |from, to| {
+        CoverageReport::new(
+            Source::Codex,
+            at(from),
+            at(to),
+            CoverageState::Unavailable {
+                reason: GapReason::AdapterError,
+            },
+        )
+        .unwrap()
+    };
+    let reports: Vec<(i64, CoverageReport)> = [
+        observed(Source::Codex, 0, 10),
+        observed(Source::ClaudeCode, 10, 20), // another source in between does not matter
+        observed(Source::Codex, 10, 20),
+        observed(Source::Codex, 20, 30),
+        observed(Source::Codex, 31, 40), // a minute apart: not touching
+        gap(100, 110),
+        // touches 31-40, but a gap of its source was told in between: kept apart, in order
+        observed(Source::Codex, 40, 50),
+    ]
+    .into_iter()
+    .enumerate()
+    .map(|(i, r)| (i as i64, r))
+    .collect();
+    let merged = sync::merge_coverage(&reports);
+    assert_eq!(
+        merged,
+        [
+            observed(Source::Codex, 0, 30),
+            observed(Source::ClaudeCode, 10, 20),
+            observed(Source::Codex, 31, 40),
+            gap(100, 110),
+            observed(Source::Codex, 40, 50),
+        ]
+    );
+    // and a batch carries the joined ranges
+    let p = sync::pack(uuid::Uuid::new_v4(), &[], &reports, 500).unwrap();
+    assert_eq!(p.coverage, 7, "every report sent leaves the buffer");
+    let v: serde_json::Value = serde_json::from_slice(&p.json).unwrap();
+    assert_eq!(v["coverage"].as_array().unwrap().len(), 5);
+}

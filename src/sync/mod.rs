@@ -74,6 +74,43 @@ pub fn parse_coverage(
     (reports, invalid)
 }
 
+/// The reports as they go in a batch: an `observed` range of a source that starts where the
+/// last report of that source (an `observed` range too) ends is joined to it. Nothing else is
+/// joined, and the order of each source's reports is kept, so a gap and the ranges told after
+/// it keep their order. The server checks the joined ranges like any other.
+pub fn merge_coverage(reports: &[(i64, CoverageReport)]) -> Vec<CoverageReport> {
+    let mut out: Vec<CoverageReport> = Vec::with_capacity(reports.len());
+    let mut last: BTreeMap<&'static str, usize> = BTreeMap::new();
+    for (_, report) in reports {
+        let name = report.source().name();
+        let joined = last.get(name).and_then(|&i| {
+            let before = &out[i];
+            let touching = before.state() == CoverageState::Observed
+                && report.state() == CoverageState::Observed
+                && before.to() == report.from();
+            touching
+                .then(|| {
+                    CoverageReport::new(
+                        report.source(),
+                        before.from(),
+                        report.to(),
+                        CoverageState::Observed,
+                    )
+                })
+                .flatten()
+                .map(|r| (i, r))
+        });
+        match joined {
+            Some((i, r)) => out[i] = r,
+            None => {
+                last.insert(name, out.len());
+                out.push(report.clone());
+            }
+        }
+    }
+    out
+}
+
 /// A batch ready to send.
 #[derive(Debug)]
 pub struct Packed {
@@ -125,8 +162,10 @@ pub fn pack_within(
     let c = coverage.len().min(MAX_BATCH_COVERAGE);
     let observations: Vec<&Encoded<UsageObservation>> =
         items[..n].iter().map(|i| &i.encoded).collect();
-    let reports: Vec<Encoded<CoverageReport>> =
-        coverage[..c].iter().map(|(_, r)| Encoded::new(r)).collect();
+    let reports: Vec<Encoded<CoverageReport>> = merge_coverage(&coverage[..c])
+        .iter()
+        .map(Encoded::new)
+        .collect();
     loop {
         if n + c == 0 {
             return Err(Unpacked::Nothing);
