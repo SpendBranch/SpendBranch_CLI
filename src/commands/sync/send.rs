@@ -446,10 +446,9 @@ fn pass(
     };
     let applied = rules::apply_results(sent().items, &outcomes, ms());
     record(store, tally, sent(), &applied)?;
-    if *max_items == 0 {
-        // The coverage went alone; the events are next, in full batches again.
-        *max_items = crate::contract::MAX_BATCH_OBSERVATIONS;
-    }
+    // Whatever was cut down to get this batch through (the coverage alone, a half after a
+    // refusal) was about this batch: the next one starts full again.
+    *max_items = crate::contract::MAX_BATCH_OBSERVATIONS;
     if applied.session_owned.is_some() {
         // A session that is not this member's: its buffer is gone, and the run stops here.
         summary(ctx, tally)?;

@@ -85,7 +85,7 @@ fn a_large_buffer_goes_in_batches_of_500() {
 }
 
 #[test]
-fn a_batch_the_server_finds_too_big_is_halved_until_it_fits() {
+fn a_batch_the_server_finds_too_big_is_halved_until_it_fits_and_the_next_starts_full() {
     use spendbranch::sync::{self, Item};
     let rig = Rig::ready();
     // a limit that fits 15 observations but not 20, worked out from the real batch size
@@ -124,8 +124,8 @@ fn a_batch_the_server_finds_too_big_is_halved_until_it_fits() {
         .collect();
     assert_eq!(
         sizes,
-        [10, 10, 10, 10],
-        "40 -> 20 -> 10: halved, not trimmed one at a time"
+        [10, 15, 15],
+        "40 -> 20 -> 10, halved; after an accepted batch the next starts full again: 30 -> 15"
     );
 }
 
