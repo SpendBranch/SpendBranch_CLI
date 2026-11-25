@@ -36,6 +36,8 @@ path = "tests/perf.rs"
 
 [dev-dependencies]
 jsonschema = { version = "0.62", default-features = false }
+# The reference zstd encoder, so the tests read archives made the way Codex makes them.
+zstd = "0.14.3"
 tempfile = "3.27.0"
 # TLS test servers: a throwaway certificate, and rustls with TLS 1.2 so a 1.2-only server exists.
 rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
@@ -55,8 +57,9 @@ serde = { version = "1.0.229", features = ["derive"] }
 # preserve_order: the user's settings.json keeps its key order when we edit it.
 serde_json = { version = "1", features = ["preserve_order"] }
 uuid = { version = "1.29.2", features = ["v4"] }
-zstd = "0.14.3"
-base64 = "0.22"
+# Codex archives (`.zst`): a pure-Rust decoder, no C to build.
+ruzstd = "0.9"
+base64 = "0.23"
 zeroize = "1"
 # Batches go out gzipped (the API wants it). The pure-Rust backend: no C, no unsafe of ours.
 flate2 = { version = "1", default-features = false, features = ["rust_backend"] }

@@ -24,6 +24,10 @@ const READ_WAIT: Duration = Duration::from_secs(5);
 const REQUEST_WAIT: Duration = Duration::from_secs(10);
 /// The headers come at once from an exporter; whoever trickles them gives the slot back soon.
 const HEAD_WAIT: Duration = Duration::from_secs(2);
+/// After an early answer, how much of the unread body is taken in, and for how long, so the
+/// close is a clean end of stream and not a reset that would lose the answer.
+const DRAIN_MAX: u64 = 256 * 1024;
+const DRAIN_WAIT: Duration = Duration::from_millis(500);
 
 /// What happened to a batch, for the screen.
 pub enum Event {
@@ -89,11 +93,16 @@ pub fn serve(
     })
 }
 
-/// Whether the client runs as this user. Linux says so in `/proc/net/tcp`; where there is no
-/// such table (macOS, Windows) every local client passes and the token is the only door.
-// ponytail: Linux only; macOS (LOCAL_PEERPID) and Windows (GetExtendedTcpTable) need FFI.
-fn same_user(stream: &TcpStream, peer: SocketAddr) -> bool {
-    #[cfg(unix)]
+/// Whether the client runs as this user. Linux says so in `/proc/net/tcp`, macOS through
+/// `lsof`; where neither exists (Windows) every local client passes and the token is the only
+/// door. What cannot be found out is a no, except a system with no such table or tool at all.
+// ponytail: Windows (GetExtendedTcpTable) needs FFI, which this crate does not allow.
+pub fn same_user(stream: &TcpStream, peer: SocketAddr) -> bool {
+    #[cfg(target_os = "macos")]
+    {
+        same_user_by_lsof(stream, peer)
+    }
+    #[cfg(all(unix, not(target_os = "macos")))]
     {
         let (SocketAddr::V4(peer), Ok(SocketAddr::V4(us))) = (peer, stream.local_addr()) else {
             return false;
@@ -114,6 +123,54 @@ fn same_user(stream: &TcpStream, peer: SocketAddr) -> bool {
     }
 }
 
+/// macOS keeps no table to read, and the socket call that names a peer works only for local
+/// (Unix) sockets. `lsof`, run by its full path with no shell, lists this user's sockets on the
+/// client's port: the client's end must be among them, held by a process of this user. Another
+/// user's sockets are not listed to us, so they never pass. Bounded by `LSOF_WAIT`.
+#[cfg(target_os = "macos")]
+fn same_user_by_lsof(stream: &TcpStream, peer: SocketAddr) -> bool {
+    use std::process::{Command, Stdio};
+    const LSOF: &str = "/usr/sbin/lsof";
+    const LSOF_WAIT: Duration = Duration::from_secs(2);
+    let (SocketAddr::V4(peer), Ok(SocketAddr::V4(us))) = (peer, stream.local_addr()) else {
+        return false;
+    };
+    let Ok(me) = super::private_fs::my_uid() else {
+        return false;
+    };
+    let spawned = Command::new(LSOF)
+        .args(["-n", "-P", "-Fpun"])
+        .arg(format!("-iTCP@{}:{}", peer.ip(), peer.port()))
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn();
+    let mut child = match spawned {
+        Ok(child) => child,
+        // No such tool on this system: like Linux without its table, the token is the door.
+        Err(e) => return e.kind() == io::ErrorKind::NotFound,
+    };
+    let deadline = Instant::now() + LSOF_WAIT;
+    loop {
+        match child.try_wait() {
+            Ok(Some(_)) => break,
+            Ok(None) if Instant::now() < deadline => thread::sleep(Duration::from_millis(10)),
+            _ => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return false;
+            }
+        }
+    }
+    let mut listed = String::new();
+    let read = child
+        .stdout
+        .take()
+        .map(|out| out.take(64 * 1024).read_to_string(&mut listed));
+    let end = |a: std::net::SocketAddrV4| (a.ip().octets(), a.port());
+    matches!(read, Some(Ok(_))) && relay::lsof_peer_uid(&listed, end(peer), end(us)) == Some(me)
+}
+
 fn reply(mut stream: &TcpStream, status: u16) -> io::Result<()> {
     let body = if status == 200 {
         "{}".to_owned()
@@ -131,6 +188,34 @@ fn reply_with(mut stream: &TcpStream, status: u16, body: &str) -> io::Result<()>
         relay::reason(status),
         body.len()
     )
+}
+
+/// Answers before the body was read, then lets the client finish sending (up to `DRAIN_MAX` of
+/// what it announced, within `DRAIN_WAIT`) and discards it. Closing with unread bytes, or with
+/// bytes still on their way, makes the system reset the connection, and the client loses the
+/// status (a refused batch would look like a network failure and be sent again at once).
+fn reply_early(
+    stream: &TcpStream,
+    status: u16,
+    announced: Option<u64>,
+    had: usize,
+) -> io::Result<()> {
+    let sent = reply(stream, status);
+    let _ = stream.shutdown(std::net::Shutdown::Write);
+    let left = announced
+        .unwrap_or(DRAIN_MAX)
+        .min(DRAIN_MAX)
+        .saturating_sub(had as u64);
+    let deadline = Instant::now() + DRAIN_WAIT;
+    let mut taken = 0u64;
+    let mut chunk = [0u8; 8192];
+    while taken < left {
+        let Some(n) = read_by(stream, &mut chunk, deadline) else {
+            break;
+        };
+        taken += n as u64;
+    }
+    sent
 }
 
 /// One read that never waits past `deadline`: a client that trickles bytes cannot hold a slot
@@ -259,22 +344,23 @@ fn handle(
     let (head, body) = match read_head(&stream, started + HEAD_WAIT) {
         Ok(h) => h,
         Err(0) => return Ok(()),
-        Err(status) => return reply(&stream, status),
+        Err(status) => return reply_early(&stream, status, None, 0),
     };
     let Some(request) = Request::parse(&head) else {
-        return reply(&stream, 400);
+        return reply_early(&stream, 400, None, body.len());
     };
+    let announced = content_length(&request).ok().flatten();
     // The token is checked here, before the rate limit counts anything.
     let wanted = match screen(&request, peer, token) {
         Ok(n) => n,
-        Err(status) => return reply(&stream, status),
+        Err(status) => return reply_early(&stream, status, announced, body.len()),
     };
     if !limit
         .lock()
         .unwrap_or_else(PoisonError::into_inner)
         .allow(clock::now_ms())
     {
-        return reply(&stream, 429);
+        return reply_early(&stream, 429, announced, body.len());
     }
     let Some(body) = read_body(&stream, body, wanted, deadline) else {
         return Ok(()); // gone or too slow: nothing to answer

@@ -24,10 +24,17 @@ These are the properties worth trying to break:
   is validated against the contract before it is kept, and everything else is skipped without
   being stored.
 - **Private by default.** The data folder is created `0700` and its files `0600` (on Windows
-  the folder's ACL protects them). A folder anybody can write to is refused.
+  the folder's ACL protects them). A folder anybody can write to is refused. The device key
+  goes to the system keychain when there is one; when it must go to a file on Windows, the file
+  is only written inside the user's profile (a data folder elsewhere, or on a network share,
+  is refused), because only the profile's ACL keeps other users out.
 - **No shell, ever.** Reading your sessions starts no program except `git`, with fixed
   arguments, a 2-second timeout and no shell, to learn a project's remote. Folder names that
   come from a transcript are never interpreted, and network paths are never contacted.
+  On macOS, `spendbranch relay` runs `/usr/sbin/lsof` (full path, fixed arguments, no shell,
+  a 2-second limit) to check that a client connecting to it belongs to the same user; Linux
+  reads the same answer from `/proc/net/tcp`. A client whose owner cannot be confirmed is
+  refused.
 - **The code does not need to be secret.** Security must not depend on anyone not having read
   this source. The only secret is a device's own private key, which never leaves its machine.
 

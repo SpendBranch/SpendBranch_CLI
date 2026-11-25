@@ -45,6 +45,9 @@ pub enum Error {
     Corrupt,
     /// The key file can be read by other users; the key is treated as exposed.
     Insecure(PathBuf),
+    /// Windows: the key file would go in this folder, outside the user's profile, where the
+    /// profile's access rules do not keep other users out. Nothing was written.
+    OutsideProfile(PathBuf),
     /// The system has no source of randomness.
     Entropy,
     Io(io::Error),
@@ -63,6 +66,11 @@ impl fmt::Display for Error {
                 f,
                 "{} can be read by other users; delete it and run `spendbranch login`",
                 p.display()
+            ),
+            Self::OutsideProfile(dir) => write!(
+                f,
+                "the device key would be saved in {}, outside your user profile, where other users of this computer may be able to read it. Set SPENDBRANCH_HOME to a folder inside your user profile, or make Windows Credential Manager available, then run `spendbranch login` again",
+                dir.display()
             ),
             Self::Entropy => f.write_str("the system has no source of randomness"),
             Self::Io(e) => write!(f, "{e}"),
@@ -95,8 +103,9 @@ pub fn generate() -> Result<DeviceKey> {
 
 /// The keychain if it works and no key file exists yet, else the file. A key file that is
 /// already there wins, so a key saved without a keychain is not lost when one appears.
-pub fn open(dir: &Path, installation_id: &str) -> Box<dyn KeyStore> {
-    let files = KeyFiles::new(dir);
+/// `profile` is the user's home folder: on Windows a key file is only written inside it.
+pub fn open(dir: &Path, installation_id: &str, profile: Option<&Path>) -> Box<dyn KeyStore> {
+    let files = KeyFiles::in_profile(dir, profile);
     if !files.exists()
         && let Some(keychain) = Keychain::platform(installation_id)
     {
@@ -183,13 +192,46 @@ impl KeyStore for Keychain {
 
 pub struct KeyFiles {
     dir: PathBuf,
+    /// `Some`: on Windows, keys are only written inside this profile folder (`Some(None)`:
+    /// the profile is unknown, so nowhere).
+    profile: Option<Option<PathBuf>>,
 }
 
 impl KeyFiles {
+    /// Files in `dir`, wherever it is (tests, and reading what is there).
     pub fn new(dir: &Path) -> Self {
         Self {
             dir: dir.to_owned(),
+            profile: None,
         }
+    }
+
+    /// Files in `dir`, written on Windows only if `dir` is inside `profile`: a folder elsewhere
+    /// does not get the profile's access rules, so another user could read the key.
+    pub fn in_profile(dir: &Path, profile: Option<&Path>) -> Self {
+        Self {
+            dir: dir.to_owned(),
+            profile: Some(profile.map(Path::to_owned)),
+        }
+    }
+
+    /// `Err` when the key must not be written here.
+    fn check_place(&self) -> Result<()> {
+        #[cfg(windows)]
+        if let Some(profile) = &self.profile {
+            let inside = profile.as_deref().is_some_and(|profile| {
+                match (resolved(&self.dir), resolved(profile)) {
+                    (Some(dir), Some(profile)) => within_profile(&dir, &profile),
+                    _ => false,
+                }
+            });
+            if !inside {
+                return Err(Error::OutsideProfile(self.dir.clone()));
+            }
+        }
+        #[cfg(not(windows))]
+        let _ = &self.profile;
+        Ok(())
     }
 
     fn path(&self, slot: Slot) -> PathBuf {
@@ -232,6 +274,7 @@ impl KeyStore for KeyFiles {
     }
 
     fn save(&self, slot: Slot, key: &DeviceKey) -> Result<()> {
+        self.check_place()?;
         private_fs::create_dir(&self.dir)?;
         // Write beside it, then rename: a crash leaves the old key or the new one, never half.
         // The name has the slot and the process, so two writers never share a temporary file.
@@ -261,5 +304,53 @@ impl KeyStore for KeyFiles {
             Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(()),
             Err(e) => Err(e.into()),
         }
+    }
+}
+
+/// The real path of `path` (links and `..` resolved), for a folder that may not exist yet: its
+/// nearest existing parent, resolved, with the rest put back.
+#[cfg(windows)]
+fn resolved(path: &Path) -> Option<String> {
+    let mut rest = Vec::new();
+    let mut here = path;
+    loop {
+        if let Ok(real) = fs::canonicalize(here) {
+            let mut full = real;
+            for part in rest.iter().rev() {
+                full.push(part);
+            }
+            return full.to_str().map(str::to_owned);
+        }
+        rest.push(here.file_name()?.to_owned());
+        here = here.parent()?;
+    }
+}
+
+/// Whether the Windows path `dir` is `profile` or inside it: compared part by part, ignoring
+/// case and the `\\?\` prefix. Only a local drive path can be inside: a network path (`\\server`,
+/// `\\?\UNC\`), a device path, a relative path or one with `..` never is.
+pub fn within_profile(dir: &str, profile: &str) -> bool {
+    fn parts(path: &str) -> Option<Vec<String>> {
+        let path = path.strip_prefix(r"\\?\").unwrap_or(path);
+        if path.starts_with(['\\', '/']) {
+            return None; // a network or device path, or one with no drive
+        }
+        let parts: Vec<String> = path
+            .split(['\\', '/'])
+            .filter(|p| !p.is_empty() && *p != ".")
+            .map(str::to_lowercase)
+            .collect();
+        let drive = parts.first()?;
+        let is_drive = drive.len() == 2
+            && drive.ends_with(':')
+            && drive
+                .chars()
+                .next()
+                .is_some_and(|c| c.is_ascii_alphabetic());
+        (is_drive && !parts.iter().any(|p| p == "..")).then_some(parts)
+    }
+    match (parts(dir), parts(profile)) {
+        (Some(dir), Some(profile)) => dir.starts_with(&profile),
+        _ => false,
     }
 }

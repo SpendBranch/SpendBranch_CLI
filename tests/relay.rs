@@ -282,6 +282,36 @@ fn without_the_token_nothing_is_signed_and_nothing_is_counted() {
 }
 
 #[test]
+fn a_request_refused_early_still_gets_its_status_when_the_body_comes_late() {
+    let relay = Relay::start(|_| Ok(0));
+    let p = relay.port;
+    let body = vec![b'x'; 200 * 1024];
+    for (auth, length, status) in [
+        ("X-SpendBranch-Token: nope\r\n", body.len(), 403),
+        (AUTH, 2 * 1024 * 1024, 413),
+    ] {
+        let mut stream = TcpStream::connect(("127.0.0.1", p)).unwrap();
+        stream
+            .set_read_timeout(Some(Duration::from_secs(5)))
+            .unwrap();
+        let head = format!(
+            "POST /v1/logs HTTP/1.1\r\nHost: 127.0.0.1:{p}\r\n{auth}Content-Type: application/json\r\nContent-Length: {length}\r\n\r\n"
+        );
+        stream.write_all(head.as_bytes()).unwrap();
+        // The relay has answered and moved on before the body leaves the client.
+        thread::sleep(Duration::from_millis(200));
+        let _ = stream.write_all(&body);
+        let mut text = Vec::new();
+        let read = stream.read_to_end(&mut text);
+        let text = String::from_utf8_lossy(&text);
+        assert!(
+            text.starts_with(&format!("HTTP/1.1 {status} ")),
+            "{status}: {read:?} {text:?}"
+        );
+    }
+}
+
+#[test]
 fn a_client_that_trickles_is_cut_off_when_its_time_is_up() {
     let relay = Relay::start(|_| Ok(0));
     let mut slow = TcpStream::connect(("127.0.0.1", relay.port)).unwrap();
@@ -319,6 +349,22 @@ fn a_client_that_trickles_its_headers_gives_its_slot_back_within_seconds() {
     let _ = slow.read(&mut [0u8; 64]);
     assert!(
         started.elapsed() < Duration::from_secs(3),
+        "{:?}",
+        started.elapsed()
+    );
+}
+
+#[test]
+#[cfg(target_os = "macos")]
+fn on_macos_a_client_of_this_user_is_recognised() {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let _client = TcpStream::connect(("127.0.0.1", port)).unwrap();
+    let (stream, peer) = listener.accept().unwrap();
+    let started = Instant::now();
+    assert!(relay_server::same_user(&stream, peer));
+    assert!(
+        started.elapsed() < Duration::from_secs(2),
         "{:?}",
         started.elapsed()
     );
@@ -423,7 +469,12 @@ fn post_to(port: u16, token: &str, body: &str) -> (u16, String) {
     stream
         .set_read_timeout(Some(Duration::from_secs(20)))
         .unwrap();
-    write!(stream, "POST /v1/logs HTTP/1.1\r\nHost: localhost:{port}\r\nX-SpendBranch-Token: {token}\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{body}", body.len()).unwrap();
+    // One buffer, one write: the head and the body leave together, as an exporter sends them.
+    let request = format!(
+        "POST /v1/logs HTTP/1.1\r\nHost: localhost:{port}\r\nX-SpendBranch-Token: {token}\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{body}",
+        body.len()
+    );
+    stream.write_all(request.as_bytes()).unwrap();
     let mut text = String::new();
     let _ = stream.read_to_string(&mut text);
     (
@@ -528,6 +579,43 @@ fn the_program_forwards_signed_what_passed_the_filter_and_keeps_nothing() {
             file.display()
         );
     }
+}
+
+#[test]
+fn the_program_sends_gzip_signed_over_one_reused_connection() {
+    let rig = Rig::new();
+    authorize(&rig);
+    assert_eq!(rig.run(&["login"]).code, 0);
+    let (_, token) = agent_endpoint(&rig);
+    rig.server.configure(|s| s.otlp.keep_alive = true);
+    let port = free_port();
+    let _child = start_program(&rig, port);
+
+    for _ in 0..3 {
+        // 200 only when the signature checks out against the bytes that were sent.
+        let (status, body) = post_to(port, &token, &sample());
+        assert_eq!((status, body.as_str()), (200, "{}"));
+    }
+    let sent: Vec<_> = rig
+        .server
+        .seen()
+        .into_iter()
+        .filter(|s| s.path == "/api/ingest/otlp/v1/logs")
+        .collect();
+    assert_eq!(sent.len(), 3);
+    for s in &sent {
+        assert_eq!(
+            s.headers.get("content-encoding").map(String::as_str),
+            Some("gzip")
+        );
+        assert_eq!(s.body[..2], [0x1f, 0x8b], "a gzip stream");
+    }
+    assert!(
+        sent.iter().all(|s| s.conn == sent[0].conn),
+        "one client, one connection: {:?}",
+        sent.iter().map(|s| s.conn).collect::<Vec<_>>()
+    );
+    assert_eq!(rig.server.state.lock().unwrap().otlp.received.len(), 3);
 }
 
 #[test]

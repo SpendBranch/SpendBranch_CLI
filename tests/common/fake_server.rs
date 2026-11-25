@@ -15,7 +15,7 @@ use std::{
     net::{TcpListener, TcpStream},
     sync::{
         Arc, Mutex,
-        atomic::{AtomicBool, Ordering},
+        atomic::{AtomicBool, AtomicU64, Ordering},
     },
     thread,
     time::{SystemTime, UNIX_EPOCH},
@@ -29,6 +29,8 @@ pub struct Seen {
     pub path: String,
     pub headers: HashMap<String, String>,
     pub body: Vec<u8>,
+    /// Which connection it came on: the same number for requests sent over one connection.
+    pub conn: u64,
 }
 
 pub struct Device {
@@ -88,6 +90,9 @@ pub struct Otlp {
     pub received: Vec<(String, serde_json::Value)>,
     /// Batches counted in the current minute, per device: (start of the minute, batches).
     window: HashMap<String, (std::time::Instant, u32)>,
+    /// Keep the connection open after answering this route, so a client can send the next
+    /// batch on it.
+    pub keep_alive: bool,
 }
 
 /// The route's own ceiling, apart from the `sync`'s.
@@ -243,35 +248,45 @@ impl Drop for FakeServer {
 }
 
 fn serve(mut conn: TcpStream, state: &Mutex<State>) {
-    let Some(req) = read_request(&mut conn) else {
-        return;
-    };
-    let (reply, delay) = state
-        .lock()
-        .map(|mut s| {
-            let delay = (req.path == "/api/cli/v1/status")
-                .then(|| s.delay_next_status.take())
-                .flatten();
-            (route(&mut s, req), delay)
-        })
-        .unwrap();
-    if let Some(d) = delay {
-        thread::sleep(d); // outside the lock: the rest of the server keeps answering
+    static NEXT_CONN: AtomicU64 = AtomicU64::new(1);
+    let id = NEXT_CONN.fetch_add(1, Ordering::SeqCst);
+    loop {
+        let Some(mut req) = read_request(&mut conn) else {
+            return;
+        };
+        req.conn = id;
+        let (reply, delay, keep) = state
+            .lock()
+            .map(|mut s| {
+                let delay = (req.path == "/api/cli/v1/status")
+                    .then(|| s.delay_next_status.take())
+                    .flatten();
+                let keep = s.otlp.keep_alive && req.path == "/api/ingest/otlp/v1/logs";
+                (route(&mut s, req), delay, keep)
+            })
+            .unwrap();
+        if let Some(d) = delay {
+            thread::sleep(d); // outside the lock: the rest of the server keeps answering
+        }
+        let (status, headers, body) = reply;
+        let mut out = format!(
+            "HTTP/1.1 {status} X\r\nContent-Length: {}\r\nConnection: {}\r\n",
+            body.len(),
+            if keep { "keep-alive" } else { "close" }
+        );
+        if !body.is_empty() {
+            out.push_str("Content-Type: application/json\r\n");
+        }
+        for (k, v) in headers {
+            out.push_str(&format!("{k}: {v}\r\n"));
+        }
+        out.push_str("\r\n");
+        let _ = conn.write_all(out.as_bytes());
+        let _ = conn.write_all(&body);
+        if !keep {
+            return;
+        }
     }
-    let (status, headers, body) = reply;
-    let mut out = format!(
-        "HTTP/1.1 {status} X\r\nContent-Length: {}\r\nConnection: close\r\n",
-        body.len()
-    );
-    if !body.is_empty() {
-        out.push_str("Content-Type: application/json\r\n");
-    }
-    for (k, v) in headers {
-        out.push_str(&format!("{k}: {v}\r\n"));
-    }
-    out.push_str("\r\n");
-    let _ = conn.write_all(out.as_bytes());
-    let _ = conn.write_all(&body);
 }
 
 fn read_request(conn: &mut TcpStream) -> Option<Seen> {
@@ -312,6 +327,7 @@ fn read_request(conn: &mut TcpStream) -> Option<Seen> {
         path,
         headers,
         body,
+        conn: 0,
     })
 }
 
@@ -556,9 +572,9 @@ fn authenticate(s: &mut State, req: &Seen) -> Result<String, Reply> {
     Ok(id.to_owned())
 }
 
-/// `POST /api/ingest/otlp/v1/logs`: its own ceiling of 60 batches a minute per device, JSON up to
-/// 1 MiB, and the strict filter: a record with an attribute outside the declared twelve, or with a
-/// key given twice, is refused whole.
+/// `POST /api/ingest/otlp/v1/logs`: its own ceiling of 60 batches a minute per device, JSON (plain
+/// or gzip) up to 1 MiB, and the strict filter: a record with an attribute outside the declared
+/// twelve, or with a key given twice, is refused whole.
 fn otlp_logs(s: &mut State, req: &Seen, device: &str) -> Reply {
     const ALLOWED: [&str; 12] = [
         "event.name",
@@ -592,13 +608,35 @@ fn otlp_logs(s: &mut State, req: &Seen, device: &str) -> Reply {
         return error(status, &code);
     }
     let header = |n: &str| req.headers.get(n).map(String::as_str);
-    if header("content-type") != Some("application/json") || header("content-encoding").is_some() {
+    let gzip = match header("content-encoding") {
+        None => false,
+        Some("gzip") => true,
+        Some(_) => return error(415, "UNSUPPORTED_MEDIA_TYPE"),
+    };
+    if header("content-type") != Some("application/json") {
         return error(415, "UNSUPPORTED_MEDIA_TYPE");
     }
     if req.body.len() > 1024 * 1024 {
         return error(413, "PAYLOAD_TOO_LARGE");
     }
-    let Ok(v) = serde_json::from_slice::<serde_json::Value>(&req.body) else {
+    // The same reader as `ingest/v1`: gzip unpacked up to 1 MiB.
+    let plain = if gzip {
+        let mut plain = Vec::new();
+        if GzDecoder::new(&req.body[..])
+            .take(1024 * 1024 + 1)
+            .read_to_end(&mut plain)
+            .is_err()
+        {
+            return error(400, "VALIDATION_FAILED");
+        }
+        if plain.len() > 1024 * 1024 {
+            return error(413, "PAYLOAD_TOO_LARGE");
+        }
+        plain
+    } else {
+        req.body.clone()
+    };
+    let Ok(v) = serde_json::from_slice::<serde_json::Value>(&plain) else {
         return error(400, "VALIDATION_FAILED");
     };
     let mut refused = 0;

@@ -193,7 +193,7 @@ fn a_key_file_that_is_already_there_wins_over_the_keychain() {
     KeyFiles::new(dir.path())
         .save(Slot::Pending, &key(5))
         .unwrap();
-    let store = keys::open(dir.path(), "inst-1");
+    let store = keys::open(dir.path(), "inst-1", None);
     assert_eq!(store.backend(), Backend::File);
     assert!(same(&store.load(Slot::Pending).unwrap(), &key(5)));
 }
@@ -212,7 +212,7 @@ fn new_keys_are_random() {
 fn the_real_keychain_is_probed_without_hanging() {
     let dir = tempfile::tempdir().unwrap();
     let started = std::time::Instant::now();
-    let store = keys::open(dir.path(), "probe-installation");
+    let store = keys::open(dir.path(), "probe-installation", None);
     println!(
         "backend: {:?} after {:?}",
         store.backend(),
@@ -225,5 +225,69 @@ fn the_real_keychain_is_probed_without_hanging() {
         assert!(same(&store.load(Slot::Pending).unwrap(), &key(9)));
         store.delete(Slot::Pending).unwrap();
         assert!(store.load(Slot::Pending).unwrap().is_none());
+    }
+}
+
+#[test]
+fn a_folder_is_inside_the_profile_only_on_the_same_local_path() {
+    use keys::within_profile as within;
+    let me = r"C:\Users\me";
+    for inside in [
+        r"C:\Users\me",
+        r"C:\Users\me\AppData\Local\spendbranch",
+        r"\\?\C:\Users\me\spendbranch",
+        r"c:\users\ME\spendbranch\",
+        "C:/Users/me/spendbranch",
+    ] {
+        assert!(within(inside, me), "{inside}");
+    }
+    assert!(within(r"\\?\C:\Users\me\x", r"\\?\C:\Users\me"));
+    for outside in [
+        r"C:\Users\meg\spendbranch",
+        r"C:\Users",
+        r"D:\Users\me\spendbranch",
+        r"C:\spendbranch",
+        r"\\server\share\Users\me\spendbranch",
+        r"\\?\UNC\server\share\me",
+        r"\\.\C:\Users\me\x",
+        r"C:\Users\me\..\other",
+        r"spendbranch",
+        "",
+    ] {
+        assert!(!within(outside, me), "{outside}");
+    }
+    // A profile on the network counts as outside: nothing is inside it.
+    assert!(!within(r"\\server\home\me\x", r"\\server\home\me"));
+    assert!(!within(r"C:\x", ""));
+}
+
+#[cfg(windows)]
+#[test]
+fn on_windows_a_key_file_outside_the_profile_is_refused_and_nothing_is_written() {
+    let profile = tempfile::tempdir().unwrap();
+    let inside = profile.path().join("spendbranch");
+    fs::create_dir_all(&inside).unwrap();
+    let files = KeyFiles::in_profile(&inside, Some(profile.path()));
+    files.save(Slot::Active, &key(1)).unwrap();
+    assert!(same(&files.load(Slot::Active).unwrap(), &key(1)));
+
+    let elsewhere = tempfile::tempdir().unwrap();
+    let outside = elsewhere.path().join("spendbranch");
+    fs::create_dir_all(&outside).unwrap();
+    for profile in [Some(profile.path()), None] {
+        let files = KeyFiles::in_profile(&outside, profile);
+        let err = files.save(Slot::Active, &key(2)).unwrap_err();
+        assert!(matches!(err, Error::OutsideProfile(_)), "{err:?}");
+        let text = err.to_string();
+        assert!(
+            text.contains("SPENDBRANCH_HOME") && text.contains("Credential Manager"),
+            "{text}"
+        );
+        assert!(!text.contains(key(2).to_text().as_str()));
+        assert_eq!(
+            fs::read_dir(&outside).unwrap().count(),
+            0,
+            "no key file and no temporary copy"
+        );
     }
 }

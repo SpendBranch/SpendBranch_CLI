@@ -41,7 +41,9 @@ $env:SPENDBRANCH_SERVER = 'https://...'; irm https://github.com/SpendBranch/Spen
 ```
 
 **To update**, run the same command again. It replaces the program in place, so the hooks and the
-scheduled sync keep working.
+scheduled sync keep working. If Claude Code sends its logs through `spendbranch relay`, also run
+`spendbranch otel claude-code` again and reload the file it writes: the settings it hands Claude
+Code can change between versions (since this one, Claude Code sends its logs once a minute).
 
 ### Options
 

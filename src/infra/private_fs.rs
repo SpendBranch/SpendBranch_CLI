@@ -1,5 +1,6 @@
 //! Owner-only files and folders: 0700 / 0600 on Unix. On Windows the protection
-//! is the ACL of the user's own profile folder, so nothing extra is done there.
+//! is the ACL of the user's own profile folder, so nothing extra is done there (the key file
+//! store refuses a folder outside the profile: see `keys::KeyFiles::in_profile`).
 use std::{
     fs::{self, File, OpenOptions},
     io,
