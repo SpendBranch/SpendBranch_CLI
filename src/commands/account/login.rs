@@ -53,7 +53,12 @@ pub(in crate::commands) fn login_with(
     let mut account = open(ctx)?;
     // The new key waits in its own slot: a login that fails leaves the working key alone.
     let key = keys::generate()?;
-    account.keys.save(Slot::Pending, &key)?;
+    match account.keys.save(Slot::Pending, &key) {
+        Ok(()) => {}
+        // Refused before a byte is written or the server is asked: the text says how to fix it.
+        Err(e @ keys::Error::OutsideProfile(_)) => return say(ctx, &e.to_string(), 1),
+        Err(e) => return Err(e.into()),
+    }
     let result = connect(ctx, &mut account, &server, &key, show_status);
     let _ = account.keys.delete(Slot::Pending);
     result

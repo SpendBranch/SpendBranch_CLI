@@ -842,3 +842,41 @@ fn an_approval_the_browser_refused_for_lack_of_authorization_ends_as_an_expired_
     assert_eq!(out.sleeps.len(), 120, "it kept polling until the code died");
     assert!(!rig.store().is_connected().unwrap());
 }
+
+#[cfg(windows)]
+#[test]
+fn on_windows_login_refuses_a_key_file_outside_the_profile_before_asking_the_server() {
+    let rig = Rig::new();
+    let elsewhere = tempfile::tempdir().unwrap();
+    let data = elsewhere.path().join("spendbranch");
+    let out = rig.run_with(
+        &["login"],
+        "y\n",
+        false,
+        &[("SPENDBRANCH_HOME", data.to_str().unwrap())],
+    );
+    assert_ne!(out.code, 0, "{}", out.text);
+    assert!(
+        out.text.contains("outside your user profile"),
+        "{}",
+        out.text
+    );
+    assert!(rig.paths_seen().is_empty(), "no device code was asked for");
+    assert!(
+        std::fs::read_dir(&data)
+            .map(|d| d
+                .flatten()
+                .all(|e| !e.file_name().to_string_lossy().starts_with("device.key")))
+            .unwrap_or(true),
+        "no key file"
+    );
+    // Inside the profile, the file store works as before.
+    authorize(&rig);
+    assert_eq!(rig.run(&["login"]).code, 0);
+    assert!(
+        KeyFiles::new(rig.dir.path())
+            .load(Slot::Active)
+            .unwrap()
+            .is_some()
+    );
+}

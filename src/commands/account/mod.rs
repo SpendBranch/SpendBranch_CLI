@@ -31,10 +31,12 @@ pub(super) fn open(ctx: &Ctx) -> Result<Account> {
     let store = Store::open(&dir)?;
     // `SPENDBRANCH_KEY_STORE=file` keeps the key in a file even where a keychain exists:
     // for a headless box, and for tests that must never touch the real keychain.
+    // On Windows a key file is only written inside the user's profile, whichever way it is chosen.
+    let profile = crate::env::user_home(ctx.env);
     let keys: Box<dyn KeyStore> = if (ctx.env)("SPENDBRANCH_KEY_STORE").as_deref() == Some("file") {
-        Box::new(keys::KeyFiles::new(&dir))
+        Box::new(keys::KeyFiles::in_profile(&dir, profile.as_deref()))
     } else {
-        keys::open(&dir, &store.installation_id()?)
+        keys::open(&dir, &store.installation_id()?, profile.as_deref())
     };
     Ok(Account { dir, store, keys })
 }

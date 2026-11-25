@@ -24,7 +24,10 @@ These are the properties worth trying to break:
   is validated against the contract before it is kept, and everything else is skipped without
   being stored.
 - **Private by default.** The data folder is created `0700` and its files `0600` (on Windows
-  the folder's ACL protects them). A folder anybody can write to is refused.
+  the folder's ACL protects them). A folder anybody can write to is refused. The device key
+  goes to the system keychain when there is one; when it must go to a file on Windows, the file
+  is only written inside the user's profile (a data folder elsewhere, or on a network share,
+  is refused), because only the profile's ACL keeps other users out.
 - **No shell, ever.** Reading your sessions starts no program except `git`, with fixed
   arguments, a 2-second timeout and no shell, to learn a project's remote. Folder names that
   come from a transcript are never interpreted, and network paths are never contacted.
