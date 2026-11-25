@@ -148,8 +148,9 @@ pub fn backoff(failures: u32, random: f64) -> Duration {
 pub enum Failed {
     /// The network, a throttle or a server that stumbled: wait and try the same batch again.
     Transient,
-    /// The whole batch is out of contract (`400 VALIDATION_FAILED`): drop it, go on.
-    DropBatch,
+    /// The batch is out of contract (`400 VALIDATION_FAILED`): one bad item refuses the whole
+    /// batch, so it is narrowed down until the item at fault is alone (see `narrow`).
+    OutOfContract,
     /// `413`: the batch is too big for the server: halve it.
     Split,
     /// Anything else (`401`, `402`, `403`, `415`...): stop, the buffer stays.
@@ -160,9 +161,33 @@ pub fn classify(failure: &ApiFailure) -> Failed {
     match (failure.status, failure.code.as_str()) {
         (0, _) | (429, _) => Failed::Transient,
         (s, _) if s >= 500 => Failed::Transient,
-        (400, "VALIDATION_FAILED") => Failed::DropBatch,
+        (400, "VALIDATION_FAILED") => Failed::OutOfContract,
         (413, _) => Failed::Split,
         _ => Failed::Stop,
+    }
+}
+
+/// How a refused batch is cut down: nothing leaves the buffer until it is alone in a batch
+/// the server still refuses.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Narrow {
+    /// The coverage goes alone first, so no event is blamed for it.
+    CoverageAlone,
+    /// Try again with at most this many observations (and no coverage).
+    Halve(usize),
+    /// One observation alone was refused: it is the one at fault.
+    DropItem,
+    /// Coverage alone was refused: it can never go.
+    DropCoverage,
+}
+
+/// What to do with a batch of `items` observations and `coverage` reports that was refused.
+pub fn narrow(items: usize, coverage: usize) -> Narrow {
+    match (items, coverage) {
+        (1.., 1..) => Narrow::CoverageAlone,
+        (2.., 0) => Narrow::Halve(items.div_ceil(2)),
+        (1, 0) => Narrow::DropItem,
+        _ => Narrow::DropCoverage,
     }
 }
 

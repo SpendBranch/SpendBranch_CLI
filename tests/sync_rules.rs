@@ -90,7 +90,10 @@ fn a_failure_is_passing_stopping_or_a_fault_of_the_batch_by_status_never_by_code
         (failure(502, "INTERNAL", None), Failed::Transient),
         (failure(503, "UNAVAILABLE", None), Failed::Transient),
         (failure(504, "ANYTHING_AT_ALL", None), Failed::Transient),
-        (failure(400, "VALIDATION_FAILED", None), Failed::DropBatch),
+        (
+            failure(400, "VALIDATION_FAILED", None),
+            Failed::OutOfContract,
+        ),
         (failure(413, "PAYLOAD_TOO_LARGE", None), Failed::Split),
         (failure(401, "UNAUTHENTICATED", None), Failed::Stop),
         (failure(401, "CLOCK_SKEW", None), Failed::Stop),
@@ -104,6 +107,20 @@ fn a_failure_is_passing_stopping_or_a_fault_of_the_batch_by_status_never_by_code
     ] {
         assert_eq!(sync::classify(&f), want, "{} {}", f.status, f.code);
     }
+}
+
+#[test]
+fn a_refused_batch_is_narrowed_down_to_what_is_at_fault() {
+    use sync::Narrow;
+    // The coverage goes alone first, so no event is blamed for it.
+    assert_eq!(sync::narrow(10, 3), Narrow::CoverageAlone);
+    assert_eq!(sync::narrow(1, 1), Narrow::CoverageAlone);
+    assert_eq!(sync::narrow(500, 0), Narrow::Halve(250));
+    assert_eq!(sync::narrow(3, 0), Narrow::Halve(2));
+    assert_eq!(sync::narrow(2, 0), Narrow::Halve(1));
+    // Only what is alone can be at fault.
+    assert_eq!(sync::narrow(1, 0), Narrow::DropItem);
+    assert_eq!(sync::narrow(0, 4), Narrow::DropCoverage);
 }
 
 #[test]

@@ -1,7 +1,7 @@
 //! The sending half of `sync`: batches, answers, retries and what each answer does to the buffer.
 use super::super::account::{Connection, now, status_of};
 use super::super::{Ctx, Result, say};
-use super::report::{dropped_batch, summary};
+use super::report::{dropped_item, summary};
 use super::{BOTH, INGEST, MAX_PASSES, Tally, ms, random};
 use crate::api::{ApiFailure, IngestResults, SourceState, StatusView};
 use crate::cli::{VERSION, messages as m};
@@ -10,7 +10,7 @@ use crate::infra::{
     http::{Client, Signer},
     store::{Change, Queued, Store},
 };
-use crate::sync::{self as rules, Failed, TRIES_PER_RUN, Unpacked};
+use crate::sync::{self as rules, Failed, Narrow, TRIES_PER_RUN, Unpacked};
 use std::collections::BTreeMap;
 
 /// A call to the server, tried again while the trouble looks passing. `Err(Final)` is what is
@@ -210,53 +210,39 @@ fn refused(
     sent: Sent,
     max_items: &mut usize,
 ) -> Result<Flow> {
-    match rules::classify(f) {
-        Failed::DropBatch => {
-            let n = sent.items.len() as u64;
-            tally.add("VALIDATION_FAILED", n);
+    // What is dropped once it is alone: an observation the server finds too big can never be
+    // sent; one it calls out of contract is the one that spoiled the batch.
+    let code = match rules::classify(f) {
+        Failed::OutOfContract => "VALIDATION_FAILED",
+        Failed::Split => "INVALID_LOCAL",
+        _ => return Ok(Flow::Stop(stop(ctx, store, f)?)),
+    };
+    let full = crate::contract::MAX_BATCH_OBSERVATIONS;
+    match rules::narrow(sent.items.len(), sent.coverage.len()) {
+        Narrow::CoverageAlone => *max_items = 0,
+        Narrow::Halve(n) => *max_items = n,
+        Narrow::DropItem => {
+            tally.add(code, 1);
             store.apply(&Change {
-                remove_items: sent.items.iter().map(|i| i.id).collect(),
-                remove_coverage: sent.coverage,
-                rejected: vec![("VALIDATION_FAILED".into(), n)],
+                remove_items: vec![sent.items[0].id],
+                rejected: vec![(code.into(), 1)],
                 ..Change::default()
             })?;
-            dropped_batch(ctx, store)?;
-            Ok(Flow::Again)
+            if code == "VALIDATION_FAILED" {
+                dropped_item(ctx, store)?;
+            }
+            *max_items = full;
         }
-        // The coverage may be what is too big: it goes alone first, so no event is blamed for it.
-        Failed::Split if !sent.items.is_empty() && !sent.coverage.is_empty() => {
-            *max_items = 0;
-            Ok(Flow::Again)
+        // Coverage alone the server refuses: it goes, or every run would fail on it again.
+        Narrow::DropCoverage => {
+            store.apply(&Change {
+                remove_coverage: sent.coverage,
+                ..Change::default()
+            })?;
+            *max_items = full;
         }
-        Failed::Split if sent.items.len() > 1 => {
-            *max_items = sent.items.len().div_ceil(2);
-            Ok(Flow::Again)
-        }
-        Failed::Split => {
-            // One observation the server finds too big: it can never be sent. With none, the
-            // coverage alone was too big: it goes, or every run would fail on it again.
-            let change = match sent.items.first() {
-                Some(item) => {
-                    tally.add("INVALID_LOCAL", 1);
-                    Change {
-                        remove_items: vec![item.id],
-                        rejected: vec![("INVALID_LOCAL".into(), 1)],
-                        ..Change::default()
-                    }
-                }
-                None => {
-                    *max_items = crate::contract::MAX_BATCH_OBSERVATIONS;
-                    Change {
-                        remove_coverage: sent.coverage,
-                        ..Change::default()
-                    }
-                }
-            };
-            store.apply(&change)?;
-            Ok(Flow::Again)
-        }
-        _ => Ok(Flow::Stop(stop(ctx, store, f)?)),
     }
+    Ok(Flow::Again)
 }
 
 /// Applies the server's answer to the buffer and to the numbers of the run, in one transaction.

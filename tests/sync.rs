@@ -156,25 +156,25 @@ fn a_source_whose_authorization_is_not_active_is_not_sent() {
 }
 
 #[test]
-fn the_dropped_batches_are_announced_on_the_first_and_every_fiftieth() {
+fn the_dropped_items_are_announced_on_the_first_and_every_fiftieth() {
     for (before, said) in [(0, true), (1, false), (48, false), (49, true), (50, false)] {
         let rig = Rig::ready();
-        rig.buffer(now_ms(), events(2));
+        rig.buffer(now_ms(), events(1));
         rig.store()
-            .sync_set("droppedBatches", &before.to_string())
+            .sync_set("droppedItems", &before.to_string())
             .unwrap();
         rig.server.configure(|s| {
             s.ingest.fail_next = VecDeque::from(vec![(400, "VALIDATION_FAILED".into(), None)])
         });
         let out = rig.run(&["sync"]);
         assert_eq!(
-            out.text.contains("batch(es) so far"),
+            out.text.contains("item(s) so far"),
             said,
             "after {before}: {}",
             out.text
         );
         assert_eq!(
-            rig.sync_state("droppedBatches"),
+            rig.sync_state("droppedItems"),
             Some((before + 1).to_string())
         );
     }
@@ -376,28 +376,71 @@ fn a_device_the_server_revoked_stops_at_the_first_call() {
 }
 
 #[test]
-fn a_batch_the_server_calls_out_of_contract_is_dropped_and_counted_and_the_rest_goes() {
+fn one_item_the_server_calls_out_of_contract_is_found_by_halving_and_only_it_is_dropped() {
     let rig = Rig::ready();
-    rig.buffer(now_ms(), events(600));
+    rig.buffer(now_ms(), events(500));
+    rig.server.configure(|s| {
+        s.ingest
+            .refuse_batch
+            .insert("e321".into(), (400, "VALIDATION_FAILED".into()));
+    });
+    let out = rig.run(&["sync"]);
+    assert_eq!(out.code, 0, "{}", out.text);
+    assert!(
+        out.text.contains("Dropped 1 item(s) so far"),
+        "{}",
+        out.text
+    );
+    assert!(
+        out.text
+            .contains("1 events dropped: the server said they were out of contract"),
+        "{}",
+        out.text
+    );
+    assert!(
+        out.text.contains("Uploaded 499 usage events."),
+        "{}",
+        out.text
+    );
+    assert_eq!(rig.buffered(), 0);
+    let stored = rig.server.state.lock().unwrap().stored.clone();
+    assert_eq!(stored.len(), 499, "every good item reached the server");
+    assert!(stored.iter().all(|o| o["externalEventId"] != "e321"));
+    assert_eq!(
+        rig.store().rejected_counts().unwrap(),
+        [("VALIDATION_FAILED".into(), 1)]
+    );
+}
+
+#[test]
+fn coverage_is_sent_alone_before_an_event_is_blamed_for_a_refused_batch() {
+    let rig = Rig::ready();
+    let db = rusqlite::Connection::open(rig.dir.path().join("state.db")).unwrap();
+    coverage(
+        &db,
+        "codex",
+        "2026-11-10T10:00:00.000Z",
+        "2026-11-10T11:00:00.000Z",
+        "observed",
+        None,
+    );
+    rig.buffer(now_ms(), events(1));
     rig.server.configure(|s| {
         s.ingest.fail_next = VecDeque::from(vec![(400, "VALIDATION_FAILED".into(), None)])
     });
     let out = rig.run(&["sync"]);
     assert_eq!(out.code, 0, "{}", out.text);
     assert!(
-        out.text.contains("Dropped 1 batch(es) so far"),
+        rig.store().rejected_counts().unwrap().is_empty(),
         "{}",
         out.text
     );
-    assert!(
-        out.text
-            .contains("500 events dropped: the server said the batch was out of contract")
-    );
-    assert!(out.text.contains("Uploaded 100 usage events."));
-    assert_eq!(rig.buffered(), 0);
+    let s = rig.server.state.lock().unwrap();
+    assert_eq!((s.stored.len(), s.stored_coverage.len()), (1, 1));
     assert_eq!(
-        rig.store().rejected_counts().unwrap(),
-        [("VALIDATION_FAILED".into(), 500)]
+        s.batches.iter().map(|b| (b.0, b.1)).collect::<Vec<_>>(),
+        [(0, 1), (1, 0)],
+        "the coverage alone, then the event"
     );
 }
 

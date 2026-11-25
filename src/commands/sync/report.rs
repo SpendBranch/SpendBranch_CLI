@@ -5,18 +5,19 @@ use crate::cli::{messages as m, render};
 use crate::contract::Source;
 use crate::infra::store::Store;
 
-/// `Dropped N batch(es) so far`, said on the first drop and then every 50th.
-pub(super) fn dropped_batch(ctx: &mut Ctx, store: &Store) -> Result<()> {
+/// `Dropped N item(s) so far`, said on the first drop and then every 50th. Each drop is one
+/// item: a refused batch is narrowed down until the item at fault is alone.
+pub(super) fn dropped_item(ctx: &mut Ctx, store: &Store) -> Result<()> {
     let n = store
-        .sync_get("droppedBatches")?
+        .sync_get("droppedItems")?
         .and_then(|v| v.parse::<u64>().ok())
         .unwrap_or(0)
         + 1;
-    store.sync_set("droppedBatches", &n.to_string())?;
+    store.sync_set("droppedItems", &n.to_string())?;
     if m::report_drop(n) {
         writeln!(
             ctx.out,
-            "Dropped {n} batch(es) so far: the server said they were out of contract."
+            "Dropped {n} item(s) so far: the server said they were out of contract."
         )?;
     }
     Ok(())

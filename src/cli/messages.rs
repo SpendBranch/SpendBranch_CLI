@@ -304,7 +304,7 @@ pub fn rejected_line(code: &str, n: u64) -> String {
         "CLOCK_SKEW_EXPIRED" => format!("{n} items dropped: their time was ahead of the server"),
         "INVALID_LOCAL" => format!("{n} events dropped: they did not pass the local check"),
         "VALIDATION_FAILED" => {
-            format!("{n} events dropped: the server said the batch was out of contract")
+            format!("{n} events dropped: the server said they were out of contract")
         }
         "BEFORE_COLLECTION_WINDOW" => format!(
             "{n} events dropped: they are from before the month the company authorized collection"
