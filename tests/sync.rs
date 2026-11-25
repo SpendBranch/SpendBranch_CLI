@@ -93,12 +93,7 @@ fn a_batch_the_server_finds_too_big_is_halved_until_it_fits_and_the_next_starts_
         let items: Vec<Item> = events(n)
             .into_iter()
             .enumerate()
-            .map(|(i, observation)| Item {
-                id: i as i64,
-                queued_at: 0,
-                payload: String::new(),
-                observation,
-            })
+            .map(|(i, observation)| Item::new(i as i64, 0, String::new(), observation))
             .collect();
         sync::pack(uuid::Uuid::new_v4(), &items, &[], 500)
             .unwrap()
@@ -767,12 +762,7 @@ fn a_batch_too_big_because_of_its_coverage_sends_the_coverage_alone_and_keeps_ev
     let items: Vec<Item> = events(5)
         .into_iter()
         .enumerate()
-        .map(|(i, observation)| Item {
-            id: i as i64,
-            queued_at: 0,
-            payload: String::new(),
-            observation,
-        })
+        .map(|(i, observation)| Item::new(i as i64, 0, String::new(), observation))
         .collect();
     let size = |n: usize, c: usize| {
         let id = uuid::Uuid::new_v4();

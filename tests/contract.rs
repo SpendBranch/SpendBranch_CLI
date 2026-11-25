@@ -261,6 +261,58 @@ fn a_batch_respects_its_limits_and_the_schema() {
     assert!(schema().is_valid(&serde_json::to_value(only_coverage).unwrap()));
 }
 
+#[test]
+fn a_batch_put_together_from_encoded_parts_is_the_same_bytes_as_serializing_it() {
+    let id = Uuid::new_v4();
+    let mut other = observation();
+    other.external_event_id = ExternalId::new("resp_2").unwrap();
+    let observations = [observation(), other];
+    let report = |state| {
+        CoverageReport::new(
+            Source::Codex,
+            Iso::from_millis(1).unwrap(),
+            Iso::from_millis(2).unwrap(),
+            state,
+        )
+        .unwrap()
+    };
+    let coverage = [
+        report(CoverageState::Observed),
+        report(CoverageState::Unavailable {
+            reason: GapReason::AdapterError,
+        }),
+    ];
+    let encoded: Vec<_> = observations.iter().map(Encoded::new).collect();
+    let encoded_coverage: Vec<_> = coverage.iter().map(Encoded::new).collect();
+    for (n, c) in [(2, 2), (2, 0), (0, 2), (1, 1)] {
+        let want = serde_json::to_vec(
+            &IngestBatch::new(id, observations[..n].to_vec(), coverage[..c].to_vec()).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(
+            IngestBatch::encoded_len(id, &encoded[..n], &encoded_coverage[..c]),
+            Some(want.len()),
+            "{n} {c}"
+        );
+        let got = IngestBatch::encode(id, &encoded[..n], &encoded_coverage[..c]).unwrap();
+        assert_eq!(
+            String::from_utf8(got).unwrap(),
+            String::from_utf8(want).unwrap()
+        );
+    }
+    // the same limits as building one
+    assert_eq!(
+        IngestBatch::encode(id, &encoded[..0], &encoded_coverage[..0]),
+        None
+    );
+    assert_eq!(
+        IngestBatch::encoded_len(Uuid::from_u128(0x1234), &encoded, &encoded_coverage),
+        None
+    );
+    let many = vec![encoded[0].clone(); MAX_BATCH_OBSERVATIONS + 1];
+    assert_eq!(IngestBatch::encode(id, &many, &encoded_coverage), None);
+}
+
 // ---- reading the contract back (the buffer is JSON text in state.db)
 
 fn fixture_observations() -> Vec<serde_json::Value> {

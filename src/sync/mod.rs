@@ -2,7 +2,7 @@
 //! Pure: the buffer, the network and the clock are the caller's.
 use crate::api::{ApiFailure, ItemOutcome};
 use crate::contract::{
-    CoverageReport, CoverageState, GapReason, IngestBatch, Iso, MAX_BATCH_COVERAGE,
+    CoverageReport, CoverageState, Encoded, GapReason, IngestBatch, Iso, MAX_BATCH_COVERAGE,
     MAX_BATCH_OBSERVATIONS, Source, UsageObservation,
 };
 use std::{collections::BTreeMap, time::Duration};
@@ -31,6 +31,21 @@ pub struct Item {
     pub queued_at: i64,
     pub payload: String,
     pub observation: UsageObservation,
+    /// The observation as it goes in a batch: written once from the parsed value, so the
+    /// contract is checked on the way out without serializing it again on each halving.
+    pub encoded: Encoded<UsageObservation>,
+}
+
+impl Item {
+    pub fn new(id: i64, queued_at: i64, payload: String, observation: UsageObservation) -> Self {
+        Self {
+            id,
+            queued_at,
+            payload,
+            encoded: Encoded::new(&observation),
+            observation,
+        }
+    }
 }
 
 /// Rows from the buffer into items. A row that no longer passes the contract (a hand-edited
@@ -39,12 +54,7 @@ pub fn parse_items(rows: impl IntoIterator<Item = (i64, String, i64)>) -> (Vec<I
     let (mut items, mut invalid) = (Vec::new(), Vec::new());
     for (id, payload, queued_at) in rows {
         match serde_json::from_str::<UsageObservation>(&payload) {
-            Ok(observation) => items.push(Item {
-                id,
-                queued_at,
-                payload,
-                observation,
-            }),
+            Ok(observation) => items.push(Item::new(id, queued_at, payload, observation)),
             Err(_) => invalid.push(id),
         }
     }
@@ -113,18 +123,20 @@ pub fn pack_within(
 ) -> Result<Packed, Unpacked> {
     let mut n = items.len().min(MAX_BATCH_OBSERVATIONS).min(max_items);
     let c = coverage.len().min(MAX_BATCH_COVERAGE);
+    let observations: Vec<&Encoded<UsageObservation>> =
+        items[..n].iter().map(|i| &i.encoded).collect();
+    let reports: Vec<Encoded<CoverageReport>> =
+        coverage[..c].iter().map(|(_, r)| Encoded::new(r)).collect();
     loop {
         if n + c == 0 {
             return Err(Unpacked::Nothing);
         }
-        let batch = IngestBatch::new(
-            installation_id,
-            items[..n].iter().map(|i| i.observation.clone()).collect(),
-            coverage[..c].iter().map(|(_, r)| r.clone()).collect(),
-        )
-        .ok_or(Unpacked::Invalid)?;
-        let json = serde_json::to_vec(&batch).map_err(|_| Unpacked::Invalid)?;
-        if json.len() <= max_bytes {
+        // The size is worked out from the parts; the bytes are written once, for what fits.
+        let len = IngestBatch::encoded_len(installation_id, &observations[..n], &reports)
+            .ok_or(Unpacked::Invalid)?;
+        if len <= max_bytes {
+            let json = IngestBatch::encode(installation_id, &observations[..n], &reports)
+                .ok_or(Unpacked::Invalid)?;
             return Ok(Packed {
                 items: n,
                 coverage: c,

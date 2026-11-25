@@ -20,12 +20,12 @@ fn items(n: usize) -> Vec<Item> {
     (0..n)
         .map(|i| {
             let observation = observation(&format!("e{i}"), "s", "2026-06-01T10:00:00.000Z");
-            Item {
-                id: i as i64 + 1,
-                queued_at: 0,
-                payload: serde_json::to_string(&observation).unwrap(),
+            Item::new(
+                i as i64 + 1,
+                0,
+                serde_json::to_string(&observation).unwrap(),
                 observation,
-            }
+            )
         })
         .collect()
 }
