@@ -154,11 +154,10 @@ fn fits(tx: &Transaction, payloads: &[String], limits: SpoolLimits) -> Result<bo
     if payloads.is_empty() {
         return Ok(true);
     }
-    let (items, bytes): (i64, i64) = tx.query_row(
-        "SELECT COUNT(*), COALESCE(SUM(LENGTH(payload) + 1), 0) FROM spool",
-        [],
-        |r| Ok((r.get(0)?, r.get(1)?)),
-    )?;
+    let (items, bytes): (i64, i64) =
+        tx.query_row("SELECT items, bytes FROM spool_size", [], |r| {
+            Ok((r.get(0)?, r.get(1)?))
+        })?;
     let added: u64 = payloads.iter().map(|p| p.len() as u64 + 1).sum();
     Ok(
         items as u64 + payloads.len() as u64 <= limits.items
