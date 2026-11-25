@@ -4,6 +4,9 @@ use serde_json::{Value, json};
 
 /// A `Stop` (or anything that is not the end of a session) starts a `sync` at most this often.
 pub const INTERVAL_MS: i64 = 10 * 60 * 1000;
+/// The end of a session starts a `sync` at most this often: several sessions ending together
+/// start one.
+pub const SESSION_END_INTERVAL_MS: i64 = 2 * 60 * 1000;
 /// What the hook reads of the agent's stdin: it is only there to be logged.
 pub const MAX_INPUT: usize = 64 * 1024;
 const MAX_FIELD: usize = 64;
@@ -52,12 +55,14 @@ pub fn last_firing(log: &str, event_prefix: &str) -> Option<Iso> {
     })
 }
 
-/// Whether the hook starts a `sync`. The end of a session always does; anything else waits
-/// for the interval since the last one. A last sync in the future (the clock went back) does
-/// not block forever.
+/// Whether the hook starts a `sync`: when the interval since the last one has passed, two
+/// minutes for the end of a session and ten for anything else. A last sync in the future (the
+/// clock went back) does not block forever.
 pub fn due(event: Option<&str>, last_sync: Option<Iso>, now: Iso) -> bool {
-    if event == Some("SessionEnd") {
-        return true;
-    }
-    last_sync.is_none_or(|last| !(0..INTERVAL_MS).contains(&(now.millis() - last.millis())))
+    let interval = if event == Some("SessionEnd") {
+        SESSION_END_INTERVAL_MS
+    } else {
+        INTERVAL_MS
+    };
+    last_sync.is_none_or(|last| !(0..interval).contains(&(now.millis() - last.millis())))
 }

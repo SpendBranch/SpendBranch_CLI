@@ -250,7 +250,7 @@ fn the_end_of_a_session_starts_a_detached_sync_and_logs_only_the_event() {
 }
 
 #[test]
-fn a_stop_waits_ten_minutes_after_the_last_sync_but_a_session_end_does_not() {
+fn a_stop_waits_ten_minutes_after_the_last_sync_and_a_session_end_two() {
     let rig = Rig::ready();
     let ago = |ms: i64| {
         spendbranch::contract::Iso::from_millis(rig::now_ms() - ms)
@@ -264,7 +264,14 @@ fn a_stop_waits_ten_minutes_after_the_last_sync_but_a_session_end_does_not() {
     assert_eq!(spawned(&rig), 0, "synced two minutes ago");
     rig.claude_event("SessionEnd");
     rig.run(&["hook", "claude-code"]);
-    assert_eq!(spawned(&rig), 1, "the end of a session always goes");
+    assert_eq!(
+        spawned(&rig),
+        1,
+        "two minutes is enough for the end of a session"
+    );
+    rig.store().sync_set("lastSyncAt", &ago(min)).unwrap();
+    rig.run(&["hook", "claude-code"]);
+    assert_eq!(spawned(&rig), 1, "but not one");
     rig.store().sync_set("lastSyncAt", &ago(11 * min)).unwrap();
     rig.claude_event("Stop");
     rig.run(&["hook", "claude-code"]);
