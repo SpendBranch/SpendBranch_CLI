@@ -237,6 +237,24 @@ fn a_server_that_is_away_leaves_everything_in_the_buffer_and_the_next_run_sends_
 }
 
 #[test]
+fn any_answer_from_the_server_forgets_the_old_trouble() {
+    // Failures from an outage long gone: the status answering is proof the server is back,
+    // so one stumble on the upload waits a second, not fifteen minutes.
+    let rig = Rig::ready();
+    rig.buffer(now_ms(), events(2));
+    rig.store().sync_set("failures", "10").unwrap();
+    rig.server.configure(|s| {
+        s.ingest.fail_next = VecDeque::from(vec![(503, "UNAVAILABLE".into(), None)])
+    });
+    let out = rig.run(&["sync"]);
+    assert_eq!(out.code, 0, "{}", out.text);
+    assert_eq!(out.sleeps.len(), 1, "one short pause, then the batch went");
+    assert!(out.sleeps[0] <= 1);
+    assert_eq!(rig.buffered(), 0);
+    assert_eq!(rig.sync_state("failures"), None);
+}
+
+#[test]
 fn the_server_asking_for_a_long_pause_is_obeyed_without_waiting_for_it() {
     let rig = Rig::ready();
     rig.buffer(now_ms(), events(2));

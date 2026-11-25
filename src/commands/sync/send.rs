@@ -30,7 +30,13 @@ fn with_retries<T>(
     let mut tries = 0;
     loop {
         match call() {
-            Ok(value) => return Ok(Ok(value)),
+            Ok(value) => {
+                // The server answered: whatever failed before is over, and the backoff starts again.
+                if store.sync_get("failures")?.is_some() {
+                    store.sync_delete(&["failures"])?;
+                }
+                return Ok(Ok(value));
+            }
             Err(f) if rules::classify(&f) == Failed::Transient => {
                 tries += 1;
                 let failures = store
