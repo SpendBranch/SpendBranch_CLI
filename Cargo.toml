@@ -56,7 +56,7 @@ serde = { version = "1.0.229", features = ["derive"] }
 serde_json = { version = "1", features = ["preserve_order"] }
 uuid = { version = "1.29.2", features = ["v4"] }
 zstd = "0.14.3"
-base64 = "0.22"
+base64 = "0.23"
 zeroize = "1"
 # Batches go out gzipped (the API wants it). The pure-Rust backend: no C, no unsafe of ours.
 flate2 = { version = "1", default-features = false, features = ["rust_backend"] }
