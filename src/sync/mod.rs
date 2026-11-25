@@ -14,6 +14,9 @@ pub const CLOCK_SKEW_CAP_MS: i64 = 24 * 60 * 60 * 1000;
 pub const MAX_BODY_BYTES: usize = 1024 * 1024;
 /// How often the same batch is tried within one run.
 pub const TRIES_PER_RUN: u32 = 3;
+/// How many server errors (5xx) in a row the same batch gets before it is narrowed instead of
+/// only waiting: as many as one run tries it.
+pub const SERVER_ERRORS_TO_NARROW: u32 = TRIES_PER_RUN;
 /// A wait longer than this is not slept through: it is saved as `nextAttemptAt`.
 pub const MAX_SLEEP: Duration = Duration::from_secs(8);
 /// The furthest a saved `nextAttemptAt` may be: the server's longest `Retry-After` (24 h) and
@@ -189,6 +192,96 @@ pub fn narrow(items: usize, coverage: usize) -> Narrow {
         (1, 0) => Narrow::DropItem,
         _ => Narrow::DropCoverage,
     }
+}
+
+/// The batch the server keeps failing on (5xx): the id of its first observation, how many
+/// observations it holds, and how many server errors in a row it got. Kept between runs, so a
+/// batch is narrowed even when each run gives up after one try.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Strikes {
+    pub head: i64,
+    pub size: usize,
+    pub count: u32,
+}
+
+impl Strikes {
+    pub fn parse(text: &str) -> Option<Self> {
+        let mut parts = text.split(':');
+        let strikes = Self {
+            head: parts.next()?.parse().ok()?,
+            size: parts.next()?.parse().ok()?,
+            count: parts.next()?.parse().ok()?,
+        };
+        parts.next().is_none().then_some(strikes)
+    }
+
+    pub fn text(&self) -> String {
+        format!("{}:{}:{}", self.head, self.size, self.count)
+    }
+
+    /// The most observations the batch starting at `head` may hold.
+    pub fn limit(this: Option<Self>, head: Option<i64>, max_items: usize) -> usize {
+        match this {
+            Some(s) if Some(s.head) == head => max_items.min(s.size),
+            _ => max_items,
+        }
+    }
+
+    /// One more server error for the batch that starts at `head` with `size` observations.
+    pub fn add(this: Option<Self>, head: i64, size: usize) -> Self {
+        let count = match this {
+            Some(s) if s.head == head && s.size == size => s.count.saturating_add(1),
+            _ => 1,
+        };
+        Self { head, size, count }
+    }
+}
+
+/// The key an item is known by in the list of items the server keeps failing on.
+pub fn item_key(item: &Item) -> String {
+    let o = &item.observation;
+    format!(
+        "{}/{}/{}",
+        o.source.name(),
+        o.external_session_id.as_str(),
+        o.external_event_id.as_str()
+    )
+}
+
+type Stuck = BTreeMap<String, String>;
+
+fn stuck_of(text: Option<&str>) -> Stuck {
+    text.and_then(|t| serde_json::from_str(t).ok())
+        .unwrap_or_default()
+}
+
+fn stuck_text(stuck: &Stuck) -> Option<String> {
+    (!stuck.is_empty())
+        .then(|| serde_json::to_string(stuck).ok())
+        .flatten()
+}
+
+/// The list (JSON, as kept) with this item added, under the server's code.
+pub fn stuck_add(text: Option<&str>, key: String, code: &str) -> Option<String> {
+    let mut stuck = stuck_of(text);
+    stuck.insert(key, code.to_owned());
+    stuck_text(&stuck)
+}
+
+/// The list without these items: the server answered for them. `None` when it is empty.
+pub fn stuck_remove(text: Option<&str>, keys: impl IntoIterator<Item = String>) -> Option<String> {
+    let mut stuck = stuck_of(text);
+    for key in keys {
+        stuck.remove(&key);
+    }
+    stuck_text(&stuck)
+}
+
+/// How many items the server keeps failing on, and the code it gave for one of them.
+pub fn stuck_summary(text: Option<&str>) -> Option<(u64, String)> {
+    let stuck = stuck_of(text);
+    let code = stuck.values().next()?.clone();
+    Some((stuck.len() as u64, code))
 }
 
 /// How long to wait before the next try: the backoff, or what the server asked for, if more.

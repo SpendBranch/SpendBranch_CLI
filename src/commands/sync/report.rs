@@ -40,6 +40,9 @@ pub(super) fn summary(ctx: &mut Ctx, tally: &Tally) -> Result<()> {
             "{n} {agent} items stay in the buffer: the company has not authorized {agent} collection."
         )?;
     }
+    if tally.stuck > 0 {
+        writeln!(ctx.out, "{}", m::stuck_line(tally.stuck))?;
+    }
     let line = if tally.accepted > 0 {
         format!("Uploaded {} usage events.", tally.accepted)
     } else if tally.sent_any {

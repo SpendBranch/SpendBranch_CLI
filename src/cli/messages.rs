@@ -316,6 +316,13 @@ pub fn rejected_line(code: &str, n: u64) -> String {
     }
 }
 
+/// Items the server failed on (5xx) again and again, even alone: they are kept, never dropped.
+pub fn stuck_line(n: u64) -> String {
+    format!(
+        "{n} items keep failing on the server: they stay in the buffer and are tried again on the next upload."
+    )
+}
+
 // --- hooks, scheduler, setup ----------------------------------------------------------
 
 pub const NO_HOME: &str = "Cannot locate your home folder.";

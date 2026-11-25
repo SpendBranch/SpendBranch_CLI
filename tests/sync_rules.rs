@@ -124,6 +124,60 @@ fn a_refused_batch_is_narrowed_down_to_what_is_at_fault() {
 }
 
 #[test]
+fn server_errors_are_counted_per_batch_and_survive_the_run() {
+    use sync::Strikes;
+    let one = Strikes::add(None, 7, 500);
+    assert_eq!(
+        one,
+        Strikes {
+            head: 7,
+            size: 500,
+            count: 1
+        }
+    );
+    let two = Strikes::add(Some(one), 7, 500);
+    assert_eq!(two.count, 2);
+    assert_eq!(Strikes::add(Some(two), 7, 250).count, 1, "another batch");
+    assert_eq!(Strikes::add(Some(two), 8, 500).count, 1, "another head");
+    assert_eq!(Strikes::parse(&two.text()), Some(two));
+    for bad in ["", "1:2", "1:2:3:4", "a:2:3", "1:-2:3"] {
+        assert_eq!(Strikes::parse(bad), None, "{bad}");
+    }
+    let narrowed = Strikes {
+        head: 7,
+        size: 125,
+        count: 0,
+    };
+    assert_eq!(Strikes::limit(Some(narrowed), Some(7), 500), 125);
+    assert_eq!(Strikes::limit(Some(narrowed), Some(7), 60), 60);
+    assert_eq!(
+        Strikes::limit(Some(narrowed), Some(9), 500),
+        500,
+        "another head"
+    );
+    assert_eq!(Strikes::limit(None, Some(7), 500), 500);
+    assert_eq!(sync::SERVER_ERRORS_TO_NARROW, sync::TRIES_PER_RUN);
+}
+
+#[test]
+fn the_items_the_server_keeps_failing_on_are_listed_until_it_answers_for_them() {
+    let list = sync::stuck_add(None, "codex/s/e1".into(), "INTERNAL");
+    let list = sync::stuck_add(list.as_deref(), "codex/s/e2".into(), "INTERNAL");
+    assert_eq!(
+        sync::stuck_summary(list.as_deref()),
+        Some((2, "INTERNAL".into()))
+    );
+    let list = sync::stuck_remove(list.as_deref(), ["codex/s/e1".to_owned()]);
+    assert_eq!(sync::stuck_summary(list.as_deref()).map(|s| s.0), Some(1));
+    assert_eq!(
+        sync::stuck_remove(list.as_deref(), ["codex/s/e2".to_owned()]),
+        None
+    );
+    assert_eq!(sync::stuck_summary(Some("not json")), None);
+    assert_eq!(sync::item_key(&items(1)[0]), "codex/s/e0");
+}
+
+#[test]
 fn a_batch_is_at_most_500_observations_and_50_reports_and_never_empty() {
     let id = uuid::Uuid::new_v4();
     let report = |i: i64| {

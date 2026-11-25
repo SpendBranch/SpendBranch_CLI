@@ -20,6 +20,8 @@ pub(super) struct Tally {
     pub(super) rejected: BTreeMap<String, u64>,
     /// Observations of a source the company has not (or no longer) authorized: kept, not sent.
     pub(super) held: BTreeMap<&'static str, u64>,
+    /// Items the server kept failing on even alone: kept, at the end of the queue.
+    pub(super) stuck: u64,
 }
 
 impl Tally {

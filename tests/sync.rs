@@ -184,18 +184,19 @@ fn the_dropped_items_are_announced_on_the_first_and_every_fiftieth() {
 fn a_server_that_is_away_leaves_everything_in_the_buffer_and_the_next_run_sends_it_once() {
     let rig = Rig::ready();
     rig.buffer(now_ms(), events(3));
+    // Throttled with no time given: passing trouble that is no fault of the batch.
     rig.server.configure(|s| {
         s.ingest.fail_next = VecDeque::from(vec![
-            (503, "UNAVAILABLE".into(), None),
-            (503, "UNAVAILABLE".into(), None),
-            (503, "UNAVAILABLE".into(), None),
+            (429, "RATE_LIMITED".into(), None),
+            (429, "RATE_LIMITED".into(), None),
+            (429, "RATE_LIMITED".into(), None),
         ]);
     });
     let out = rig.run(&["sync"]);
     assert_eq!(out.code, 1, "{}", out.text);
     assert!(
         out.text
-            .contains("The server is temporarily unavailable. Try again later."),
+            .contains("The server requested a pause (rate limit)."),
         "{}",
         out.text
     );
@@ -252,6 +253,73 @@ fn any_answer_from_the_server_forgets_the_old_trouble() {
     assert!(out.sleeps[0] <= 1);
     assert_eq!(rig.buffered(), 0);
     assert_eq!(rig.sync_state("failures"), None);
+}
+
+/// Runs `sync` as the schedule would, the waits it saved already over, until `done` or 40 runs.
+fn sync_until(rig: &Rig, done: impl Fn(&Rig) -> bool) {
+    for _ in 0..40 {
+        if done(rig) {
+            return;
+        }
+        rig.store().sync_delete(&["nextAttemptAt"]).unwrap();
+        rig.run(&["sync"]);
+    }
+    assert!(done(rig), "never settled");
+}
+
+#[test]
+fn a_batch_that_keeps_failing_on_the_server_is_halved_instead_of_waiting_for_ever() {
+    let rig = Rig::ready();
+    rig.buffer(now_ms(), events(4));
+    rig.server.configure(|s| {
+        s.ingest.fail_next = VecDeque::from(vec![
+            (503, "UNAVAILABLE".into(), None),
+            (503, "UNAVAILABLE".into(), None),
+            (503, "UNAVAILABLE".into(), None),
+        ]);
+    });
+    let out = rig.run(&["sync"]);
+    assert_eq!(out.code, 0, "{}", out.text);
+    assert_eq!(rig.buffered(), 0);
+    let sizes: Vec<usize> = rig
+        .server
+        .state
+        .lock()
+        .unwrap()
+        .batches
+        .iter()
+        .map(|b| b.0)
+        .collect();
+    assert_eq!(sizes, [2, 2], "a whole run of 5xx on 4, then halves");
+}
+
+#[test]
+fn an_item_the_server_keeps_failing_on_stays_in_the_buffer_and_status_says_so() {
+    let rig = Rig::ready();
+    rig.buffer(now_ms(), events(8));
+    rig.server.configure(|s| {
+        s.ingest
+            .refuse_batch
+            .insert("e003".into(), (503, "UNAVAILABLE".into()));
+    });
+    sync_until(&rig, |r| r.server.state.lock().unwrap().stored.len() == 7);
+    let left = rig.store().queued(&["codex"], i64::MAX, 10).unwrap();
+    assert_eq!(left.len(), 1, "only the item at fault waits");
+    assert!(left[0].payload.contains("e003"));
+    assert!(
+        rig.store().rejected_counts().unwrap().is_empty(),
+        "nothing was dropped"
+    );
+    let text = rig.run(&["status"]).text;
+    assert!(
+        text.contains("1 items keep failing on the server")
+            && text.contains(&messages::failure_message("UNAVAILABLE")),
+        "{text}"
+    );
+    // once the server takes it, the warning goes
+    rig.server.configure(|s| s.ingest.refuse_batch.clear());
+    sync_until(&rig, |r| r.buffered() == 0);
+    assert!(!rig.run(&["status"]).text.contains("keep failing"));
 }
 
 #[test]

@@ -50,6 +50,8 @@ pub struct Local {
     pub last_sent: Option<String>,
     pub last_error: Option<String>,
     pub next_attempt: Option<String>,
+    /// Items the server keeps failing on, and the code it gave for one of them.
+    pub stuck: Option<(u64, String)>,
     pub sources: Vec<LocalSource>,
     /// The system runs `sync` on a schedule.
     pub scheduled: bool,
@@ -340,6 +342,12 @@ fn upload_lines(st: Style, local: &Local, warnings: &mut Vec<String>) -> Vec<Str
         .filter(|c| crate::api::is_plain_code(c))
     {
         warnings.push(format!("Last upload failed: {}", m::failure_message(code)));
+    }
+    if let Some((n, code)) = &local.stuck {
+        warnings.push(format!(
+            "{n} items keep failing on the server ({}); they stay in the buffer and are tried again.",
+            m::failure_message(code)
+        ));
     }
     for (code, n) in &local.rejected {
         warnings.push(format!("{}.", m::rejected_line(code, *n)));

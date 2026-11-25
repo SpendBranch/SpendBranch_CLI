@@ -32,6 +32,7 @@ pub(super) fn local_status(ctx: &Ctx, store: &Store) -> Result<render::Local> {
         last_sent: store.sync_get("lastSentAt")?,
         last_error: store.sync_get("lastError")?,
         next_attempt: store.sync_get("nextAttemptAt")?,
+        stuck: crate::sync::stuck_summary(store.sync_get("stuckItems")?.as_deref()),
         sources,
         scheduled: scheduler::installed(ctx.system, ctx.env, ctx.system.platform()),
     })

@@ -20,12 +20,17 @@ enum Final {
     Failure(ApiFailure),
     /// Passing, but not this run: `nextAttemptAt` is saved and the message is on the screen.
     Deferred,
+    /// The server keeps failing (5xx) on this batch: it is narrowed instead of waited for.
+    Narrow(ApiFailure),
 }
 
+/// `strike` is told of each server error (5xx) and says whether the batch should be narrowed
+/// now instead of waited for.
 fn with_retries<T>(
     ctx: &mut Ctx,
     store: &Store,
     mut call: impl FnMut() -> std::result::Result<T, ApiFailure>,
+    strike: &mut dyn FnMut(&ApiFailure) -> Result<bool>,
 ) -> Result<std::result::Result<T, Final>> {
     let mut tries = 0;
     loop {
@@ -45,6 +50,9 @@ fn with_retries<T>(
                     .unwrap_or(0)
                     .saturating_add(1);
                 store.sync_set("failures", &failures.to_string())?;
+                if f.status >= 500 && strike(&f)? {
+                    return Ok(Err(Final::Narrow(f)));
+                }
                 let wait = rules::wait_after(failures, &f, random());
                 if wait <= rules::MAX_SLEEP && tries < TRIES_PER_RUN {
                     (ctx.sleep)(wait);
@@ -127,6 +135,7 @@ fn next_batch(
     installation: uuid::Uuid,
     end: i64,
     max_items: usize,
+    strikes: Option<rules::Strikes>,
     tally: &mut Tally,
 ) -> Result<Next> {
     let rows = store.queued(&granted.active, end, max_items)?;
@@ -142,7 +151,12 @@ fn next_batch(
     };
     let mut broken = invalid.len() as u64;
     let early = drop_before_window(&mut items, granted, &mut local);
-    let packed = rules::pack(installation, &items, &reports, max_items);
+    let mut limit = rules::Strikes::limit(strikes, items.first().map(|i| i.id), max_items);
+    if limit == 0 && reports.is_empty() {
+        // The coverage that was to go alone is gone (sent, or its source no longer active).
+        limit = crate::contract::MAX_BATCH_OBSERVATIONS;
+    }
+    let packed = rules::pack(installation, &items, &reports, limit);
     if packed.as_ref().err() == Some(&Unpacked::TooBig) && !items.is_empty() {
         // One observation alone is over the size limit: it can never be sent.
         local.remove_items.push(items[0].id);
@@ -245,6 +259,56 @@ fn refused(
     Ok(Flow::Again)
 }
 
+/// The batch the server keeps failing on (`Strikes`, as text).
+const STRIKES: &str = "serverStrikes";
+/// The items the server kept failing on even alone, by `item_key`, with its code.
+const STUCK: &str = "stuckItems";
+
+/// The server failed on the batch again and again: it is narrowed like a refused one, but
+/// nothing is dropped. An item that fails alone goes back to the end of the queue, so the rest
+/// can go, and `status` says it is there.
+fn server_failing(
+    store: &mut Store,
+    tally: &mut Tally,
+    f: &ApiFailure,
+    sent: Sent,
+) -> Result<Pass> {
+    let Some(head) = sent.items.first() else {
+        return Ok(Pass::Done(Some(1)));
+    };
+    let narrowed = |size| rules::Strikes {
+        head: head.id,
+        size,
+        count: 0,
+    };
+    match rules::narrow(sent.items.len(), sent.coverage.len()) {
+        Narrow::CoverageAlone => store.sync_set(STRIKES, &narrowed(0).text())?,
+        Narrow::Halve(n) => store.sync_set(STRIKES, &narrowed(n).text())?,
+        Narrow::DropItem | Narrow::DropCoverage => {
+            store.apply(&Change {
+                requeue: vec![Queued {
+                    id: head.id,
+                    payload: head.payload.clone(),
+                    queued_at: head.queued_at,
+                }],
+                ..Change::default()
+            })?;
+            let code = if crate::api::is_plain_code(&f.code) {
+                f.code.as_str()
+            } else {
+                "UNAVAILABLE"
+            };
+            let stuck = store.sync_get(STUCK)?;
+            if let Some(list) = rules::stuck_add(stuck.as_deref(), rules::item_key(head), code) {
+                store.sync_set(STUCK, &list)?;
+            }
+            store.sync_delete(&[STRIKES])?;
+            tally.stuck += 1;
+        }
+    }
+    Ok(Pass::Next)
+}
+
 /// Applies the server's answer to the buffer and to the numbers of the run, in one transaction.
 fn record(
     store: &mut Store,
@@ -265,7 +329,7 @@ fn record(
     store.apply(&Change {
         remove_items: applied.delete.clone(),
         requeue,
-        remove_coverage: sent.coverage,
+        remove_coverage: sent.coverage.clone(),
         rejected: applied
             .rejected
             .iter()
@@ -278,7 +342,14 @@ fn record(
     }
     tally.accepted += applied.accepted;
     tally.sent_any = true;
-    store.sync_delete(&["failures", "nextAttemptAt", "lastError"])?;
+    store.sync_delete(&["failures", "nextAttemptAt", "lastError", STRIKES])?;
+    let stuck = store.sync_get(STUCK)?;
+    if stuck.is_some() {
+        match rules::stuck_remove(stuck.as_deref(), sent.items.iter().map(rules::item_key)) {
+            Some(left) => store.sync_set(STUCK, &left)?,
+            None => store.sync_delete(&[STUCK])?,
+        }
+    }
     store.sync_set("lastSentAt", &now().to_string())?;
     Ok(())
 }
@@ -334,6 +405,7 @@ pub(super) fn upload(
     }
     let (waiting, coverage) = store.pending_counts()?;
     if waiting + coverage == 0 {
+        store.sync_delete(&[STUCK, STRIKES])?;
         return Ok(None);
     }
     let Some(installation) = uuid::Uuid::parse_str(&store.installation_id()?)
@@ -343,10 +415,10 @@ pub(super) fn upload(
         return say(ctx, m::BAD_INSTALLATION_ID, 1).map(Some);
     };
     // What the company authorized now, and from when.
-    let view = match with_retries(ctx, store, || status_of(c))? {
+    let view = match with_retries(ctx, store, || status_of(c), &mut |_| Ok(false))? {
         Ok(v) => v,
         Err(Final::Deferred) => return Ok(Some(1)),
-        Err(Final::Failure(f)) => return stop(ctx, store, &f),
+        Err(Final::Failure(f) | Final::Narrow(f)) => return stop(ctx, store, &f),
     };
     let run = Run {
         granted: granted(store, &view, tally)?,
@@ -378,12 +450,16 @@ fn pass(
     run: &Run,
     max_items: &mut usize,
 ) -> Result<Pass> {
+    let strikes = store
+        .sync_get(STRIKES)?
+        .and_then(|t| rules::Strikes::parse(&t));
     let next = next_batch(
         store,
         &run.granted,
         run.installation,
         run.end,
         *max_items,
+        strikes,
         tally,
     )?;
     let packed = match next.packed {
@@ -408,13 +484,33 @@ fn pass(
             .map(|(id, _)| *id)
             .collect(),
     };
-    let answer = with_retries(ctx, store, || {
-        run.client
-            .post_json_gzip::<IngestResults>(INGEST, &packed.json, Some(&run.signer))
-    })?;
+    let head = next
+        .items
+        .first()
+        .map(|i| i.id)
+        .filter(|_| packed.items > 0);
+    let answer = with_retries(
+        ctx,
+        store,
+        || {
+            run.client
+                .post_json_gzip::<IngestResults>(INGEST, &packed.json, Some(&run.signer))
+        },
+        &mut |_| {
+            // Only a batch with observations can be narrowed.
+            let Some(head) = head else { return Ok(false) };
+            let previous = store
+                .sync_get(STRIKES)?
+                .and_then(|t| rules::Strikes::parse(&t));
+            let now = rules::Strikes::add(previous, head, packed.items);
+            store.sync_set(STRIKES, &now.text())?;
+            Ok(now.count >= rules::SERVER_ERRORS_TO_NARROW)
+        },
+    )?;
     let raw = match answer {
         Ok(raw) => raw,
         Err(Final::Deferred) => return Ok(Pass::Done(Some(1))),
+        Err(Final::Narrow(f)) => return server_failing(store, tally, &f, sent()),
         Err(Final::Failure(f)) => {
             return Ok(match refused(ctx, store, tally, &f, sent(), max_items)? {
                 Flow::Again => Pass::Next,
