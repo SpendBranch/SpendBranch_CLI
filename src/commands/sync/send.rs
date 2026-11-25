@@ -10,7 +10,7 @@ use crate::infra::{
     http::{Client, Signer},
     store::{Change, Queued, Store},
 };
-use crate::sync::{self as rules, Failed, TRIES_PER_RUN};
+use crate::sync::{self as rules, Failed, TRIES_PER_RUN, Unpacked};
 use std::collections::BTreeMap;
 
 /// A call to the server, tried again while the trouble looks passing. `Err(Final)` is what is
@@ -106,8 +106,9 @@ fn granted(store: &Store, view: &StatusView, tally: &mut Tally) -> Result<Grante
 struct Next {
     items: Vec<rules::Item>,
     reports: Vec<(i64, CoverageReport)>,
-    /// `None` when there is nothing to send (or one item alone is too big and was removed).
-    packed: Option<rules::Packed>,
+    /// `Err` when there is nothing to send (or one item alone is too big and was removed), or
+    /// no batch can be built.
+    packed: std::result::Result<rules::Packed, Unpacked>,
     /// Rows left the buffer without being sent.
     removed: bool,
 }
@@ -136,7 +137,7 @@ fn next_batch(
     let mut broken = invalid.len() as u64;
     let early = drop_before_window(&mut items, granted, &mut local);
     let packed = rules::pack(installation, &items, &reports, max_items);
-    if packed.is_none() && !items.is_empty() {
+    if packed.as_ref().err() == Some(&Unpacked::TooBig) && !items.is_empty() {
         // One observation alone is over the size limit: it can never be sent.
         local.remove_items.push(items[0].id);
         broken += 1;
@@ -343,6 +344,12 @@ pub(super) fn upload(
     if waiting + coverage == 0 {
         return Ok(None);
     }
+    let Some(installation) = uuid::Uuid::parse_str(&store.installation_id()?)
+        .ok()
+        .filter(|id| rules::installation_ok(*id))
+    else {
+        return say(ctx, m::BAD_INSTALLATION_ID, 1).map(Some);
+    };
     // What the company authorized now, and from when.
     let view = match with_retries(ctx, store, || status_of(c))? {
         Ok(v) => v,
@@ -351,7 +358,7 @@ pub(super) fn upload(
     };
     let run = Run {
         granted: granted(store, &view, tally)?,
-        installation: uuid::Uuid::parse_str(&store.installation_id()?)?,
+        installation,
         signer: Signer {
             device: &c.device,
             key: &c.key,
@@ -387,13 +394,20 @@ fn pass(
         *max_items,
         tally,
     )?;
-    let Some(packed) = next.packed else {
+    let packed = match next.packed {
+        Ok(packed) => packed,
+        // Not the fault of any observation: the run stops and the buffer stays.
+        Err(Unpacked::Invalid) => {
+            return Ok(Pass::Done(say(ctx, m::BAD_INSTALLATION_ID, 1).map(Some)?));
+        }
         // What was behind the removed rows is next; with nothing removed, nothing is left.
-        return Ok(if next.removed {
-            Pass::Next
-        } else {
-            Pass::Done(None)
-        });
+        Err(_) => {
+            return Ok(if next.removed {
+                Pass::Next
+            } else {
+                Pass::Done(None)
+            });
+        }
     };
     let sent = || Sent {
         items: &next.items[..packed.items],

@@ -2,7 +2,7 @@
 use serde_json::json;
 use spendbranch::api::{ApiFailure, ItemOutcome};
 use spendbranch::contract::{CoverageReport, Iso, UsageObservation};
-use spendbranch::sync::{self, Failed, Item};
+use spendbranch::sync::{self, Failed, Item, Unpacked};
 use std::time::Duration;
 
 fn observation(event: &str, session: &str, at: &str) -> UsageObservation {
@@ -126,7 +126,7 @@ fn a_batch_is_at_most_500_observations_and_50_reports_and_never_empty() {
     let p = sync::pack(id, &[], &reports, 500).unwrap();
     assert_eq!((p.items, p.coverage), (0, 50), "reports alone are a batch");
     assert!(
-        sync::pack(id, &[], &[], 500).is_none(),
+        matches!(sync::pack(id, &[], &[], 500), Err(Unpacked::Nothing)),
         "nothing to send is no batch"
     );
     let v: serde_json::Value =
@@ -149,9 +149,24 @@ fn a_batch_over_the_size_is_halved_until_it_fits_and_one_that_cannot_is_refused(
     assert!(p.json.len() <= one * 10);
     assert_eq!(p.items, 8, "64 -> 32 -> 16 -> 8");
     assert!(
-        sync::pack_within(id, &all, &[], 500, one - 1).is_none(),
+        matches!(
+            sync::pack_within(id, &all, &[], 500, one - 1),
+            Err(Unpacked::TooBig)
+        ),
         "one alone is too big"
     );
+}
+
+#[test]
+fn a_batch_that_cannot_be_built_is_told_apart_from_one_that_is_too_big() {
+    // Version 0 is not a standard UUID: no observation is at fault, so none may be blamed.
+    let bad = uuid::Uuid::parse_str("00000000-0000-0000-0000-000000000001").unwrap();
+    assert!(matches!(
+        sync::pack(bad, &items(3), &[], 500),
+        Err(Unpacked::Invalid)
+    ));
+    assert!(!sync::installation_ok(bad));
+    assert!(sync::installation_ok(uuid::Uuid::new_v4()));
 }
 
 #[test]

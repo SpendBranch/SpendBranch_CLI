@@ -295,6 +295,7 @@ pub fn different_fields(agent: &str) -> String {
 
 pub const NO_SOURCE_ON: &str =
     "No source is turned on. Run `spendbranch enable claude-code` or `spendbranch enable codex`.";
+pub const BAD_INSTALLATION_ID: &str = "The installation id in the local state is not valid, so nothing can be sent. The buffer was kept. Run `spendbranch uninstall` and set up again, or report it.";
 pub const SESSION_OWNED_STOP: &str = "A session in the buffer belongs to another member, so it was discarded and the upload stopped. Run `spendbranch status` to check that this device is still connected.";
 
 /// One line of the summary for a code and how many events it covers.

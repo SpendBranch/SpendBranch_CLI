@@ -384,6 +384,30 @@ fn a_batch_the_server_calls_out_of_contract_is_dropped_and_counted_and_the_rest_
 }
 
 #[test]
+fn an_installation_id_that_cannot_go_in_a_batch_stops_the_run_and_keeps_the_buffer() {
+    let rig = Rig::ready();
+    rig.buffer(now_ms(), events(3));
+    rig.store()
+        .meta_set("installation_id", "00000000-0000-0000-0000-000000000001")
+        .unwrap();
+    let out = rig.run(&["sync"]);
+    assert_eq!(out.code, 1, "{}", out.text);
+    assert!(
+        out.text.contains(messages::BAD_INSTALLATION_ID),
+        "{}",
+        out.text
+    );
+    assert_eq!(rig.buffered(), 3, "no event is blamed for it");
+    assert!(rig.store().rejected_counts().unwrap().is_empty());
+    assert!(
+        !rig.paths_seen()
+            .iter()
+            .any(|p| p == "/api/ingest/v1/events"),
+        "nothing is sent"
+    );
+}
+
+#[test]
 fn clock_skew_puts_an_item_back_and_after_a_day_it_is_dropped_and_counted() {
     let rig = Rig::ready();
     rig.buffer(

@@ -21,6 +21,13 @@ impl Serialize for InstallationId {
     }
 }
 
+/// Whether the id can go in a batch: nil, max, or a version 1 to 8 RFC 4122 UUID.
+pub fn standard_installation_id(id: uuid::Uuid) -> bool {
+    id.is_nil()
+        || id.is_max()
+        || ((1..=8).contains(&id.get_version_num()) && id.get_variant() == uuid::Variant::RFC4122)
+}
+
 impl IngestBatch {
     /// `None` when the batch breaks a limit (500 observations, 50 coverage reports), is
     /// empty, or the id is not a standard UUID.
@@ -29,11 +36,7 @@ impl IngestBatch {
         observations: Vec<UsageObservation>,
         coverage: Vec<CoverageReport>,
     ) -> Option<Self> {
-        let standard = installation_id.is_nil()
-            || installation_id.is_max()
-            || ((1..=8).contains(&installation_id.get_version_num())
-                && installation_id.get_variant() == uuid::Variant::RFC4122);
-        (standard
+        (standard_installation_id(installation_id)
             && observations.len() <= MAX_BATCH_OBSERVATIONS
             && coverage.len() <= MAX_BATCH_COVERAGE
             && observations.len() + coverage.len() > 0)

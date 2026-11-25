@@ -70,16 +70,33 @@ pub struct Packed {
     pub json: Vec<u8>,
 }
 
+/// Why there is no batch.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Unpacked {
+    /// Nothing to send.
+    Nothing,
+    /// The first observation alone is over the size: it can never be sent.
+    TooBig,
+    /// The batch cannot be built at all (the installation id is not one the contract takes):
+    /// no observation is at fault.
+    Invalid,
+}
+
+/// Whether this installation id can go in a batch. Checked once before a run, so a bad id
+/// stops the run instead of being blamed on the observations.
+pub fn installation_ok(installation_id: uuid::Uuid) -> bool {
+    crate::contract::standard_installation_id(installation_id)
+}
+
 /// The largest batch from the front of the queue that fits the limits: at most 500
 /// observations (and `max_items`), 50 coverage reports and 1 MiB of JSON. A batch over the
-/// size is halved until it fits. `None` when there is nothing to send, or one observation
-/// alone is over the size.
+/// size is halved until it fits.
 pub fn pack(
     installation_id: uuid::Uuid,
     items: &[Item],
     coverage: &[(i64, CoverageReport)],
     max_items: usize,
-) -> Option<Packed> {
+) -> Result<Packed, Unpacked> {
     pack_within(installation_id, items, coverage, max_items, MAX_BODY_BYTES)
 }
 
@@ -90,28 +107,29 @@ pub fn pack_within(
     coverage: &[(i64, CoverageReport)],
     max_items: usize,
     max_bytes: usize,
-) -> Option<Packed> {
+) -> Result<Packed, Unpacked> {
     let mut n = items.len().min(MAX_BATCH_OBSERVATIONS).min(max_items);
     let c = coverage.len().min(MAX_BATCH_COVERAGE);
     loop {
         if n + c == 0 {
-            return None;
+            return Err(Unpacked::Nothing);
         }
         let batch = IngestBatch::new(
             installation_id,
             items[..n].iter().map(|i| i.observation.clone()).collect(),
             coverage[..c].iter().map(|(_, r)| r.clone()).collect(),
-        )?;
-        let json = serde_json::to_vec(&batch).ok()?;
+        )
+        .ok_or(Unpacked::Invalid)?;
+        let json = serde_json::to_vec(&batch).map_err(|_| Unpacked::Invalid)?;
         if json.len() <= max_bytes {
-            return Some(Packed {
+            return Ok(Packed {
                 items: n,
                 coverage: c,
                 json,
             });
         }
         if n <= 1 {
-            return None;
+            return Err(Unpacked::TooBig);
         }
         n = n.div_ceil(2);
     }
