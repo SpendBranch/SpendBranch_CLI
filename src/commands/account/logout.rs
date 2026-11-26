@@ -2,7 +2,10 @@
 use super::super::{Ctx, Result, say};
 use super::{Loaded, load, open, revoke};
 use crate::cli::messages as m;
-use crate::infra::{keys::Slot, scheduler};
+use crate::infra::{
+    keys::{self, Slot},
+    scheduler,
+};
 
 /// What the server said about the revocation.
 pub enum Revoked {
@@ -11,6 +14,8 @@ pub enum Revoked {
     Already,
     /// Not reached, or it refused: the device must be revoked on the web.
     No,
+    /// Not asked: the stored key must not be used (the text says why). Revoke it on the web.
+    NotTried(String),
 }
 
 /// What `disconnect` did.
@@ -42,7 +47,10 @@ pub fn disconnect(ctx: &mut Ctx, wait: Wait) -> Result<Disconnected> {
             Err(f) if f.code == "UNAUTHENTICATED" => Revoked::Already,
             Err(_) => Revoked::No,
         })?,
-        _ => Revoked::No,
+        _ => match account.keys.load(Slot::Active) {
+            Err(e @ keys::Error::KeyOutsideProfile(_)) => Revoked::NotTried(e.to_string()),
+            _ => Revoked::No,
+        },
     };
     // Whatever the server said, this device stops being able to sign. The organization's id
     // and the server stay, so a later login to another organization is noticed.
@@ -68,6 +76,10 @@ pub fn logout(ctx: &mut Ctx) -> Result<i32> {
         Revoked::Yes => m::LOGOUT_REVOKED,
         Revoked::Already => m::LOGOUT_ALREADY_REVOKED,
         Revoked::No => m::LOGOUT_NOT_REVOKED,
+        Revoked::NotTried(why) => {
+            say(ctx, &why, 0)?;
+            m::LOGOUT_NOT_REVOKED
+        }
     };
     say(ctx, said, 0)?;
     for why in kept {

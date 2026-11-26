@@ -373,3 +373,30 @@ fn on_windows_a_shared_folder_stays_on_the_path() {
         "C:\\tools is not ours"
     );
 }
+
+#[cfg(windows)]
+#[test]
+fn on_windows_uninstall_with_a_key_outside_the_profile_skips_the_revoke_and_removes_the_rest() {
+    let rig = Rig::new();
+    authorize(&rig);
+    let (data, _) = home(&rig);
+    assert_eq!(run(&rig, &["login"], "y\n", false).code, 0);
+    let other = tempfile::tempdir().unwrap();
+    let (_, text) = home(&rig);
+    let out = rig.run_with(
+        &["uninstall", "--yes"],
+        "",
+        false,
+        &[
+            ("SPENDBRANCH_HOME", &text),
+            ("USERPROFILE", other.path().to_str().unwrap()),
+        ],
+    );
+    assert!(out.text.contains(m::UNINSTALL_NOT_REVOKED), "{}", out.text);
+    assert!(rig.server.revoked_reason("dev-1").is_none(), "no revoke");
+    assert!(
+        !data.exists(),
+        "the data folder, key file included, is gone"
+    );
+    assert_eq!(rig.system.removed.borrow().as_slice(), [PathBuf::from(EXE)]);
+}

@@ -193,7 +193,7 @@ fn a_key_file_that_is_already_there_wins_over_the_keychain() {
     KeyFiles::new(dir.path())
         .save(Slot::Pending, &key(5))
         .unwrap();
-    let store = keys::open(dir.path(), "inst-1", None);
+    let store = keys::open(dir.path(), "inst-1", Some(dir.path()));
     assert_eq!(store.backend(), Backend::File);
     assert!(same(&store.load(Slot::Pending).unwrap(), &key(5)));
 }
@@ -212,7 +212,7 @@ fn new_keys_are_random() {
 fn the_real_keychain_is_probed_without_hanging() {
     let dir = tempfile::tempdir().unwrap();
     let started = std::time::Instant::now();
-    let store = keys::open(dir.path(), "probe-installation", None);
+    let store = keys::open(dir.path(), "probe-installation", Some(dir.path()));
     println!(
         "backend: {:?} after {:?}",
         store.backend(),
@@ -290,4 +290,37 @@ fn on_windows_a_key_file_outside_the_profile_is_refused_and_nothing_is_written()
             "no key file and no temporary copy"
         );
     }
+}
+
+#[cfg(windows)]
+#[test]
+fn on_windows_a_key_file_already_outside_the_profile_is_not_read_and_is_left_in_place() {
+    let profile = tempfile::tempdir().unwrap();
+    let elsewhere = tempfile::tempdir().unwrap();
+    let outside = elsewhere.path().join("spendbranch");
+    KeyFiles::new(&outside).save(Slot::Active, &key(3)).unwrap();
+    for profile in [Some(profile.path()), None] {
+        let files = KeyFiles::in_profile(&outside, profile);
+        let err = files.load(Slot::Active).unwrap_err();
+        assert!(matches!(err, Error::KeyOutsideProfile(_)), "{err:?}");
+        let text = err.to_string();
+        assert!(
+            text.contains("outside your user profile")
+                && text.contains("SPENDBRANCH_HOME")
+                && text.contains("spendbranch login"),
+            "{text}"
+        );
+        assert!(!text.contains(key(3).to_text().as_str()));
+    }
+    assert!(
+        outside.join("device.key").exists(),
+        "the file is not deleted"
+    );
+    // The guarded store picks the file (it is there) and refuses it the same way.
+    let store = keys::open(&outside, "inst-outside", Some(profile.path()));
+    assert_eq!(store.backend(), Backend::File);
+    assert!(matches!(
+        store.load(Slot::Active),
+        Err(Error::KeyOutsideProfile(_))
+    ));
 }

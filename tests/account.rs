@@ -880,3 +880,59 @@ fn on_windows_login_refuses_a_key_file_outside_the_profile_before_asking_the_ser
             .is_some()
     );
 }
+
+/// The data folder of a rig that logged in, now seen from a profile it is not inside.
+#[cfg(windows)]
+fn as_another_profile(profile: &std::path::Path) -> [(&'static str, &str); 1] {
+    [("USERPROFILE", profile.to_str().unwrap())]
+}
+
+#[cfg(windows)]
+#[test]
+fn on_windows_a_key_file_already_outside_the_profile_stops_sync_and_status_before_the_server() {
+    let rig = Rig::ready();
+    let other = tempfile::tempdir().unwrap();
+    let env = as_another_profile(other.path());
+    let asked = rig.paths_seen().len();
+    for command in [&["sync"][..], &["status"], &["relay"]] {
+        let out = rig.run_with(command, "", false, &env);
+        assert_ne!(out.code, 0, "{command:?}: {}", out.text);
+        assert!(
+            out.text.contains("outside your user profile")
+                && out.text.contains("SPENDBRANCH_HOME")
+                && out.text.contains("spendbranch login"),
+            "{command:?}: {}",
+            out.text
+        );
+    }
+    assert_eq!(rig.paths_seen().len(), asked, "nothing was sent");
+    assert!(rig.key_file(Slot::Active), "the file is left in place");
+    // Inside the profile it works as before.
+    assert_eq!(rig.run(&["status"]).code, 0);
+    assert!(rig.paths_seen().len() > asked);
+}
+
+#[cfg(windows)]
+#[test]
+fn on_windows_logout_with_a_key_outside_the_profile_skips_the_revoke_and_clears_what_is_local() {
+    let rig = Rig::ready();
+    let other = tempfile::tempdir().unwrap();
+    let out = rig.run_with(&["logout"], "", false, &as_another_profile(other.path()));
+    assert_eq!(out.code, 0, "{}", out.text);
+    assert!(
+        out.text.contains(messages::LOGOUT_NOT_REVOKED),
+        "{}",
+        out.text
+    );
+    assert!(
+        out.text.contains("outside your user profile"),
+        "it says why: {}",
+        out.text
+    );
+    assert!(
+        !rig.paths_seen().iter().any(|p| p.ends_with("/logout")),
+        "the key was not used to sign a revoke"
+    );
+    assert!(!rig.store().is_connected().unwrap());
+    assert!(!rig.key_file(Slot::Active), "logout deletes the local key");
+}
