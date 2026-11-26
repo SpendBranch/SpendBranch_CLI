@@ -149,7 +149,24 @@ impl Rig {
         }
     }
 
+    /// A `sync` that finds the lock held is run again for a short while. The tests share one
+    /// process: a child another test forks (before its `exec`) holds a copy of every open file,
+    /// so it can keep this test's `sync.lock` locked a moment after the command dropped it.
+    /// The lock rule itself is proven in `tests/cli.rs`, which does not use this harness.
     pub fn run_with(&self, args: &[&str], input: &str, tty: bool, extra: &[(&str, &str)]) -> Out {
+        let busy = format!("{}\n", spendbranch::cli::messages::SYNC_RUNNING);
+        let mut out = self.run_once(args, input, tty, extra);
+        for _ in 0..40 {
+            if args.first() != Some(&"sync") || out.code != 0 || out.text != busy {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(50));
+            out = self.run_once(args, input, tty, extra);
+        }
+        out
+    }
+
+    fn run_once(&self, args: &[&str], input: &str, tty: bool, extra: &[(&str, &str)]) -> Out {
         let mut env: HashMap<String, String> = [
             ("SPENDBRANCH_HOME", self.dir.path().to_str().unwrap()),
             ("SPENDBRANCH_KEY_STORE", "file"),

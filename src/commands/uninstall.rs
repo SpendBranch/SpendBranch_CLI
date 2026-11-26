@@ -114,7 +114,7 @@ fn disconnect(ctx: &mut Ctx) -> Result<(Mark, String)> {
     Ok(match revoked {
         Revoked::Yes => (Mark::Ok, m::UNINSTALL_REVOKED.into()),
         Revoked::Already => (Mark::Ok, m::UNINSTALL_ALREADY_REVOKED.into()),
-        Revoked::No => (Mark::Warn, m::UNINSTALL_NOT_REVOKED.into()),
+        Revoked::No | Revoked::NotTried(_) => (Mark::Warn, m::UNINSTALL_NOT_REVOKED.into()),
     })
 }
 

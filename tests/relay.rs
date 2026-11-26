@@ -3,7 +3,7 @@ use crate::rig;
 
 use rig::{Rig, authorize, free_port, payload, record};
 use serde_json::{Value, json};
-use spendbranch::infra::relay_server::{self, Event};
+use spendbranch::infra::relay_server::{self, Event, PeerChecks};
 use std::{
     fs,
     io::{Read, Write},
@@ -12,7 +12,7 @@ use std::{
     process::{Command, Stdio},
     sync::{
         Arc, Mutex,
-        atomic::{AtomicBool, Ordering},
+        atomic::{AtomicBool, AtomicUsize, Ordering},
         mpsc,
     },
     thread,
@@ -25,6 +25,8 @@ const TOKEN: &str = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789a
 const AUTH: &str =
     "X-SpendBranch-Token: 0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef\r\n";
 
+type SlowCheck = Box<dyn Fn() -> bool + Send + Sync>;
+
 struct Relay {
     port: u16,
     stop: Arc<AtomicBool>,
@@ -36,6 +38,15 @@ struct Relay {
 impl Relay {
     /// `answer` is what the forward step does with a payload.
     fn start(answer: impl Fn(&Value) -> Result<u64, String> + Sync + Send + 'static) -> Self {
+        Self::start_with(answer, None)
+    }
+
+    /// With `slow` standing in for the user check that runs on each connection's thread (the
+    /// check at the door lets everyone in).
+    fn start_with(
+        answer: impl Fn(&Value) -> Result<u64, String> + Sync + Send + 'static,
+        slow: Option<SlowCheck>,
+    ) -> Self {
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let port = listener.local_addr().unwrap().port();
         let (stop, sent) = (
@@ -49,7 +60,18 @@ impl Relay {
                 sent2.lock().unwrap().push(p.clone());
                 answer(p)
             };
-            relay_server::serve(&listener, &stop2, TOKEN, &forward, &tx).unwrap();
+            match slow {
+                None => relay_server::serve(&listener, &stop2, TOKEN, &forward, &tx).unwrap(),
+                Some(slow) => {
+                    let slow = move |_: &TcpStream, _: std::net::SocketAddr| slow();
+                    let checks = PeerChecks {
+                        at_accept: &|_, _| true,
+                        on_connection: &slow,
+                    };
+                    relay_server::serve_checked(&listener, &stop2, TOKEN, &forward, &tx, checks)
+                        .unwrap()
+                }
+            }
         });
         Self {
             port,
@@ -417,6 +439,99 @@ fn a_client_that_stalls_does_not_block_the_others() {
     let started = Instant::now();
     assert_eq!(relay.post("", &sample()).0, 200);
     assert!(started.elapsed() < Duration::from_secs(2));
+}
+
+/// A user check that holds every connection until `open` is set (at most 10 s), then says `pass`.
+fn held_check(open: &Arc<AtomicBool>, waiting: &Arc<AtomicUsize>, pass: bool) -> SlowCheck {
+    let (open, waiting) = (open.clone(), waiting.clone());
+    Box::new(move || {
+        waiting.fetch_add(1, Ordering::SeqCst);
+        let until = Instant::now() + Duration::from_secs(10);
+        while !open.load(Ordering::SeqCst) && Instant::now() < until {
+            thread::sleep(Duration::from_millis(5));
+        }
+        pass
+    })
+}
+
+fn wait_for(count: &AtomicUsize, n: usize) {
+    let until = Instant::now() + Duration::from_secs(5);
+    while count.load(Ordering::SeqCst) < n {
+        assert!(
+            Instant::now() < until,
+            "only {} of {n}",
+            count.load(Ordering::SeqCst)
+        );
+        thread::sleep(Duration::from_millis(5));
+    }
+}
+
+#[test]
+fn a_slow_user_check_runs_on_the_connection_and_does_not_hold_up_the_next_one() {
+    let (open, waiting) = (
+        Arc::new(AtomicBool::new(false)),
+        Arc::new(AtomicUsize::new(0)),
+    );
+    let first = Arc::new(AtomicBool::new(true));
+    let held = held_check(&open, &waiting, true);
+    // Only the first connection is held; the ones after it pass at once.
+    let check: SlowCheck = Box::new(move || !first.swap(false, Ordering::SeqCst) || held());
+    let relay = Relay::start_with(|_| Ok(0), Some(check));
+    let _held = TcpStream::connect(("127.0.0.1", relay.port)).unwrap();
+    wait_for(&waiting, 1);
+    let started = Instant::now();
+    assert_eq!(relay.post("", &sample()).0, 200);
+    assert!(
+        started.elapsed() < Duration::from_secs(2),
+        "{:?}",
+        started.elapsed()
+    );
+    assert!(
+        !open.load(Ordering::SeqCst),
+        "answered while the first was still being checked"
+    );
+    open.store(true, Ordering::SeqCst);
+}
+
+#[test]
+fn a_client_the_user_check_refuses_is_closed_on_without_a_byte() {
+    let (open, waiting) = (
+        Arc::new(AtomicBool::new(true)),
+        Arc::new(AtomicUsize::new(0)),
+    );
+    let relay = Relay::start_with(|_| Ok(0), Some(held_check(&open, &waiting, false)));
+    assert_eq!(relay.post("", &sample()), (0, String::new()));
+    assert!(relay.sent.lock().unwrap().is_empty());
+    assert_eq!(waiting.load(Ordering::SeqCst), 1);
+}
+
+#[test]
+fn connections_waiting_for_the_user_check_count_against_the_limit() {
+    let (open, waiting) = (
+        Arc::new(AtomicBool::new(false)),
+        Arc::new(AtomicUsize::new(0)),
+    );
+    let relay = Relay::start_with(|_| Ok(0), Some(held_check(&open, &waiting, true)));
+    let held: Vec<TcpStream> = (0..32)
+        .map(|_| TcpStream::connect(("127.0.0.1", relay.port)).unwrap())
+        .collect();
+    wait_for(&waiting, 32);
+    // The full relay answers from its accept loop without reading the request, so the 33rd
+    // client reads before it writes: bytes it had sent and nobody read would make the OS reset
+    // the connection (macOS does) and lose the status.
+    let mut extra = TcpStream::connect(("127.0.0.1", relay.port)).unwrap();
+    extra
+        .set_read_timeout(Some(Duration::from_secs(5)))
+        .unwrap();
+    let mut text = String::new();
+    let _ = extra.read_to_string(&mut text);
+    assert!(
+        text.starts_with("HTTP/1.1 503"),
+        "the 33rd waits for no check: {text:?}"
+    );
+    assert_eq!(waiting.load(Ordering::SeqCst), 32);
+    open.store(true, Ordering::SeqCst);
+    drop(held);
 }
 
 // --- the real program -----------------------------------------------------------------

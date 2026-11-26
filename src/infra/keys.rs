@@ -48,6 +48,9 @@ pub enum Error {
     /// Windows: the key file would go in this folder, outside the user's profile, where the
     /// profile's access rules do not keep other users out. Nothing was written.
     OutsideProfile(PathBuf),
+    /// Windows: a key file is already in this folder, outside the user's profile. It is not
+    /// read or used (another user may have read it), and it is not deleted either.
+    KeyOutsideProfile(PathBuf),
     /// The system has no source of randomness.
     Entropy,
     Io(io::Error),
@@ -70,6 +73,11 @@ impl fmt::Display for Error {
             Self::OutsideProfile(dir) => write!(
                 f,
                 "the device key would be saved in {}, outside your user profile, where other users of this computer may be able to read it. Set SPENDBRANCH_HOME to a folder inside your user profile, or make Windows Credential Manager available, then run `spendbranch login` again",
+                dir.display()
+            ),
+            Self::KeyOutsideProfile(dir) => write!(
+                f,
+                "the device key file in {} is outside your user profile, where other users of this computer may be able to read it, so it is not used. Move the data folder (SPENDBRANCH_HOME) to a folder inside your user profile, or make Windows Credential Manager available and delete that file, then run `spendbranch login` again",
                 dir.display()
             ),
             Self::Entropy => f.write_str("the system has no source of randomness"),
@@ -103,7 +111,7 @@ pub fn generate() -> Result<DeviceKey> {
 
 /// The keychain if it works and no key file exists yet, else the file. A key file that is
 /// already there wins, so a key saved without a keychain is not lost when one appears.
-/// `profile` is the user's home folder: on Windows a key file is only written inside it.
+/// `profile` is the user's home folder: on Windows a key file is only written or read inside it.
 pub fn open(dir: &Path, installation_id: &str, profile: Option<&Path>) -> Box<dyn KeyStore> {
     let files = KeyFiles::in_profile(dir, profile);
     if !files.exists()
@@ -192,8 +200,8 @@ impl KeyStore for Keychain {
 
 pub struct KeyFiles {
     dir: PathBuf,
-    /// `Some`: on Windows, keys are only written inside this profile folder (`Some(None)`:
-    /// the profile is unknown, so nowhere).
+    /// `Some`: on Windows, keys are only written or read inside this profile folder
+    /// (`Some(None)`: the profile is unknown, so nowhere).
     profile: Option<Option<PathBuf>>,
 }
 
@@ -206,8 +214,9 @@ impl KeyFiles {
         }
     }
 
-    /// Files in `dir`, written on Windows only if `dir` is inside `profile`: a folder elsewhere
-    /// does not get the profile's access rules, so another user could read the key.
+    /// Files in `dir`, written or read on Windows only if `dir` is inside `profile`: a folder
+    /// elsewhere does not get the profile's access rules, so another user could read the key.
+    /// Deleting is still allowed (`logout`, `uninstall`).
     pub fn in_profile(dir: &Path, profile: Option<&Path>) -> Self {
         Self {
             dir: dir.to_owned(),
@@ -215,23 +224,20 @@ impl KeyFiles {
         }
     }
 
-    /// `Err` when the key must not be written here.
-    fn check_place(&self) -> Result<()> {
+    /// Windows: whether the guard is on and `dir` is not inside the profile.
+    fn outside_profile(&self) -> bool {
         #[cfg(windows)]
         if let Some(profile) = &self.profile {
-            let inside = profile.as_deref().is_some_and(|profile| {
+            return !profile.as_deref().is_some_and(|profile| {
                 match (resolved(&self.dir), resolved(profile)) {
                     (Some(dir), Some(profile)) => within_profile(&dir, &profile),
                     _ => false,
                 }
             });
-            if !inside {
-                return Err(Error::OutsideProfile(self.dir.clone()));
-            }
         }
         #[cfg(not(windows))]
         let _ = &self.profile;
-        Ok(())
+        false
     }
 
     fn path(&self, slot: Slot) -> PathBuf {
@@ -255,6 +261,13 @@ impl KeyStore for KeyFiles {
 
     fn load(&self, slot: Slot) -> Result<Option<DeviceKey>> {
         let path = self.path(slot);
+        // A key that sat outside the profile may have been read by someone else: never use it.
+        if self.outside_profile() {
+            return match path.try_exists() {
+                Ok(false) => Ok(None),
+                _ => Err(Error::KeyOutsideProfile(self.dir.clone())),
+            };
+        }
         let file = match fs::File::open(&path) {
             Ok(f) => f,
             Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(None),
@@ -274,7 +287,9 @@ impl KeyStore for KeyFiles {
     }
 
     fn save(&self, slot: Slot, key: &DeviceKey) -> Result<()> {
-        self.check_place()?;
+        if self.outside_profile() {
+            return Err(Error::OutsideProfile(self.dir.clone()));
+        }
         private_fs::create_dir(&self.dir)?;
         // Write beside it, then rename: a crash leaves the old key or the new one, never half.
         // The name has the slot and the process, so two writers never share a temporary file.
