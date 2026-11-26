@@ -38,7 +38,9 @@ These are the properties worth trying to break:
   On macOS, `spendbranch relay` runs `/usr/sbin/lsof` (full path, fixed arguments, no shell,
   a 2-second limit) to check that a client connecting to it belongs to the same user; Linux
   reads the same answer from `/proc/net/tcp`. A client whose owner cannot be confirmed is
-  refused.
+  refused. The `lsof` check runs on the connection's own thread and holds one of the relay's
+  32 connection slots while it waits, so a slow answer never stops other clients from being
+  accepted.
 - **The code does not need to be secret.** Security must not depend on anyone not having read
   this source. The only secret is a device's own private key, which never leaves its machine.
 

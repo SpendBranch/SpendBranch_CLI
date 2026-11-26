@@ -50,6 +50,19 @@ pub fn wake(port: u16) {
     let _ = TcpStream::connect((Ipv4Addr::LOCALHOST, port));
 }
 
+/// Whether a client runs as this user.
+pub type PeerCheck<'a> = &'a (dyn Fn(&TcpStream, SocketAddr) -> bool + Sync);
+
+/// The user checks, split by cost: `at_accept` is quick and runs before a connection takes a
+/// slot; `on_connection` may take seconds and runs on the connection's own thread, holding its
+/// slot, so a slow answer never holds up the next connection. A refused client is closed on
+/// before a byte is read or written.
+#[derive(Clone, Copy)]
+pub struct PeerChecks<'a> {
+    pub at_accept: PeerCheck<'a>,
+    pub on_connection: PeerCheck<'a>,
+}
+
 /// Serves until `stop` is set; after setting it, connect to the listener once, so the wait for
 /// the next connection ends. Connections are handled on their own threads, at most 32 at once.
 /// Only a request that carries `token` gets past the door.
@@ -60,6 +73,22 @@ pub fn serve(
     forward: Forward,
     events: &Sender<Event>,
 ) -> io::Result<()> {
+    let checks = PeerChecks {
+        at_accept: &same_user_quick,
+        on_connection: &same_user_slow,
+    };
+    serve_checked(listener, stop, token, forward, events, checks)
+}
+
+/// `serve`, with the user checks given.
+pub fn serve_checked(
+    listener: &TcpListener,
+    stop: &AtomicBool,
+    token: &str,
+    forward: Forward,
+    events: &Sender<Event>,
+    checks: PeerChecks,
+) -> io::Result<()> {
     let limit = Mutex::new(RateLimit::default());
     let active = AtomicUsize::new(0);
     thread::scope(|scope| {
@@ -69,9 +98,10 @@ pub fn serve(
                     if stop.load(Ordering::Relaxed) {
                         break;
                     }
-                    if !same_user(&stream, peer) {
+                    if !(checks.at_accept)(&stream, peer) {
                         continue; // another account: closed before a byte is read
                     }
+                    // Counted from here: a connection still being checked holds its slot.
                     if active.fetch_add(1, Ordering::SeqCst) >= MAX_CONNECTIONS {
                         active.fetch_sub(1, Ordering::SeqCst);
                         let _ = reply(&stream, 503);
@@ -79,7 +109,10 @@ pub fn serve(
                     }
                     let (limit, active, events) = (&limit, &active, events.clone());
                     scope.spawn(move || {
-                        let _ = handle(stream, peer, token, limit, forward, &events);
+                        // Another account: closed before a byte is read.
+                        if (checks.on_connection)(&stream, peer) {
+                            let _ = handle(stream, peer, token, limit, forward, &events);
+                        }
                         active.fetch_sub(1, Ordering::SeqCst);
                     });
                 }
@@ -98,10 +131,11 @@ pub fn serve(
 /// door. What cannot be found out is a no, except a system with no such table or tool at all.
 // ponytail: Windows (GetExtendedTcpTable) needs FFI, which this crate does not allow.
 pub fn same_user(stream: &TcpStream, peer: SocketAddr) -> bool {
-    #[cfg(target_os = "macos")]
-    {
-        same_user_by_lsof(stream, peer)
-    }
+    same_user_quick(stream, peer) && same_user_slow(stream, peer)
+}
+
+/// The part of `same_user` that only reads a table: Linux's `/proc/net/tcp`.
+fn same_user_quick(stream: &TcpStream, peer: SocketAddr) -> bool {
     #[cfg(all(unix, not(target_os = "macos")))]
     {
         let (SocketAddr::V4(peer), Ok(SocketAddr::V4(us))) = (peer, stream.local_addr()) else {
@@ -116,7 +150,20 @@ pub fn same_user(stream: &TcpStream, peer: SocketAddr) -> bool {
             Err(e) => e.kind() == io::ErrorKind::NotFound,
         }
     }
-    #[cfg(not(unix))]
+    #[cfg(not(all(unix, not(target_os = "macos"))))]
+    {
+        let _ = (stream, peer);
+        true
+    }
+}
+
+/// The part of `same_user` that starts a program and may take seconds: macOS's `lsof`.
+fn same_user_slow(stream: &TcpStream, peer: SocketAddr) -> bool {
+    #[cfg(target_os = "macos")]
+    {
+        same_user_by_lsof(stream, peer)
+    }
+    #[cfg(not(target_os = "macos"))]
     {
         let _ = (stream, peer);
         true
