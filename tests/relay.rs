@@ -516,10 +516,18 @@ fn connections_waiting_for_the_user_check_count_against_the_limit() {
         .map(|_| TcpStream::connect(("127.0.0.1", relay.port)).unwrap())
         .collect();
     wait_for(&waiting, 32);
-    assert_eq!(
-        relay.post("", &sample()).0,
-        503,
-        "the 33rd waits for no check"
+    // The full relay answers from its accept loop without reading the request, so the 33rd
+    // client reads before it writes: bytes it had sent and nobody read would make the OS reset
+    // the connection (macOS does) and lose the status.
+    let mut extra = TcpStream::connect(("127.0.0.1", relay.port)).unwrap();
+    extra
+        .set_read_timeout(Some(Duration::from_secs(5)))
+        .unwrap();
+    let mut text = String::new();
+    let _ = extra.read_to_string(&mut text);
+    assert!(
+        text.starts_with("HTTP/1.1 503"),
+        "the 33rd waits for no check: {text:?}"
     );
     assert_eq!(waiting.load(Ordering::SeqCst), 32);
     open.store(true, Ordering::SeqCst);
